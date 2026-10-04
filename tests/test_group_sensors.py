@@ -71,6 +71,11 @@ def platform(monkeypatch):
         for entity in entities:
             added.append(entity)
             registry.add(entity.entity_id, entity.unique_id)
+            if not getattr(hass, "defer_group_registration", False) or not str(entity.unique_id).startswith("bps_group_"):
+                entity.hass = hass
+                entity.ready = True
+                if hasattr(entity, "_bps_group_pending"):
+                    entity._bps_group_pending = False
     return hass, registry, module, add_entities, added
 
 
@@ -132,6 +137,7 @@ def test_group_state_buffers_while_entity_addition_is_scheduled(platform):
     import bps
     hass, registry, module, add, added = platform
     asyncio.run(module.async_setup_entry(hass, None, add))
+    hass.defer_group_registration = True
     sync = hass.data["bps"]["sync_group_sensors"]
     asyncio.run(sync([{"id": "rover", "name": "Rover"}]))
     eid = "sensor.bps_group_rover_bps_zone"
@@ -142,3 +148,20 @@ def test_group_state_buffers_while_entity_addition_is_scheduled(platform):
     asyncio.run(sensor.async_added_to_hass())
     bps.update_bps_sensor_state(hass, eid, "Pasture")
     assert sensor.state == "Pasture" and sensor.writes == 1
+
+
+def test_disabled_ha_group_entity_can_be_deleted_without_live_hass(platform):
+    hass, registry, module, add, added = platform
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    sync = hass.data["bps"]["sync_group_sensors"]
+    asyncio.run(sync([{"id": "rover", "name": "Rover"}]))
+    eid = "sensor.bps_group_rover_bps_zone"
+    sensor = hass.data["bps_sensors"][eid]
+    sensor.hass = None  # EntityPlatform.add_to_platform_abort for a disabled entry.
+    sensor._bps_group_pending = True
+    async def invalid_remove():
+        raise RuntimeError("no live HA entity")
+    sensor.async_remove = invalid_remove
+    asyncio.run(sync([]))
+    assert eid not in registry.entities
+    assert eid not in hass.data["bps_sensors"]

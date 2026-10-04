@@ -1157,7 +1157,10 @@ async def update_receiver_radii(hass, eids):
                         floor_sq = min(distance * distance,
                                        MIN_WEIGHT_RADIUS_M * MIN_WEIGHT_RADIUS_M)
                         horizontal = math.sqrt(max(distance * distance - dz * dz, floor_sq))
-                    receiver["cords"]["r"] = floor["scale"] * horizontal
+                    radius = floor["scale"] * horizontal
+                    if outdoor and (not math.isfinite(radius) or radius < 0):
+                        continue
+                    receiver["cords"]["r"] = radius
                     # Raw SLANT distance for the floor election: radii are in
                     # per-floor pixel scales and must not be compared across
                     # floors — and the dz correction must not leak in here

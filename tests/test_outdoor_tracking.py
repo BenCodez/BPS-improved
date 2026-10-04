@@ -88,7 +88,7 @@ def test_enabled_clear_path_equivalent_and_executor_used(hass):
     json.dumps(result, allow_nan=False)
 
 
-@pytest.mark.parametrize("bad", ["unavailable", "unknown", "nan", "inf", "-4", None])
+@pytest.mark.parametrize("bad", ["unavailable", "unknown", "nan", "inf", "1e308", "-4", None])
 def test_outdoor_does_not_reuse_persisted_bad_or_missing_readings(hass, bad):
     data = layout(True)
     for r in data["floor"][0]["receivers"]:

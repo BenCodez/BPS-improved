@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const directory = join(__dirname, '../../custom_components/bps/frontend');
 const plain = x => JSON.parse(JSON.stringify(x));
 
-async function panel(layout) {
+async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
     const ids = new Map(), listeners = new Map(), requests = [];
     const context = new Proxy({}, {get: (obj, key) => key === 'measureText' ? () => ({width: 30}) : key === 'createLinearGradient'
         ? () => ({addColorStop() {}}) : obj[key] || (() => {}), set: (obj, key, value) => {obj[key] = value; return true;}});
@@ -39,7 +39,7 @@ async function panel(layout) {
         requestAnimationFrame: () => 1, localStorage: {getItem: () => null, setItem() {}},
         fetch: async (url, options) => {
             requests.push({url, options});
-            const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities: ['beacon_a', 'beacon_b'], receivers: []}
+            const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: []}
                 : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? {} : [];
             return {ok: true, status: 200, json: async () => body};
         }});
@@ -104,6 +104,7 @@ test('panel shared polygon editor creates/edits/cancels/deletes environments and
 
 test('panel groups retain stable IDs and original beacon picker entries', async () => {
     const p = await panel(layout());
+    p.el('outdoorEnabled').checked = true; await p.el('outdoorEnabled').fire('change');
     p.el('groupId').value = 'rover'; p.el('groupName').value = 'Rover'; p.el('groupEnabled').checked = true;
     p.el('groupBeacons').options.forEach(o => {o.selected = true;}); await p.el('saveGroup').fire('click');
     assert.deepEqual(plain(p.hooks.layout().tracker_groups[0].beacons), ['beacon_a', 'beacon_b']);
@@ -113,4 +114,16 @@ test('panel groups retain stable IDs and original beacon picker entries', async 
     assert.equal(p.hooks.layout().tracker_groups.length, 1); assert.equal(p.hooks.layout().tracker_groups[0].id, 'rover');
     await p.el('deleteGroup').fire('click'); assert.equal(p.hooks.layout().tracker_groups.length, 0);
     assert.deepEqual(p.el('entSelector').options.map(o => o.value).filter(Boolean), ['beacon_a', 'beacon_b']);
+});
+
+test('disabled outdoor groups do not alter picker and genuine group-prefixed beacons remain', async () => {
+    const source = layout();
+    source.tracker_groups = [{id: 'rover', name: 'Rover', enabled: true, beacons: ['beacon_a']}];
+    const p = await panel(source, ['beacon_a', 'bps_group_beacon']);
+    const keys = () => p.el('entSelector').options.map(o => o.value).filter(Boolean);
+    assert.deepEqual(keys(), ['beacon_a', 'bps_group_beacon']);
+    p.el('outdoorEnabled').checked = true; await p.el('outdoorEnabled').fire('change');
+    assert.deepEqual(keys(), ['beacon_a', 'bps_group_beacon', 'bps_group_rover']);
+    p.el('outdoorEnabled').checked = false; await p.el('outdoorEnabled').fire('change');
+    assert.deepEqual(keys(), ['beacon_a', 'bps_group_beacon']);
 });

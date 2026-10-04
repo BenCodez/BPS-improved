@@ -2685,7 +2685,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             console.log("Coordinates loaded:", finalcords);
             let ents = Array.isArray(data.entities) ? data.entities : [];
-            availableBeaconKeys = ents.filter(e => typeof e === 'string' && !e.startsWith('bps_group_'));
+            availableBeaconKeys = ents.filter(e => typeof e === 'string');
             console.log("Entities to track:", ents);
 
             entSelector.innerHTML = '<option value="">--Please choose an option--</option>';
@@ -5999,6 +5999,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 hide_uncertainty_below_m: threshold};
             syncOutdoorSettings();
             if (!finalcords.outdoor_tracking.enabled && editTarget && editTarget.kind === 'environment') cancelShapeEdit();
+            if (!finalcords.outdoor_tracking.enabled) {
+                for (const group of outdoor.groups(finalcords)) {
+                    const key = `bps_group_${group.id}`;
+                    if (!availableBeaconKeys.includes(key)) removeTrackedDevice(key);
+                }
+            }
+            if (id === 'outdoorEnabled') refreshGroupEditor();
             renderOutdoorDiagnostics((lastTracks.get(activeDevice) || {}).payload);
             markOutdoorChanged();
         });
@@ -6116,9 +6123,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             select.appendChild(option);
         }
         if ([...select.options].some(o => o.value === selected)) select.value = selected;
-        for (const option of [...entSelector.options]) if (option.value.startsWith('bps_group_')) option.remove();
+        for (const option of [...entSelector.options]) {
+            if (option.value.startsWith('bps_group_') && !availableBeaconKeys.includes(option.value)) option.remove();
+        }
         for (const group of outdoor.groups(finalcords)) {
-            if (group.enabled !== true) continue;
+            if (!outdoor.settings(finalcords).enabled || group.enabled !== true
+                || availableBeaconKeys.includes(`bps_group_${group.id}`)) continue;
             const option = document.createElement('option'); option.value = `bps_group_${group.id}`; option.textContent = group.name;
             entSelector.appendChild(option);
         }

@@ -347,7 +347,10 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                      if sensor.unique_id == entry.unique_id]
             for key, sensor in owned:
                 cache.pop(key, None)
-                await sensor.async_remove()
+                # HA aborts addition for disabled registry entries and clears
+                # entity.hass. Such cached objects have no live entity to remove.
+                if getattr(sensor, "hass", None) is not None:
+                    await sensor.async_remove()
             registry.async_remove(entry.entity_id)
         additions = []
         for group in groups:
