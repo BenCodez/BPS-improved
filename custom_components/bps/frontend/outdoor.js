@@ -1,0 +1,117 @@
+/* Shared optional map/editor helpers. Distances are metres; map points are floor pixels. */
+(function (root) {
+    'use strict';
+    const TYPES = ['building', 'dense_trees', 'light_vegetation', 'custom'];
+    const MATERIALS = ['unknown', 'light', 'heavy', 'metal'];
+    const POLICIES = ['auto', 'normal', 'prefer', 'deprioritize', 'ignore'];
+    const number = v => typeof v === 'number' && Number.isFinite(v);
+    const groups = layout => Array.isArray(layout && layout.tracker_groups)
+        ? layout.tracker_groups.filter(g => g && typeof g.id === 'string' && typeof g.name === 'string' && Array.isArray(g.beacons)) : [];
+    const environment = floor => Array.isArray(floor && floor.environment)
+        ? floor.environment.filter(p => p && typeof p.id === 'string' && typeof p.name === 'string') : [];
+    function settings(layout) {
+        const s = layout && layout.outdoor_tracking || {};
+        return {enabled: s.enabled === true, show_uncertainty: s.show_uncertainty !== false,
+            hide_uncertainty_below_m: number(s.hide_uncertainty_below_m) && s.hide_uncertainty_below_m >= 0
+                ? s.hide_uncertainty_below_m : 0};
+    }
+    function uncertaintyRadius(outdoor, scale, config) {
+        if (!config || config.enabled !== true || config.show_uncertainty === false) return null;
+        const metres = outdoor && outdoor.estimated_uncertainty_m;
+        if (!number(metres) || metres < 0 || !number(scale) || scale <= 0) return null;
+        if (metres < (config.hide_uncertainty_below_m || 0)) return null;
+        const radius = metres * scale;
+        return number(radius) ? radius : null;
+    }
+    function isStale(outdoor, receivedAt, now = Date.now()) {
+        const limit = outdoor && number(outdoor.stale_after_s) && outdoor.stale_after_s > 0 ? outdoor.stale_after_s : 30;
+        return !!(outdoor && (outdoor.stale === true || outdoor.confidence === 'stale'
+            || number(outdoor.position_age_s) && outdoor.position_age_s >= limit))
+            || number(receivedAt) && now - receivedAt >= limit * 1000;
+    }
+    function fixTime(row, now = Date.now()) {
+        const observed = row && row.outdoor && row.outdoor.observed;
+        const timestamp = number(observed) && observed >= 0 ? observed : row && row.updated;
+        if (number(timestamp) && timestamp >= 0 && number(timestamp * 1000)) return Math.min(now, timestamp * 1000);
+        const age = row && row.outdoor && row.outdoor.position_age_s;
+        return number(age) && age >= 0 ? now - age * 1000 : now;
+    }
+    function drawUncertainty(ctx, pos, scale, config, color, zoom = 1, now = Date.now()) {
+        const radius = uncertaintyRadius(pos && pos.outdoor, scale, config);
+        if (radius === null || !number(pos.x) || !number(pos.y)) return false;
+        const stale = isStale(pos.outdoor, pos.receivedAt, now);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = stale ? 0.04 : 0.10;
+        ctx.fill();
+        ctx.globalAlpha = stale ? 0.45 : 0.7;
+        ctx.strokeStyle = stale ? '#888' : color;
+        ctx.lineWidth = 2 / zoom;
+        ctx.setLineDash(stale ? [3 / zoom, 6 / zoom]
+            : pos.outdoor.confidence === 'poor' ? [8 / zoom, 5 / zoom] : []);
+        ctx.stroke();
+        ctx.restore();
+        return true;
+    }
+    function validPolygon(points) {
+        if (!Array.isArray(points) || points.length < 3 || points.length > 256
+            || points.some(p => !p || !number(p.x) || !number(p.y))) return false;
+        const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        const on = (a, b, c) => Math.abs(cross(a, b, c)) < 1e-9
+            && c.x >= Math.min(a.x, b.x) && c.x <= Math.max(a.x, b.x)
+            && c.y >= Math.min(a.y, b.y) && c.y <= Math.max(a.y, b.y);
+        const intersects = (a, b, c, d) => cross(a, b, c) * cross(a, b, d) < 0
+            && cross(c, d, a) * cross(c, d, b) < 0
+            || on(a, b, c) || on(a, b, d) || on(c, d, a) || on(c, d, b);
+        let area = 0;
+        for (let i = 0; i < points.length; i++) {
+            const a = points[i], b = points[(i + 1) % points.length];
+            if (a.x === b.x && a.y === b.y) return false;
+            area += a.x * b.y - b.x * a.y;
+            for (let j = i + 2; j < points.length; j++) {
+                if (i === 0 && j === points.length - 1) continue;
+                if (intersects(a, b, points[j], points[(j + 1) % points.length])) return false;
+            }
+        }
+        return Math.abs(area) > 1e-6;
+    }
+    function upsertEnvironment(floor, item) {
+        if (!floor || !item || typeof item.id !== 'string' || !item.id
+            || typeof item.name !== 'string' || !item.name.trim()
+            || !TYPES.includes(item.type) || !MATERIALS.includes(item.material)
+            || !validPolygon(item.points)) throw new Error('Use a named polygon with at least three distinct corners and no crossing edges.');
+        const copy = {...item, name: item.name.trim(), points: item.points.map(p => ({x: p.x, y: p.y}))};
+        if (!Array.isArray(floor.environment)) floor.environment = [];
+        const index = floor.environment.findIndex(p => p.id === item.id);
+        if (index < 0) floor.environment.push(copy); else floor.environment[index] = copy;
+        return copy;
+    }
+    function upsertGroup(layout, group) {
+        if (!group || !/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(group.id || '')
+            || typeof group.name !== 'string' || !group.name.trim()
+            || !Array.isArray(group.beacons) || !group.beacons.length
+            || group.beacons.some(b => typeof b !== 'string' || !b || b.startsWith('sensor.') || b.startsWith('bps_group_')))
+            throw new Error('Choose a name, a stable lowercase ID (letters, numbers, underscores), and at least one beacon.');
+        const copy = {...group, name: group.name.trim(), enabled: group.enabled === true,
+            beacons: [...new Set(group.beacons)]};
+        if (!Array.isArray(layout.tracker_groups)) layout.tracker_groups = [];
+        const index = layout.tracker_groups.findIndex(g => g.id === group.id);
+        if (index < 0) layout.tracker_groups.push(copy); else layout.tracker_groups[index] = copy;
+        return copy;
+    }
+    const display = (n, unit = '') => number(n) ? `${n.toFixed(1)}${unit}` : '—';
+    function diagnosticsText(row) {
+        const out = row && row.outdoor;
+        if (!out) return '';
+        const lines = [`Estimated uncertainty: ${display(out.estimated_uncertainty_m, ' m')} · ${out.confidence || 'unknown'} · ${out.receivers_used || 0} receivers`];
+        if (number(out.position_age_s)) lines.push(`Position age: ${display(out.position_age_s, ' s')}${isStale(out) ? ' · stale / last known' : ''}`);
+        if (row.group) lines.push(`${row.name || row.ent}: ${row.beacons_reporting || 0}/${row.total_beacons || 0} beacons · disagreement ${display(row.beacon_disagreement_m, ' m')} · ${row.fusion_confidence || 'unknown'}`);
+        (row.beacon_positions || []).forEach(p => lines.push(`${p.ent}: estimated uncertainty ${display(p.estimated_uncertainty_m, ' m')}${p.floor ? ', ' + p.floor : ''}${number(p.age_s) ? ', age ' + display(p.age_s, ' s') : ''}${p.used === false ? ', excluded from fusion' : ''}`));
+        (out.receiver_diagnostics || []).forEach(r => lines.push(`${r.receiver}: measured ${display(r.measured_distance_m, ' m')}, corrected ${display(r.corrected_distance_m, ' m')}, age ${display(r.reading_age_s, ' s')}, ${r.classification || 'unknown'}, building crossings ${r.building_crossings ?? '—'}${r.reflection_risk ? ', reflection / multipath risk' : ''}, environment weight ${display(r.environmental_weight)}, reliability ${display(r.reliability_weight)}, ${r.status || 'unknown'}`));
+        return lines.join('\n');
+    }
+    root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, groups, environment, settings, uncertaintyRadius,
+        drawUncertainty, isStale, fixTime, validPolygon, upsertEnvironment, upsertGroup, diagnosticsText});
+})(globalThis);

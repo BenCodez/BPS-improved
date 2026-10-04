@@ -6,6 +6,8 @@ from homeassistant.helpers.entity import DeviceInfo
 import logging
 
 from .const import ACCURACY_ENTITY_ID  # single source of truth (shared with __init__)
+from .storage import get_bps_data
+from .tracker_groups import normalize_groups
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -295,6 +297,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             for entry in entity_registry.entities.values()
             if entry.platform == "bps" and entry.entity_id not in expected_entity_ids
             and entry.entity_id != ACCURACY_ENTITY_ID  # keep the global diagnostic
+            and not str(entry.unique_id).startswith("bps_group_")
         ]
         for entity_id in stale_bps_ids:
             _LOGGER.info("Removing stale BPS registry entity: %s", entity_id)
@@ -312,6 +315,53 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     if new_sensors:
         async_add_entities(new_sensors, update_before_add=True)
         normalize_bps_registry_entity_ids_from_cache(hass)
+
+    group_signature = None
+
+    async def sync_group_sensors(groups):
+        """Own only group entities; preserve the original per-beacon registry."""
+        nonlocal group_signature
+        signature = tuple((g["id"], g["name"]) for g in groups)
+        if signature == group_signature:
+            return
+        cache = hass.data.get("bps_sensors")
+        if cache is None:
+            return
+        expected = {f"bps_group_{kind}_{g['id']}" for g in groups for kind in ("zone", "floor")}
+        registry = er.async_get(hass)
+        stale = [e for e in registry.entities.values()
+                 if e.platform == "bps" and str(e.unique_id).startswith(("bps_group_zone_", "bps_group_floor_"))
+                 and e.unique_id not in expected]
+        for entry in stale:
+            owned = [(key, sensor) for key, sensor in cache.items()
+                     if sensor.unique_id == entry.unique_id]
+            for key, sensor in owned:
+                cache.pop(key, None)
+                await sensor.async_remove()
+            registry.async_remove(entry.entity_id)
+        additions = []
+        for group in groups:
+            ent = "bps_group_" + group["id"]
+            for kind in ("zone", "floor"):
+                eid = f"sensor.{ent}_bps_{kind}"
+                label = f"{group['name']} BPS {kind.title()}"
+                if eid in cache:
+                    cache[eid]._name = cache[eid]._attr_name = label
+                    continue
+                sensor = CustomDistanceSensor(label, f"bps_group_{kind}_{group['id']}", eid, ent)
+                sensor._attr_device_info["name"] = f"{group['name']} (BPS group)"
+                cache[eid] = sensor
+                additions.append(sensor)
+        if additions:
+            async_add_entities(additions, update_before_add=True)
+            normalize_bps_registry_entity_ids_from_cache(hass)
+        group_signature = signature
+
+    hass.data.setdefault("bps", {})["sync_group_sensors"] = sync_group_sensors
+    # Backend setup loads the Store after forwarding the sensor platform.
+    # Defer reconciliation until that load: an empty cache is not deletion.
+    if "layout" in hass.data.get("bps", {}):
+        await sync_group_sensors(normalize_groups(get_bps_data(hass), known_trackers=entities))
 
     @callback
     def state_changed_listener(event):

@@ -32,3 +32,6 @@ jobs:
         run: |
           node --check custom_components/bps/frontend/script.js
           node --check custom_components/bps/frontend/bps-map-card.js
+          node --check custom_components/bps/frontend/outdoor.js
+      - name: Run frontend tests
+        run: node --test tests/frontend/*.test.cjs

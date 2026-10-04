@@ -1,6 +1,9 @@
 document.addEventListener('DOMContentLoaded', async () => {
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
+    const outdoor = globalThis.BPSOutdoor;
+    let availableBeaconKeys = [];
+    let outdoorFloorSignature = '';
 
     // --- API auth token (see bps-panel.js) ---------------------------------
     // The BPS panel element couriers the HA access token in via postMessage;
@@ -694,6 +697,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                         circles: sameFloor ? result.radii : null,
                         offFloor: !sameFloor,
                         floor: result.floor,
+                        outdoor: result.outdoor,
+                        group: result.group,
+                        name: result.name,
+                        beacon_positions: result.beacon_positions,
+                        receivedAt: outdoor.fixTime(result),
+                        payload: result,
                     });
                     if (entKey === activeDevice) { activeResult = result; activeSame = sameFloor; }
                 });
@@ -705,6 +714,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     if (activeResult) activeSame = !activeResult.floor || sameFloorName(activeResult.floor, SelMapName);
                 }
                 if (img.naturalWidth > 0) redrawAll();
+                renderOutdoorDiagnostics(activeResult);
                 if (activeResult) {
                     zonediv.style.display = "";
                     document.getElementById("zonevalue").textContent = activeResult.zone || "unknown";
@@ -807,6 +817,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         entries.forEach(([entKey, t]) => {
             const baseHue = deviceBaseHue(entKey);
+            if (!t.offFloor) {
+                outdoor.drawUncertainty(ctx, t, (currentFloor() || {}).scale,
+                    outdoor.settings(finalcords), deviceColor(entKey), view.zoom || 1);
+                if (document.getElementById('outdoorDiagnostics').checked && outdoor.settings(finalcords).enabled) {
+                    drawGroupBeaconPositions(t, deviceColor(entKey));
+                }
+            }
             const src = trackerIconFor(entKey);
             const raw = getCachedImage(src);
             const fade = t.offFloor ? 0.35 : 1; // off-floor fix isn't real here
@@ -827,7 +844,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             // Name pill so each marker is identifiable on the map (colour matches
             // the legend); off-floor devices also get the red "on <floor>" pill.
-            drawLabelPill(entKey, t.x, t.y + iconSize / 2 + 16, baseHue);
+            drawLabelPill(t.group ? (t.name || entKey) : entKey, t.x, t.y + iconSize / 2 + 16, baseHue);
             if (t.offFloor && t.floor) {
                 drawLabelPill(`on ${t.floor}`, t.x, t.y + iconSize / 2 + 44, 0);
             }
@@ -2623,6 +2640,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 });
                 existing.zones = (existing.zones || []).concat(floor.zones || []);
                 existing.subzones = (existing.subzones || []).concat(floor.subzones || []);
+                if (floor.environment) existing.environment = (existing.environment || []).concat(floor.environment);
                 if (existing.scale == null) {
                     existing.scale = floor.scale;
                 }
@@ -2666,7 +2684,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (o.value) o.textContent = mapOptionLabel(o.value);
             });
             console.log("Coordinates loaded:", finalcords);
-            let ents = data.entities;
+            let ents = Array.isArray(data.entities) ? data.entities : [];
+            availableBeaconKeys = ents.filter(e => typeof e === 'string' && !e.startsWith('bps_group_'));
             console.log("Entities to track:", ents);
 
             entSelector.innerHTML = '<option value="">--Please choose an option--</option>';
@@ -2676,6 +2695,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 option.textContent = ent;
                 entSelector.appendChild(option);
             });
+            syncOutdoorSettings();
+            refreshGroupEditor();
 
             } catch (error) {
                 console.error("Error fetching BPS data:", error); // Handle possible error during fetch-call
@@ -2763,7 +2784,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 swatch.style.background = deviceColor(entKey);
                 const name = document.createElement("span");
                 name.className = "bps-track-name";
-                name.textContent = entKey;
+                const group = outdoor.groups(finalcords).find(g => `bps_group_${g.id}` === entKey);
+                name.textContent = group ? group.name : entKey;
                 name.title = "Click to isolate this device on the map (click again to show all)";
                 // Isolate on the map (toggle), and target the icon controls at it.
                 const pick = () => {
@@ -3489,6 +3511,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         const cords = zonePoints.map(p => ({ x: p.x, y: p.y }));
         const floor = finalcords.floor.find(f => sameFloorName(f.name, SelMapName));
 
+        if (editTarget && editTarget.kind === 'environment') {
+            if (!floor) { bpsToast('Select a floor first.'); return false; }
+            try {
+                outdoor.upsertEnvironment(floor, {
+                    id: editTarget.id || `environment_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                    name, type: document.getElementById('environmentType').value,
+                    material: document.getElementById('environmentMaterial').value,
+                    points: cords,
+                });
+            } catch (error) { bpsToast(error.message); return false; }
+            savebuttondiv.appendChild(saveButton);
+            return true;
+        }
+
         if (isSub) {
             if (!editTarget.parent) { bpsToast("Click inside a zone first to choose the sub-zone's parent."); return false; }
             if (!floor) { bpsToast("Select a floor first."); return false; }
@@ -3884,7 +3920,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         for (let i = 1; i < zonePoints.length; i++) {
             ctx.lineTo(zonePoints[i].x, zonePoints[i].y);
         }
-        const shapeColor = (editTarget && editTarget.kind === 'subzone') ? (editTarget.color || "#3f51b5") : "red";
+        const shapeColor = editTarget && editTarget.kind === 'environment' ? '#8d6e63'
+            : (editTarget && editTarget.kind === 'subzone') ? (editTarget.color || "#3f51b5") : "red";
         if (zonePoints.length >= 3) {
             ctx.closePath();
             ctx.save();
@@ -4671,6 +4708,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         let floor = finalcords.floor.find(floor => sameFloorName(floor.name, SelMapName)); //Add all existing
+        drawEnvironmentPolygons(floor);
 
         // A focused receiver that no longer exists releases the focus.
         if (focusedReceiver && !(floor && (floor.receivers || []).some(r => r.entity_id === focusedReceiver))) {
@@ -4843,6 +4881,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         drawReceiverDistances();
         drawAdjustGhost();
         renderEntityTree(floor);
+        renderOutdoorFloor(floor);
         renderScannerIssues();
         renderScannerLinkingSidebar(); // re-scope the "not reporting" heads-up to this floor (cached data, no refetch)
 
@@ -5933,6 +5972,194 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // =================================================================
+    // Optional outdoor configuration uses the existing authenticated layout save.
+    // No defaults are written until the user changes a setting.
+    function syncOutdoorSettings() {
+        const settings = outdoor.settings(finalcords);
+        document.getElementById('outdoorEnabled').checked = settings.enabled;
+        document.getElementById('outdoorControls').hidden = !settings.enabled;
+        document.getElementById('outdoorUncertainty').checked = settings.show_uncertainty;
+        document.getElementById('outdoorThreshold').value = settings.hide_uncertainty_below_m;
+    }
+    function markOutdoorChanged() {
+        savebuttondiv.appendChild(saveButton);
+        if (mapReady()) redrawAll();
+    }
+    for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold']) {
+        document.getElementById(id).addEventListener('change', () => {
+            const threshold = Number(document.getElementById('outdoorThreshold').value);
+            if (!Number.isFinite(threshold) || threshold < 0) {
+                bpsToast('Uncertainty threshold must be a finite non-negative number.');
+                syncOutdoorSettings();
+                return;
+            }
+            finalcords.outdoor_tracking = {...(finalcords.outdoor_tracking || {}),
+                enabled: document.getElementById('outdoorEnabled').checked,
+                show_uncertainty: document.getElementById('outdoorUncertainty').checked,
+                hide_uncertainty_below_m: threshold};
+            syncOutdoorSettings();
+            if (!finalcords.outdoor_tracking.enabled && editTarget && editTarget.kind === 'environment') cancelShapeEdit();
+            renderOutdoorDiagnostics((lastTracks.get(activeDevice) || {}).payload);
+            markOutdoorChanged();
+        });
+    }
+    document.getElementById('outdoorDiagnostics').addEventListener('change', () => {
+        renderOutdoorDiagnostics((lastTracks.get(activeDevice) || {}).payload);
+        if (mapReady()) redrawAll();
+    });
+    function renderOutdoorDiagnostics(row) {
+        const el = document.getElementById('outdoorDiagnosticText');
+        el.hidden = !outdoor.settings(finalcords).enabled || !document.getElementById('outdoorDiagnostics').checked;
+        el.textContent = el.hidden ? '' : outdoor.diagnosticsText(row) || 'Start tracking and select a device to see diagnostics.';
+    }
+    function drawGroupBeaconPositions(position, color) {
+        for (const p of position.beacon_positions || []) {
+            if (!Array.isArray(p.cords) || p.cords.length < 2 || !p.cords.every(Number.isFinite)
+                || p.floor && !sameFloorName(p.floor, SelMapName)) continue;
+            const x = p.cords[0], y = p.cords[1];
+            outdoor.drawUncertainty(ctx, {x, y, outdoor: {estimated_uncertainty_m: p.estimated_uncertainty_m, position_age_s: p.age_s}},
+                (currentFloor() || {}).scale, outdoor.settings(finalcords), color, view.zoom || 1);
+            ctx.save();
+            ctx.strokeStyle = color;
+            ctx.globalAlpha = 0.65;
+            ctx.lineWidth = 1 / (view.zoom || 1);
+            ctx.setLineDash([4 / (view.zoom || 1), 4 / (view.zoom || 1)]);
+            ctx.beginPath(); ctx.moveTo(position.x, position.y); ctx.lineTo(x, y); ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.beginPath(); ctx.arc(x, y, 5 / (view.zoom || 1), 0, Math.PI * 2); ctx.stroke();
+            ctx.restore();
+        }
+    }
+    function beginEnvironmentEdit(polygon = null) {
+        if (!outdoor.settings(finalcords).enabled || !currentFloor() || !checkCanvasImage()) {
+            bpsToast('Enable Outdoor Tracking and select a saved floor first.'); return;
+        }
+        removeListeners(); buttonreset();
+        zonePoints = polygon ? polygon.points.map(p => ({x: p.x, y: p.y})) : [];
+        selectedVertex = null; draggingZone = false;
+        editTarget = {kind: 'environment', id: polygon ? polygon.id : null};
+        if (polygon) {
+            document.getElementById('environmentType').value = polygon.type;
+            document.getElementById('environmentMaterial').value = polygon.material || 'unknown';
+        }
+        attachZoneHandlers(); drawAreaButton.dataset.active = 'true';
+        drawZonePreview();
+        document.getElementById('zoneName').value = polygon ? polygon.name : '';
+        messdiv.textContent = 'Draw corners, drag a corner or the whole shape, right-click to delete a corner. Choose type/material in Outdoor settings, name the polygon, then press ✓ Save. Save Floor Plan to persist.';
+    }
+    document.getElementById('drawEnvironment').addEventListener('click', () => beginEnvironmentEdit());
+    function drawEnvironmentPolygons(floor) {
+        if (!outdoor.settings(finalcords).enabled) return;
+        for (const p of outdoor.environment(floor)) {
+            if (!outdoor.validPolygon(p.points)) continue;
+            if (editTarget && editTarget.kind === 'environment' && editTarget.id === p.id) continue;
+            ctx.save();
+            ctx.beginPath(); ctx.moveTo(p.points[0].x, p.points[0].y);
+            p.points.slice(1).forEach(point => ctx.lineTo(point.x, point.y)); ctx.closePath();
+            ctx.fillStyle = p.type === 'building' ? '#8d6e63' : '#388e3c';
+            ctx.globalAlpha = 0.17; ctx.fill(); ctx.globalAlpha = 0.8;
+            ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = 2 / (view.zoom || 1);
+            ctx.setLineDash([7 / (view.zoom || 1), 4 / (view.zoom || 1)]); ctx.stroke(); ctx.restore();
+        }
+    }
+    function renderOutdoorFloor(floor) {
+        const signature = JSON.stringify([floor && floor.name, outdoor.environment(floor),
+            ((floor && floor.receivers) || []).map(r => [r.entity_id, r.outdoor_policy])]);
+        if (signature === outdoorFloorSignature) return;
+        outdoorFloorSignature = signature;
+        const list = document.getElementById('environmentList');
+        list.replaceChildren();
+        for (const polygon of outdoor.environment(floor)) {
+            const row = document.createElement('div');
+            const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'bps-btn bps-btn-outline';
+            edit.textContent = `${polygon.name} (${polygon.type}${polygon.type === 'building' ? ', ' + polygon.material : ''})`;
+            edit.disabled = !outdoor.validPolygon(polygon.points);
+            edit.addEventListener('click', () => beginEnvironmentEdit(polygon));
+            const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'bps-btn bps-btn-outline';
+            remove.textContent = '×'; remove.title = 'Delete environmental polygon';
+            remove.addEventListener('click', () => {
+                floor.environment = floor.environment.filter(p => p.id !== polygon.id);
+                if (editTarget && editTarget.kind === 'environment' && editTarget.id === polygon.id) cancelShapeEdit();
+                markOutdoorChanged();
+            });
+            row.append(edit, remove); list.appendChild(row);
+        }
+        const receiver = document.getElementById('outdoorReceiver');
+        const selected = receiver.value;
+        receiver.replaceChildren();
+        for (const rec of (floor && floor.receivers) || []) {
+            const option = document.createElement('option'); option.value = rec.entity_id; option.textContent = rec.entity_id;
+            receiver.appendChild(option);
+        }
+        if ([...receiver.options].some(o => o.value === selected)) receiver.value = selected;
+        syncOutdoorReceiver();
+    }
+    function syncOutdoorReceiver() {
+        const rec = ((currentFloor() || {}).receivers || []).find(r => r.entity_id === document.getElementById('outdoorReceiver').value);
+        document.getElementById('outdoorPolicy').value = rec && outdoor.POLICIES.includes(rec.outdoor_policy) ? rec.outdoor_policy : 'auto';
+    }
+    document.getElementById('outdoorReceiver').addEventListener('change', syncOutdoorReceiver);
+    document.getElementById('outdoorPolicy').addEventListener('change', () => {
+        if (!outdoor.settings(finalcords).enabled) return;
+        const rec = ((currentFloor() || {}).receivers || []).find(r => r.entity_id === document.getElementById('outdoorReceiver').value);
+        if (!rec) return;
+        rec.outdoor_policy = document.getElementById('outdoorPolicy').value;
+        markOutdoorChanged();
+    });
+    function refreshGroupEditor() {
+        const select = document.getElementById('groupSelector');
+        const selected = select.value;
+        select.replaceChildren();
+        const blank = document.createElement('option'); blank.value = ''; blank.textContent = 'New group'; select.appendChild(blank);
+        for (const group of outdoor.groups(finalcords)) {
+            const option = document.createElement('option'); option.value = group.id; option.textContent = group.name;
+            select.appendChild(option);
+        }
+        if ([...select.options].some(o => o.value === selected)) select.value = selected;
+        for (const option of [...entSelector.options]) if (option.value.startsWith('bps_group_')) option.remove();
+        for (const group of outdoor.groups(finalcords)) {
+            if (group.enabled !== true) continue;
+            const option = document.createElement('option'); option.value = `bps_group_${group.id}`; option.textContent = group.name;
+            entSelector.appendChild(option);
+        }
+        loadGroupFields();
+    }
+    function loadGroupFields() {
+        const group = outdoor.groups(finalcords).find(g => g.id === document.getElementById('groupSelector').value);
+        document.getElementById('groupName').value = group ? group.name : '';
+        const id = document.getElementById('groupId'); id.value = group ? group.id : ''; id.disabled = !!group;
+        document.getElementById('groupEnabled').checked = !group || group.enabled === true;
+        const beacons = document.getElementById('groupBeacons'); beacons.replaceChildren();
+        const members = group && Array.isArray(group.beacons) ? group.beacons : [];
+        for (const key of [...new Set([...availableBeaconKeys, ...members])]) {
+            const option = document.createElement('option'); option.value = key;
+            option.textContent = availableBeaconKeys.includes(key) ? key : `${key} (missing)`;
+            option.selected = members.includes(key); beacons.appendChild(option);
+        }
+    }
+    document.getElementById('groupSelector').addEventListener('change', loadGroupFields);
+    document.getElementById('saveGroup').addEventListener('click', () => {
+        const id = document.getElementById('groupId').value.trim();
+        if (!document.getElementById('groupSelector').value && outdoor.groups(finalcords).some(g => g.id === id)) {
+            bpsToast('This stable group ID already exists. Select the group to edit it.'); return;
+        }
+        try {
+            outdoor.upsertGroup(finalcords, {id, name: document.getElementById('groupName').value,
+                enabled: document.getElementById('groupEnabled').checked,
+                beacons: [...document.getElementById('groupBeacons').selectedOptions].map(o => o.value)});
+        } catch (error) { bpsToast(error.message); return; }
+        if (!document.getElementById('groupEnabled').checked) removeTrackedDevice(`bps_group_${id}`);
+        refreshGroupEditor(); document.getElementById('groupSelector').value = id; loadGroupFields(); markOutdoorChanged();
+        if (refreshTrackLegend) refreshTrackLegend();
+    });
+    document.getElementById('deleteGroup').addEventListener('click', () => {
+        const id = document.getElementById('groupSelector').value;
+        if (!id) return;
+        finalcords.tracker_groups = outdoor.groups(finalcords).filter(g => g.id !== id);
+        removeTrackedDevice(`bps_group_${id}`);
+        refreshGroupEditor(); markOutdoorChanged();
+    });
+
     // Receiver calibration
     // =================================================================
 

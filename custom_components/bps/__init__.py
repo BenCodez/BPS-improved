@@ -24,6 +24,7 @@ import json
 import re
 import copy
 import difflib
+from functools import partial
 from shapely.geometry import Point, Polygon
 from shapely.ops import nearest_points, unary_union
 try:
@@ -51,6 +52,10 @@ from .storage import (
 from .const import ACCURACY_ENTITY_ID
 from . import history as history_mod
 from .zone_adjust import adjust_zones, adjust_subzones
+from .environment import outdoor_settings, finite_number
+from .outdoor_tracking import solve_outdoor, account_for_published_position
+from .tracker_groups import fuse_groups, normalize_groups
+from .outdoor_config import validate_outdoor_layout
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -631,10 +636,12 @@ async def update_tracked_entities(hass):
 
             num_points = len(tracked_entities)
             if num_points == 0:
+                await update_tracker_groups(hass)
                 _LOGGER.info("There are no devices present to track, sleep 10 seconds")
                 await asyncio.sleep(10)
                 continue  # Skip and start over
             if num_points < 3:
+                await update_tracker_groups(hass)
                 _LOGGER.info("There are not enough trackers with available data to track, sleep 10 seconds")
                 await asyncio.sleep(10)
                 continue  # Skip and start over
@@ -1061,8 +1068,15 @@ async def update_receiver_radii(hass, eids):
     tracker_h = _tracker_height(eids["data"], eids["entity"])
     tracker_factor = _tracker_distance_factor(eids["data"], eids["entity"])
     max_age = _reading_max_age(eids["data"])
+    outdoor = outdoor_settings(eids["data"])["enabled"]
+    if outdoor:
+        max_age = finite_number(max_age, READING_MAX_AGE_SECS, minimum=0.0, maximum=1e6)
     for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
         for receiver in floor["receivers"]:
+            if outdoor:
+                # A saved or previous-cycle radius is never a current reading.
+                receiver.pop("distance", None)
+                receiver.pop("_outdoor_reading", None)
             entity_id = "sensor." + eids["entity"] + "_distance_to_" + receiver["entity_id"]
             rec_value = hass.states.get(entity_id)
             if rec_value is not None:
@@ -1073,7 +1087,7 @@ async def update_receiver_radii(hass, eids):
                 # "distance" takes this receiver out of the cycle's candidate
                 # solve (see extract_candidate_floors).
                 age = _reading_age_secs(rec_value)
-                if max_age and age is not None and age > max_age:
+                if max_age and age is not None and (age >= max_age if outdoor else age > max_age):
                     receiver.pop("distance", None)
                     _LOGGER.debug(
                         "Ignoring stale distance for %s (%.0fs old, max %.0fs)",
@@ -1091,6 +1105,12 @@ async def update_receiver_radii(hass, eids):
                     unit = rec_value.attributes.get("unit_of_measurement")
                     if unit in DistanceConverter.VALID_UNITS and unit != UnitOfLength.METERS:
                         distance = DistanceConverter.convert(distance, unit, UnitOfLength.METERS)
+                    if outdoor:
+                        if not math.isfinite(distance) or distance < 0:
+                            continue
+                        receiver["_outdoor_reading"] = {
+                            "measured_distance_m": distance, "reading_age_s": age,
+                        }
                     # Per-receiver correction factor learned by the
                     # calibration (calibration.py); equivalent to a
                     # per-scanner RSSI offset in Bermuda's exponential model.
@@ -1106,6 +1126,8 @@ async def update_receiver_radii(hass, eids):
                     # below (a per-tracker constant, so cross-floor ordering
                     # for this tracker is unchanged).
                     distance = distance * tracker_factor
+                    if outdoor and (not math.isfinite(distance) or distance < 0):
+                        continue
                     # Known mount height: the estimate is a slant range, so
                     # remove the vertical leg (mount height vs the assumed
                     # tracker height) to get the horizontal distance the 2D
@@ -1174,6 +1196,8 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         update_trilateration_and_zone.last_floor = {}
 
     candidates = extract_candidate_floors(new_global_data, entity)
+    entity_layout = next((e["data"] for e in new_global_data if e["entity"] == entity), {})
+    outdoor = outdoor_settings(entity_layout)["enabled"]
 
     if not candidates:
         # No receiver reports any distance for this device: it is out of
@@ -1244,7 +1268,21 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         margin = 0.1 * max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
         floor_bounds = (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
 
-        fix = trilaterate(weighted, bounds=floor_bounds, min_weight_radius=min_wr)
+        outdoor_result = None
+        if outdoor:
+            floor = next(f for f in entity_layout["floor"] if f["name"] == floor_name)
+            prior = next((p.get("raw") for p in apitricords
+                          if p["ent"] == entity and p["floor"] == floor_name), None)
+            # Additional geometry and bounded re-solving belong off HA's loop.
+            outdoor_result = await hass.async_add_executor_job(partial(
+                solve_outdoor, floor, weighted, floor_bounds, scale, min_wr,
+                _reading_max_age(entity_layout), prior, trilaterate,
+            ))
+            if outdoor_result is None:
+                continue
+            fix, weighted = outdoor_result["fix"], outdoor_result["weighted"]
+        else:
+            fix = trilaterate(weighted, bounds=floor_bounds, min_weight_radius=min_wr)
         if fix is None:
             continue  # this floor's readings don't converge; not a contender
         conf, rms_m, coverage = _score_floor_fit(fix, weighted, scale)
@@ -1262,6 +1300,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
             "scale": scale,
             "conf": conf,
             "rms_m": rms_m,     # kept for the elected floor's telemetry payload
+            "outdoor": outdoor_result["outdoor"] if outdoor_result else None,
         }
 
     # Store current r-values for next time
@@ -1358,6 +1397,13 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         # parent_zone always names the enclosing main zone: the sub-zone's
         # declared parent when inside one, otherwise the current main zone.
         parent_zone = sub_parent if sub_parent else zone
+        extra = {}
+        if outdoor and elected["outdoor"] is not None:
+            quality = elected["outdoor"]
+            account_for_published_position(quality, tricords, (avg_x, avg_y), scale)
+            reading_age = quality.get("newest_reading_age_s")
+            quality["observed"] = time.time() - (reading_age if reading_age is not None else 0.0)
+            extra["outdoor"] = quality
         apitricords = update_or_add_entry(
             apitricords,
             {
@@ -1381,6 +1427,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 "rms_m": round(elected["rms_m"], 3),
                 "conf": round(elected["conf"], 3),
                 "updated": time.time(),
+                **extra,
             },
         )
         await update_apitricords(hass, apitricords)
@@ -1412,6 +1459,10 @@ def update_or_add_entry(data, new_entry):
             item["rms_m"] = new_entry["rms_m"]  # Fit residual, m (telemetry)
             item["conf"] = new_entry["conf"]  # Elected floor confidence
             item["updated"] = new_entry["updated"]  # Freshness for pruning
+            # Remove opt-in telemetry as soon as the feature is disabled.
+            item.pop("outdoor", None)
+            if "outdoor" in new_entry:
+                item["outdoor"] = new_entry["outdoor"]
             return data
 
     # If "ent" was not found, add as new post
@@ -1475,6 +1526,80 @@ async def update_apitricords(hass, new_data):
     hass.data[DOMAIN]["apitricords"] = new_data
 
 
+async def update_tracker_groups(hass):
+    """Fuse complete per-beacon fixes after a cycle, preserving every original.
+
+    Never use a fused group as a beacon or refresh a source's age. Group state
+    disappears promptly on disable/delete or when all beacon fixes become stale.
+    """
+    global apitricords
+    layout = get_bps_data(hass)
+    dom = hass.data.setdefault(DOMAIN, {})
+    if not outdoor_settings(layout)["enabled"] and not dom.get("groups_active"):
+        # The common legacy path does no geometry, fusion or registry scans.
+        sync = dom.get("sync_group_sensors")
+        if sync is not None:
+            await sync([])
+        return
+    originals = [p for p in apitricords if not p.get("group")]
+    known = {p["ent"] for p in originals}
+    known.update(eid.removeprefix("sensor.").split("_distance_to_", 1)[0]
+                 for eid in tracked_entities)
+    groups = normalize_groups(layout, known_trackers=known)
+    sync = hass.data.get(DOMAIN, {}).get("sync_group_sensors")
+    if sync is not None:
+        await sync(groups)
+    dom["groups_active"] = bool(groups) or len(originals) != len(apitricords)
+    if not groups and len(originals) == len(apitricords):
+        return
+    scales = {f["name"]: f.get("scale") for f in layout.get("floor", [])} if isinstance(layout, dict) else {}
+    safe_layout = {**layout, "tracker_groups": groups} if isinstance(layout, dict) else {}
+    fused = fuse_groups(safe_layout, originals, scales, time.time(), max_age_s=READING_MAX_AGE_SECS)
+    lookup = [{"entity": p["ent"], "data": layout} for p in fused]
+    previous = {p["ent"]: p for p in apitricords if p.get("group")}
+    for position in fused:
+        await hass.async_add_executor_job(_assign_group_zone, position, lookup, scales[position["floor"]])
+        position["last_update_age_s"] = max(0.0, time.time() - position["updated"])
+        attrs = {k: v for k, v in position.items() if k not in {"ent", "zone"}}
+        update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_zone", position["zone"], attrs)
+        update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_floor", position["floor"], attrs)
+        old = previous.get(position["ent"])
+        if old is None or position["updated"] > old.get("updated", 0):
+            try:
+                get_position_history(hass).record(
+                    position["ent"], position["updated"],
+                    position["cords"][0] / scales[position["floor"]],
+                    position["cords"][1] / scales[position["floor"]],
+                    position["floor"], scales[position["floor"]], position["zone"],
+                )
+            except Exception as error:
+                _LOGGER.debug("Group history record failed for %s: %s", position["ent"], error)
+    live = {p["ent"] for p in fused}
+    for group in groups:
+        ent = "bps_group_" + group["id"]
+        if ent not in live:
+            for kind in ("zone", "floor"):
+                update_bps_sensor_state(hass, f"sensor.{ent}_bps_{kind}", "unknown", {})
+    for ent in previous.keys() - live:
+        get_position_history(hass).mark_gap(ent)
+    apitricords = originals + fused
+    dom["groups_active"] = bool(groups) or bool(fused)
+    await update_apitricords(hass, apitricords)
+
+
+def _assign_group_zone(position, lookup, scale):
+    """Apply the existing zone/no-go rules off the loop to a private group fix."""
+    point = Point(*position["cords"])
+    polys = list(_floor_zone_polygons(lookup, position["ent"], position["floor"]))
+    snapped = snap_point_into_zones(polys, point)
+    if snapped is not None:
+        account_for_published_position(position["outdoor"], position["cords"], (snapped.x, snapped.y), scale)
+        position["cords"] = [float(snapped.x), float(snapped.y)]
+        point = snapped
+    position["zone"] = find_zone_for_point(lookup, position["ent"], position["floor"], point)
+    position["nearest_zone"] = find_nearest_zone(lookup, position["ent"], position["floor"], point)
+
+
 def update_bps_sensor_state(hass, entity_id, state, attributes=None):
     """Update state (and optional extra attributes) on a registered BPS SensorEntity."""
     sensors_cache = hass.data.get("bps_sensors")
@@ -1497,6 +1622,7 @@ async def process_entities(hass, new_global_data):
     """Process multiple entities in parallel, but ensure the correct order for each individual entity"""
     tasks = [process_single_entity(hass, new_global_data, eids) for eids in new_global_data]
     await asyncio.gather(*tasks)  # Run all entities in parallel, but maintain the correct internal order
+    await update_tracker_groups(hass)
 
 def extract_candidate_floors(new_global_data, tmpentity):
     """Every floor hearing the tracker, ranked by its nearest receiver.
@@ -2037,6 +2163,7 @@ async def async_unload_entry(hass: HomeAssistant, entry):
     # Allow clean setup after integration reload/removal.
     hass.data.pop("bps_initialized", None)
     hass.data.pop("bps_sensors", None)
+    hass.data.get(DOMAIN, {}).pop("sync_group_sensors", None)
 
     return True
 
@@ -2141,6 +2268,9 @@ class BPSSaveAPIText(HomeAssistantView):
         write+delete). The layout goes to the Store (atomic); only the map
         images live under maps_path.
         """
+        error = await hass.async_add_executor_job(validate_outdoor_layout, coords_obj)
+        if error:
+            return web.Response(status=400, text=error)
         # --- Validate the optional new-floor map upload ---
         map_target = None
         map_bytes = None
@@ -2437,7 +2567,20 @@ class BPSCordsAPI(HomeAssistantView):
         if not apitricords:
             return web.json_response({"error": "No data available"}, status=404)
 
-        return web.json_response(apitricords)
+        # A frozen last-known fix remains visible during the existing grace
+        # period, but must not look newly measured because HTTP polling works.
+        now = time.time()
+        payload = []
+        for position in apitricords:
+            if "outdoor" not in position:
+                payload.append(position)
+                continue
+            quality = dict(position["outdoor"])
+            observed = quality.get("observed", position.get("updated", now))
+            age = max(0.0, now - observed)
+            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0))
+            payload.append({**position, "outdoor": quality})
+        return web.json_response(payload)
 
 # Trilateration function
 # Floor on the distance used in the Jacobian's direction vector. Only guards

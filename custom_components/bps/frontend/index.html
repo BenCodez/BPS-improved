@@ -321,6 +321,36 @@
                     <!-- Naming-mismatch warnings (issue #64): placed receivers with no
                          Bermuda sensor, and scanners reporting a distance but unplaced. -->
                     <div id="scannerissues"></div>
+                    <details id="outdoorEditor" class="bps-outdoor-editor">
+                        <summary>Outdoor tracking &amp; dog groups</summary>
+                        <p class="bps-hint">Optional. Changes are persisted with Save Floor Plan. Environment shapes change measurement trust, not distance.</p>
+                        <label class="bps-switch"><input type="checkbox" id="outdoorEnabled"><span>Enable Outdoor Tracking</span></label>
+                        <div id="outdoorControls" hidden>
+                            <label class="bps-switch"><input type="checkbox" id="outdoorUncertainty"><span>Show estimated uncertainty</span></label>
+                            <label class="bps-label" for="outdoorThreshold">Hide circle below (metres)</label>
+                            <input id="outdoorThreshold" type="number" min="0" step="0.1" class="bps-input" value="0">
+                            <label class="bps-switch"><input type="checkbox" id="outdoorDiagnostics"><span>Show tracking diagnostics</span></label>
+                            <p class="bps-hint">Estimated uncertainty is a heuristic radius, not a guaranteed confidence interval. Grey dotted circles mark stale fixes.</p>
+                            <label class="bps-label" for="environmentType">Environment type</label>
+                            <select id="environmentType" class="bps-input"><option value="building">Building</option><option value="dense_trees">Dense trees</option><option value="light_vegetation">Light vegetation</option><option value="custom">Custom</option></select>
+                            <label class="bps-label" for="environmentMaterial">Building material</label>
+                            <select id="environmentMaterial" class="bps-input" title="Obstruction / multipath risk; changes trust, not distance."><option value="unknown">Unknown</option><option value="light">Light</option><option value="heavy">Heavy</option><option value="metal">Metal / reflective (shop)</option></select>
+                            <button type="button" id="drawEnvironment" class="bps-btn bps-btn-outline">Draw environment polygon</button>
+                            <div id="environmentList"></div>
+                            <label class="bps-label" for="outdoorReceiver">Receiver override</label>
+                            <select id="outdoorReceiver" class="bps-input"></select>
+                            <select id="outdoorPolicy" class="bps-input" aria-label="Outdoor receiver policy"><option value="auto">Auto</option><option value="normal">Normal</option><option value="prefer">Prefer</option><option value="deprioritize">Deprioritize</option><option value="ignore">Ignore for positioning</option></select>
+                            <pre id="outdoorDiagnosticText" class="bps-outdoor-diagnostics" hidden></pre>
+                        </div>
+                        <label class="bps-label" for="groupSelector">Dog / tracker group</label>
+                        <select id="groupSelector" class="bps-input"><option value="">New group</option></select>
+                        <label class="bps-label" for="groupName">Name</label><input id="groupName" class="bps-input" placeholder="Rover">
+                        <label class="bps-label" for="groupId">Stable ID</label><input id="groupId" class="bps-input" placeholder="rover" pattern="[a-z0-9]+(_[a-z0-9]+)*">
+                        <label class="bps-label" for="groupBeacons">Beacons (select multiple)</label><select id="groupBeacons" class="bps-input" multiple size="4"></select>
+                        <label class="bps-switch"><input id="groupEnabled" type="checkbox" checked><span>Enable group</span></label>
+                        <div class="bps-btnrow"><button type="button" id="saveGroup" class="bps-btn bps-btn-outline">Apply group</button><button type="button" id="deleteGroup" class="bps-btn bps-btn-outline">Delete group</button></div>
+                        <p class="bps-hint">Original beacon trackers remain available. Apply group, Save Floor Plan, then add the group from the Tracking picker.</p>
+                    </details>
                     <!-- Compact "not reporting" heads-up (issue #64): placed receivers on
                          this floor that are linked but have no distance right now (names
                          only). Full per-entity linking detail lives in the Debugging tab. -->
@@ -388,6 +418,7 @@
         </section>
     </div>
 
+    <script src="outdoor.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

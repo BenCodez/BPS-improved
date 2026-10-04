@@ -3455,3 +3455,9 @@ input[type="checkbox"] { accent-color: hsl(var(--sidebar-primary)); }
     white-space: nowrap;
 }
 .bps-history-status { margin: 0; }
+/* Optional controls stay folded until selected. */
+.bps-outdoor-editor { margin-top: 1rem; padding: .6rem; border: 1px solid var(--border-color, #888); border-radius: .5rem; }
+.bps-outdoor-editor summary { cursor: pointer; }
+.bps-outdoor-editor .bps-input, .bps-outdoor-editor .bps-label { display: block; width: 100%; margin: .4rem 0; }
+.bps-outdoor-editor button { margin: .2rem 0; }
+.bps-outdoor-diagnostics { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; max-height: 22rem; overflow: auto; }

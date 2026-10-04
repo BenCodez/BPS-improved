@@ -50,6 +50,8 @@
  *      sensor goes to unknown, so a dead proxy turns red after about half a
  *      minute — and a live proxy with no tracker in range shows red).
  */
+const bpsOutdoorReady = import('./outdoor.js');
+
 class BpsMapCard extends HTMLElement {
   constructor() {
     super();
@@ -75,7 +77,7 @@ class BpsMapCard extends HTMLElement {
         height: auto;
         background: #f4f4f4;
       }
-      .status { font: 12px/1.4 sans-serif; color: var(--secondary-text-color, #888); margin-top: 6px; }
+      .status { font: 12px/1.4 sans-serif; color: var(--secondary-text-color, #888); margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
     `;
     this._shadow.appendChild(style);
 
@@ -91,6 +93,8 @@ class BpsMapCard extends HTMLElement {
     this._receivers = [];
     this._subzones = [];
     this._zones = [];
+    this._outdoorSettings = {enabled: false, show_uncertainty: true, hide_uncertainty_below_m: 0};
+    this._floorScale = null;
     this._receiverStatuses = new Map();
     this._bermudaScanners = null;
     this._bermudaDumpAt = 0;
@@ -131,6 +135,8 @@ class BpsMapCard extends HTMLElement {
       show_receiver_labels: Boolean(config.show_receiver_labels),
       show_sub_zones: Boolean(config.show_sub_zones),
       show_zone_labels: Boolean(config.show_zone_labels),
+      show_uncertainty: config.show_uncertainty !== false,
+      show_outdoor_diagnostics: config.show_outdoor_diagnostics === true,
       scale_receiver_icon: BpsMapCard.inheritPercent(config.scale_receiver_icon, config.scale_icon),
       scale_receiver_labels: BpsMapCard.inheritPercent(config.scale_receiver_labels, config.scale_labels),
       receiver_timeout:
@@ -645,7 +651,8 @@ class BpsMapCard extends HTMLElement {
 
   _trackerKeyFromEntity(entityId) {
     if (!entityId || typeof entityId !== "string") return "";
-    return entityId.replace(/^sensor\./, "");
+    const key = entityId.replace(/^sensor\./, "");
+    return entityId.startsWith('sensor.bps_group_') ? key.replace(/_bps_(zone|floor)$/, '') : key;
   }
 
   _normalize(value) {
@@ -653,6 +660,7 @@ class BpsMapCard extends HTMLElement {
   }
 
   async _loadFloorResources(expectedGen) {
+    await bpsOutdoorReady;
     const res = await this._apiFetch("/api/bps/read_text");
     if (!res) throw new Error("BPS auth not ready (no token / backing off)");
     if (!res.ok) throw new Error(`Could not read BPS data (${res.status})`);
@@ -664,6 +672,7 @@ class BpsMapCard extends HTMLElement {
       return;
     }
     const coords = JSON.parse(data.coordinates);
+    this._outdoorSettings = BPSOutdoor.settings(coords);
     this._trackerIcons = coords.tracker_icons && typeof coords.tracker_icons === "object"
       ? coords.tracker_icons
       : {};
@@ -672,6 +681,7 @@ class BpsMapCard extends HTMLElement {
     if (!floor) {
       throw new Error(`No floor found with the name "${this._config.floor}".`);
     }
+    this._floorScale = floor.scale;
     this._receivers = Array.isArray(floor.receivers)
       ? floor.receivers.filter((r) => r && r.entity_id && r.cords && r.cords.x != null && r.cords.y != null)
       : [];
@@ -787,6 +797,20 @@ class BpsMapCard extends HTMLElement {
     for (const [trackerKey, pos] of this._positions) {
       if (pos == null || pos.x == null || pos.y == null) continue;
       if (!this._entityOnThisFloor(trackerKey)) continue;
+      BPSOutdoor.drawUncertainty(ctx, pos, this._floorScale,
+        {...this._outdoorSettings, show_uncertainty: this._outdoorSettings.show_uncertainty && this._config.show_uncertainty}, '#2196f3');
+      if (this._outdoorSettings.enabled && this._config.show_outdoor_diagnostics && pos.payload?.group) {
+        for (const beacon of pos.payload.beacon_positions || []) {
+          if (!Array.isArray(beacon.cords) || beacon.cords.length < 2 || !beacon.cords.every(Number.isFinite)
+            || beacon.floor && this._normalize(beacon.floor) !== this._normalize(this._config.floor)) continue;
+          const [x, y] = beacon.cords;
+          BPSOutdoor.drawUncertainty(ctx, {x, y, outdoor: {estimated_uncertainty_m: beacon.estimated_uncertainty_m, position_age_s: beacon.age_s}},
+            this._floorScale, {...this._outdoorSettings, show_uncertainty: this._outdoorSettings.show_uncertainty && this._config.show_uncertainty}, '#2196f3');
+          ctx.save(); ctx.strokeStyle = '#2196f3'; ctx.globalAlpha = 0.65; ctx.setLineDash([4, 4]);
+          ctx.beginPath(); ctx.moveTo(pos.x, pos.y); ctx.lineTo(x, y); ctx.stroke();
+          ctx.setLineDash([]); ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+        }
+      }
       const iconUrl = this._trackerIconUrl(trackerKey);
       const iconImg = this._getIconImage(iconUrl);
       if (iconImg && iconImg.complete && iconImg.naturalWidth > 0) {
@@ -1041,8 +1065,11 @@ class BpsMapCard extends HTMLElement {
               this._positions.set(key, {
                 x: row.cords[0],
                 y: row.cords[1],
-                label: this._friendlyLabel(key),
+                label: row.group ? row.name || this._friendlyLabel(key) : this._friendlyLabel(key),
                 zone: row.zone != null ? row.zone : "",
+                outdoor: row.outdoor,
+                receivedAt: BPSOutdoor.fixTime(row),
+                payload: row,
               });
             }
           }
@@ -1057,6 +1084,10 @@ class BpsMapCard extends HTMLElement {
         // Without a base image the bootstrap error in the status line is the
         // only hint at what went wrong; keep it visible.
         this._updateFloorStatus();
+        if (this._outdoorSettings.enabled && this._config.show_outdoor_diagnostics) {
+          const diagnostics = [...this._positions.values()].map(p => BPSOutdoor.diagnosticsText(p.payload)).filter(Boolean);
+          if (diagnostics.length) this._setStatus(diagnostics.join('\n\n'));
+        }
       }
     } catch (e) {
       console.warn("BPS poll:", e);
@@ -1115,7 +1146,7 @@ class BpsMapCardEditor extends HTMLElement {
       inp.type = type;
       inp.placeholder = placeholder;
       if (type === "checkbox") {
-        inp.checked = Boolean(this._config[key]);
+        inp.checked = key === 'show_uncertainty' ? this._config[key] !== false : Boolean(this._config[key]);
       } else {
         inp.style.width = "100%";
         inp.value = this._config[key] != null ? this._config[key] : "";
@@ -1177,6 +1208,8 @@ class BpsMapCardEditor extends HTMLElement {
     mk("Show receivers (black = working, red = offline)", "show_receivers", "checkbox");
     mk("Show receiver labels", "show_receiver_labels", "checkbox");
     mk("Show sub-zones", "show_sub_zones", "checkbox");
+    mk("Show estimated uncertainty (requires Outdoor Tracking)", "show_uncertainty", "checkbox");
+    mk("Show outdoor / group diagnostics", "show_outdoor_diagnostics", "checkbox");
 
     this.appendChild(root);
     this._built = true;
@@ -1194,7 +1227,7 @@ class BpsMapCardEditor extends HTMLElement {
     for (const [key, inp] of Object.entries(this._inputs)) {
       if (inp === activeEl) continue;
       if (inp.type === "checkbox") {
-        inp.checked = Boolean(this._config[key]);
+        inp.checked = key === 'show_uncertainty' ? this._config[key] !== false : Boolean(this._config[key]);
       } else if (key === "entities") {
         inp.value = Array.isArray(this._config.entities) ? this._config.entities.join(", ") : "";
       } else {

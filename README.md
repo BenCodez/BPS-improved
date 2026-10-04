@@ -43,6 +43,7 @@ The setup panel
 
 Accuracy
 - [Receiver auto-calibration](#receiver-auto-calibration) — the probes calibrate each other, continuously.
+- [Outdoor dog tracking](#outdoor-dog-tracking) — optional obstruction-aware weighting, estimated uncertainty, and multi-beacon tracker groups.
 - [Kalman position smoothing](#kalman-position-smoothing) — a motion-aware filter replaces the fixed moving average: less lag when walking, steadier when still.
 - [Trilateration visualization](#trilateration-visualization) — see the distance circles that place each device.
 - [Trace path](#trace-path) — replay the route a tracked device took during the session, faded by age.
@@ -152,6 +153,86 @@ BPS used to stop producing data after a full restart until you manually
 reloaded the integration. The sensors are now recreated correctly on boot even
 when their registry entries survived an unclean shutdown, and BPS cancels its
 background tasks promptly at shutdown so restarts stay clean.
+
+## Outdoor dog tracking
+
+Outdoor Tracking is an optional extension for outdoor maps and multi-beacon
+trackers. It defaults to **off**; existing layouts without its settings keep
+using the normal BPS solve and Bermuda `sensor.<tracker>_distance_to_<receiver>`
+inputs. Bermuda remains required and no Sextant migration or Bermuda changes are
+needed. Enabling it does not change the existing beacon trackers or their
+entities.
+
+Open **Map & Setup → Outdoor tracking** to enable the feature. On each floor,
+choose **Building**, **Dense trees**, **Light vegetation**, or **Custom**, then
+draw and name a polygon on the existing floor plan. Building polygons also have
+a material classification: **Unknown**, **Light**, **Heavy**, or **Metal / reflective (shop)**.
+These are conservative starting weights, not universal dB values. BPS examines
+the receiver-to-fix path: for example, an indoor receiver reaching outdoors can
+cross one building boundary, while a path through a building can cross two.
+Indoor receivers remain usable; set a receiver override to **Auto**, **Normal**,
+**Prefer**, **Deprioritize**, or **Ignore for positioning** only when useful.
+Auto is the default. Vegetation reduces trust modestly and never invalidates a
+reading by itself.
+
+Environment data is stored with the floor as `environment` polygons, each with
+an `id`, `name`, `type`, `material`, and `points` array of `{x, y}` map
+coordinates. Outdoor settings are stored under `outdoor_tracking`:
+
+```json
+{
+  "outdoor_tracking": {
+    "enabled": false,
+    "show_uncertainty": true,
+    "hide_uncertainty_below_m": 0
+  }
+}
+```
+
+The environmental model changes how much BPS trusts a measurement; it does not
+rewrite Bermuda's measured distance or the receiver's calibration correction.
+The optional diagnostics show measured and corrected distances separately,
+reading age, path classification, boundary crossings, and reliability. For a
+metal building path, `reflection_risk` flags possible multipath. It does not
+predict reflected rays, and a nearby clear path around a metal building is not
+marked as a reflection risk.
+
+When enabled, BPS can draw an **estimated uncertainty** circle around a fix.
+Its radius is a conservative heuristic using factors such as receiver geometry,
+residual, reading freshness, and path reliability. It is useful as a relative
+quality cue, but it is not a guaranteed confidence interval or GPS-like accuracy
+radius. The circle can be hidden globally or below a configured metre threshold.
+Stale last-known fixes have a distinct dashed grey circle. Distances are in
+metres; circle radii use the floor's pixels-per-metre scale before zooming.
+
+To represent one dog with multiple beacons, use the **Dog / tracker group**
+controls to give a group a name and stable ID and select its Bermuda tracker
+slugs. The group produces additional zone and floor sensors; the original
+beacon trackers and their sensors remain available. BPS combines their existing
+position fixes using estimated quality, and reports beacon count, disagreement,
+and fusion confidence as attributes. It does not combine raw BLE or Bermuda
+measurements. A group only combines fixes on the same floor; stale or unavailable
+beacons do not produce a fix, and disagreement lowers confidence instead of
+being hidden by an unconditional average. Select the group in the existing
+Tracking picker to display it on the map.
+
+Group sensors are `sensor.bps_group_<id>_bps_zone` and
+`sensor.bps_group_<id>_bps_floor`, with the fused pixel position, uncertainty,
+receiver count, beacon count, disagreement and observation time in attributes.
+The sensor unique IDs follow the stable group ID, so keep that ID when renaming
+the dog. Disable or delete a group to remove its additional sensors.
+
+Constants in `environment.py`, `uncertainty.py` and `tracker_groups.py` are
+centralized starting heuristics for later tuning from property recordings.
+Geometry is cached until the polygon definitions change. Outdoor tracking runs
+in HA's executor and performs at most two solves per candidate floor; a clear,
+fresh path needs only the original solve. No battery/solar entities are required,
+and the existing reading-age cutoff still excludes stale receiver measurements.
+
+Zone boundaries still follow the existing BPS position pipeline. Make zones
+cover the traversable land you want the published position to occupy: positions
+outside configured zones may be snapped to the nearest zone, just as in normal
+BPS tracking.
 
 ---
 
