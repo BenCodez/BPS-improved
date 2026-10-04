@@ -40,8 +40,13 @@ def platform(monkeypatch):
         async def async_remove(self):
             self.removed = True
 
+        async def async_added_to_hass(self):
+            self.ready = True
+
         def async_write_ha_state(self):
-            pass
+            if not getattr(self, "ready", False):
+                raise RuntimeError("Entity has not been registered")
+            self.writes = getattr(self, "writes", 0) + 1
 
     sensor_mod = types.ModuleType("homeassistant.components.sensor")
     sensor_mod.SensorEntity = Entity
@@ -121,3 +126,19 @@ def test_group_rename_and_repeated_sync_preserve_unique_id(platform):
     sensor = hass.data["bps_sensors"]["sensor.bps_group_rover_bps_zone"]
     assert sensor.name == "Rover the dog BPS Zone"
     assert sensor.unique_id == "bps_group_zone_rover"
+
+
+def test_group_state_buffers_while_entity_addition_is_scheduled(platform):
+    import bps
+    hass, registry, module, add, added = platform
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    sync = hass.data["bps"]["sync_group_sensors"]
+    asyncio.run(sync([{"id": "rover", "name": "Rover"}]))
+    eid = "sensor.bps_group_rover_bps_zone"
+    sensor = hass.data["bps_sensors"][eid]
+    bps.update_bps_sensor_state(hass, eid, "Yard", {"cords": [50, 50]})
+    assert sensor.state == "Yard" and sensor.extra_state_attributes["cords"] == [50, 50]
+    assert getattr(sensor, "writes", 0) == 0
+    asyncio.run(sensor.async_added_to_hass())
+    bps.update_bps_sensor_state(hass, eid, "Pasture")
+    assert sensor.state == "Pasture" and sensor.writes == 1

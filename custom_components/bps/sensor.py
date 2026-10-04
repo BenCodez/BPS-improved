@@ -183,6 +183,16 @@ class BPSAccuracySensor(SensorEntity):
         return self._attrs
 
 
+class BPSGroupSensor(CustomDistanceSensor):
+    """Buffer group updates until HA has finished scheduling registration."""
+
+    _bps_group_pending = True
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        self._bps_group_pending = False
+
+
 def cleanup_legacy_bps_entities(hass):
     """Remove old duplicated-name BPS entities from entity registry."""
     entity_registry = er.async_get(hass)
@@ -348,7 +358,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 if eid in cache:
                     cache[eid]._name = cache[eid]._attr_name = label
                     continue
-                sensor = CustomDistanceSensor(label, f"bps_group_{kind}_{group['id']}", eid, ent)
+                sensor = BPSGroupSensor(label, f"bps_group_{kind}_{group['id']}", eid, ent)
                 sensor._attr_device_info["name"] = f"{group['name']} (BPS group)"
                 cache[eid] = sensor
                 additions.append(sensor)

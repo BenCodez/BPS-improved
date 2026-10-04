@@ -21,10 +21,18 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
                  if r.get("distance") is not None and "r" in r.get("cords", {})]
     if finite_number(scale, minimum=1e-6, maximum=1e6) is None:
         return None
-    selected = [(pt, rec) for pt, rec in zip(weighted, receivers)
+    usable = [rec for rec in receivers if rec.get("outdoor_policy") != "ignore"]
+    # Live floor extraction already excludes ignored receivers so they cannot
+    # consume candidate-floor slots. Also accept unfiltered inputs for callers
+    # exercising the pure wrapper directly.
+    matching = receivers if len(weighted) == len(receivers) else usable
+    if len(weighted) != len(matching):
+        return None
+    selected = [(pt, rec) for pt, rec in zip(weighted, matching)
                 if rec.get("outdoor_policy") != "ignore"]
     if len(selected) < 3:
         return None
+    max_age_s = finite_number(max_age_s, 30.0, minimum=0.0, maximum=1e6)
     base = [pt for pt, _rec in selected]
     fix = solver(base, bounds=bounds, min_weight_radius=min_weight_radius)
     if fix is None:
@@ -72,6 +80,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
         if rec.get("outdoor_policy") == "ignore":
             quality["receiver_diagnostics"].append({
                 "receiver": rec.get("entity_id", ""), "status": "excluded",
+                "used": False, "excluded": True,
                 "classification": "manual_ignore", "reliability_weight": 0.0,
                 "environmental_weight": 1.0, "building_crossings": 0,
                 **rec.get("_outdoor_reading", {}),

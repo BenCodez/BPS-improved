@@ -1554,12 +1554,17 @@ async def update_tracker_groups(hass):
         return
     scales = {f["name"]: f.get("scale") for f in layout.get("floor", [])} if isinstance(layout, dict) else {}
     safe_layout = {**layout, "tracker_groups": groups} if isinstance(layout, dict) else {}
-    fused = fuse_groups(safe_layout, originals, scales, time.time(), max_age_s=READING_MAX_AGE_SECS)
+    group_max_age = finite_number(_reading_max_age(layout), READING_MAX_AGE_SECS,
+                                  minimum=0.0, maximum=1e6) or READING_MAX_AGE_SECS
+    fused = fuse_groups(safe_layout, originals, scales, time.time(), max_age_s=group_max_age)
     lookup = [{"entity": p["ent"], "data": layout} for p in fused]
     previous = {p["ent"]: p for p in apitricords if p.get("group")}
     for position in fused:
         await hass.async_add_executor_job(_assign_group_zone, position, lookup, scales[position["floor"]])
         position["last_update_age_s"] = max(0.0, time.time() - position["updated"])
+        position["outdoor"].update(stale_after_s=group_max_age,
+                                   position_age_s=position["last_update_age_s"],
+                                   observed=position["updated"], stale=False)
         attrs = {k: v for k, v in position.items() if k not in {"ent", "zone"}}
         update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_zone", position["zone"], attrs)
         update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_floor", position["floor"], attrs)
@@ -1611,6 +1616,10 @@ def update_bps_sensor_state(hass, entity_id, state, attributes=None):
     sensor._state = state
     if attributes is not None:
         sensor._attrs = attributes
+    if getattr(sensor, "_bps_group_pending", False):
+        # AddEntitiesCallback schedules registration. Keep the latest state for
+        # HA's initial write, without writing a group before it has a platform.
+        return
     sensor.async_write_ha_state()
 
 async def process_single_entity(hass, new_global_data, eids):
@@ -1644,9 +1653,14 @@ def extract_candidate_floors(new_global_data, tmpentity):
     for entity in new_global_data:
         if entity["entity"] != tmpentity:
             continue
+        outdoor = outdoor_settings(entity["data"])["enabled"]
         for floor in entity["data"]["floor"]:
+            if outdoor and finite_number(floor.get("scale"), minimum=1e-6, maximum=1e6) is None:
+                continue
             nearest, cords = float("inf"), []
             for receiver in floor["receivers"]:
+                if outdoor and receiver.get("outdoor_policy") == "ignore":
+                    continue
                 distance = receiver.get("distance")
                 if distance is None or "r" not in receiver.get("cords", {}):
                     continue

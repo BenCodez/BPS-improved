@@ -233,6 +233,64 @@ def test_group_collision_with_unsolved_discovered_beacon(hass):
     assert len(bps.apitricords) == 1
 
 
+@pytest.mark.parametrize("cutoff, age, expected", [(5, 10, False), (90, 40, True)])
+def test_group_runtime_uses_configured_measurement_freshness(hass, cutoff, age, expected):
+    data = layout(True)
+    data["reading_max_age"] = cutoff
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]
+    run(save_bps_data(hass, data))
+    now = bps.time.time()
+    bps.apitricords = [{"ent": "beacon_a", "floor": "Property", "cords": [50, 50],
+                       "updated": now, "outdoor": {"observed": now - age,
+                       "stale_after_s": cutoff, "estimated_uncertainty_m": 3}}]
+    run(bps.update_tracker_groups(hass))
+    groups = [p for p in bps.apitricords if p.get("group")]
+    assert bool(groups) is expected
+    if groups:
+        assert groups[0]["outdoor"]["stale_after_s"] == cutoff
+        response = run(bps.BPSCordsAPI(hass).get(None))
+        assert response.json_body[-1]["outdoor"]["stale"] is False
+
+
+def test_ignored_receivers_do_not_consume_candidate_floor_slots(hass):
+    states(hass)
+    data = layout(True)
+    good = copy.deepcopy(data["floor"][0])
+    good["name"] = "Good"
+    bad = []
+    for i in range(bps.FLOOR_CANDIDATES):
+        floor = copy.deepcopy(good)
+        floor["name"] = f"Bad{i}"
+        floor["receivers"] = floor["receivers"][:3]
+        floor["receivers"][0]["outdoor_policy"] = "ignore"
+        bad.append(floor)
+    data["floor"] = bad + [good]
+    result, _ = solve(hass, data)
+    assert result[0]["floor"] == "Good"
+
+
+def test_ignored_receiver_not_counted_in_fused_diagnostics(hass):
+    states(hass)
+    data = layout(True)
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]
+    data["floor"][0]["receivers"][0]["outdoor_policy"] = "ignore"
+    run(save_bps_data(hass, data))
+    source = solve(hass, data)[0][0]
+    assert source["outdoor"]["receivers_used"] == 3
+    excluded = [d for d in source["outdoor"]["receiver_diagnostics"] if d["status"] == "excluded"]
+    assert excluded and all(d["used"] is False for d in excluded)
+    run(bps.update_tracker_groups(hass))
+    assert bps.apitricords[-1]["outdoor"]["receivers_used"] == 3
+
+
+def test_nonfinite_age_configuration_does_not_enter_json(hass):
+    states(hass)
+    data = layout(True)
+    data["reading_max_age"] = float("inf")
+    result, _ = solve(hass, data)
+    json.dumps(result, allow_nan=False)
+
+
 def test_existing_location_endpoints_remain_authenticated():
     for cls in (bps.BPSCordsAPI, bps.BPSHistoryAPI, bps.BPSReadAPIText, bps.BPSSaveAPIText):
         assert cls.requires_auth is True
