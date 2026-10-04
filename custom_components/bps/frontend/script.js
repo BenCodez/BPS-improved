@@ -673,6 +673,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
                 let apiresponse = await fetchBPSCords();
                 if (!Array.isArray(apiresponse) || apiresponse.length === 0) {
+                    // Keep last-known outdoor fixes, but repaint their age even
+                    // while requests fail. Poll success is not observation time.
+                    if (outdoor.settings(finalcords).enabled && lastTracks.size && img.naturalWidth > 0) redrawAll();
                     return;
                 }
                 // /api/bps/cords returns every tracked device; pick out each one

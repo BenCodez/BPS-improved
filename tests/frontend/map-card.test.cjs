@@ -5,7 +5,7 @@ const {join} = require('node:path');
 const vm = require('node:vm');
 const directory = join(__dirname, '../../custom_components/bps/frontend');
 const classes = new Map();
-const sandbox = vm.createContext({Date, console, HTMLElement: class {}, window: {},
+const sandbox = vm.createContext({Date, console: {warn() {}}, HTMLElement: class {}, window: {},
     customElements: {define: (name, type) => classes.set(name, type)}});
 vm.runInContext(readFileSync(join(directory, 'outdoor.js'), 'utf8'), sandbox);
 // Node's VM has no browser URL loader; the same helper is loaded above.
@@ -89,4 +89,20 @@ test('group zone sensor resolves fused map key/name and shows constituent beacon
     row.updated = 1; row.outdoor.observed = .5;
     await c._pollOnce();
     assert.equal(c._positions.get('bps_group_rover').receivedAt, 500, 'repeated poll preserves source observation time');
+});
+
+test('failed card poll repaints cached fixes so freshness can expire', async () => {
+    const c = card();
+    c._outdoorSettings.enabled = true;
+    const position = {x: 200, y: 100, receivedAt: 1, outdoor: {estimated_uncertainty_m: 4, stale_after_s: 30}};
+    c._positions.set('beacon_a', position);
+    c._apiFetch = async () => {throw new Error('connection lost');};
+    let repaints = 0;
+    c._redraw = () => {repaints++; assert.equal(sandbox.BPSOutdoor.isStale(position.outdoor, position.receivedAt), true);};
+    await c._pollOnce();
+    assert.equal(repaints, 1);
+    assert.equal(c._positions.get('beacon_a'), position);
+    c._outdoorSettings.enabled = false;
+    await c._pollOnce();
+    assert.equal(repaints, 1, 'legacy failed-poll behavior is unchanged');
 });

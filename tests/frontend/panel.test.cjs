@@ -7,8 +7,13 @@ const directory = join(__dirname, '../../custom_components/bps/frontend');
 const plain = x => JSON.parse(JSON.stringify(x));
 
 async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
-    const ids = new Map(), listeners = new Map(), requests = [];
-    const context = new Proxy({}, {get: (obj, key) => key === 'measureText' ? () => ({width: 30}) : key === 'createLinearGradient'
+    const ids = new Map(), listeners = new Map(), requests = [], intervals = [], canvasCalls = [];
+    const network = {cords: [], failCords: false};
+    let clock = Date.now();
+    class ClockDate extends Date {static now() {return clock;}}
+    const context = new Proxy({}, {get: (obj, key) => key === 'setLineDash' ? dash => canvasCalls.push(['dash', ...dash])
+        : key === 'arc' ? (...args) => canvasCalls.push(['arc', ...args])
+        : key === 'measureText' ? () => ({width: 30}) : key === 'createLinearGradient'
         ? () => ({addColorStop() {}}) : obj[key] || (() => {}), set: (obj, key, value) => {obj[key] = value; return true;}});
     function element(tag = 'div') {
         const events = new Map();
@@ -34,12 +39,14 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
         addEventListener: (name, cb) => listeners.set(name, cb), body: element(), documentElement: element()};
     const window = {location: {origin: 'https://home.test'}, scrollX: 0, scrollY: 0, innerHeight: 1000,
         addEventListener: (name, cb) => listeners.set(`window:${name}`, cb)}; window.parent = window;
-    const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date, URL, FormData, Response,
-        Image: class {constructor() {this.naturalWidth = 0;}}, setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {},
+    const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date: ClockDate, URL, FormData, Response,
+        Image: class {constructor() {this.naturalWidth = 0;}}, setTimeout: () => 1, clearTimeout() {}, setInterval: (cb, ms) => {intervals.push({cb, ms}); return intervals.length;}, clearInterval() {},
         requestAnimationFrame: () => 1, localStorage: {getItem: () => null, setItem() {}},
         fetch: async (url, options) => {
             requests.push({url, options});
+            if (url === '/api/bps/cords' && network.failCords) throw new Error('connection lost');
             const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: []}
+                : url === '/api/bps/cords' ? network.cords
                 : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? {} : [];
             return {ok: true, status: 200, json: async () => body};
         }});
@@ -54,7 +61,8 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
     const ready = listeners.get('DOMContentLoaded')();
     listeners.get('window:message')({origin: window.location.origin, data: {type: 'bps-auth', token: 'test-token'}});
     await ready;
-    return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests};
+    return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests, intervals, canvasCalls, network,
+        setClock: now => {clock = now;}};
 }
 const layout = () => ({floor: [{name: 'Property', scale: 20, zones: [], receivers: []}]});
 const points = [{x: 100, y: 100}, {x: 200, y: 100}, {x: 200, y: 200}, {x: 100, y: 200}];
@@ -126,4 +134,21 @@ test('disabled outdoor groups do not alter picker and genuine group-prefixed bea
     assert.deepEqual(keys(), ['beacon_a', 'bps_group_beacon', 'bps_group_rover']);
     p.el('outdoorEnabled').checked = false; await p.el('outdoorEnabled').fire('change');
     assert.deepEqual(keys(), ['beacon_a', 'bps_group_beacon']);
+});
+
+test('failed position poll repaints last-known panel uncertainty as stale', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const p = await panel(source); p.hooks.select('Property'); p.setClock(1000000);
+    p.network.cords = [{ent: 'beacon_a', cords: [100, 100], floor: 'Property', updated: 1000,
+        outdoor: {observed: 1000, estimated_uncertainty_m: 7.4, stale_after_s: 30}}];
+    p.el('entSelector').value = 'beacon_a'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click');
+    const poll = p.intervals.findLast(i => i.ms === 500);
+    assert.ok(poll, 'tracking timer started');
+    await poll.cb();
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 148), 'fresh circle was painted');
+    p.canvasCalls.length = 0; p.setClock(1031000); p.network.failCords = true;
+    await poll.cb();
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 148), 'cached circle repainted on failure');
+    assert.ok(p.canvasCalls.some(c => c[0] === 'dash' && c[1] === 3 && c[2] === 6), 'expired observation uses stale styling');
 });

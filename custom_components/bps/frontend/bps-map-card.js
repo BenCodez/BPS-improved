@@ -1091,6 +1091,7 @@ class BpsMapCard extends HTMLElement {
       }
     } catch (e) {
       console.warn("BPS poll:", e);
+      if (this._outdoorSettings.enabled) this._redraw();
     }
   }
 
