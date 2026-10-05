@@ -232,6 +232,9 @@ Group sensors are `sensor.bps_group_<id>_bps_zone` and
 receiver count, beacon count, disagreement and observation time in attributes.
 The sensor unique IDs follow the stable group ID, so keep that ID when renaming
 the dog. Disable or delete a group to remove its additional sensors.
+The panel and card clear a group's marker and diagnostics when a successful
+position snapshot no longer contains it, including when all member fixes
+expire. Network failures retain the last-known fix with stale styling.
 
 Constants in `environment.py`, `uncertainty.py` and `tracker_groups.py` are
 centralized starting heuristics for later tuning from property recordings.

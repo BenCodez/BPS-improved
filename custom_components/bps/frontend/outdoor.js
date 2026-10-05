@@ -21,6 +21,14 @@
             hide_uncertainty_below_m: number(s.hide_uncertainty_below_m) && s.hide_uncertainty_below_m >= 0
                 ? s.hide_uncertainty_below_m : 0};
     }
+    async function positionSnapshot(response) {
+        if (!response || !response.ok && response.status !== 404) return null;
+        const data = await response.json();
+        if (response.ok) return Array.isArray(data) ? data : null;
+        // The existing API reports its authoritative empty set with this 404.
+        // Other HTTP failures and malformed responses cannot revoke a fix.
+        return data && data.error === 'No data available' ? [] : null;
+    }
     function uncertaintyRadius(outdoor, scale, config) {
         if (!config || config.enabled !== true || config.show_uncertainty === false) return null;
         const metres = outdoor && outdoor.estimated_uncertainty_m;
@@ -123,6 +131,6 @@
         (out.receiver_diagnostics || []).forEach(r => lines.push(`${r.receiver}: measured ${display(r.measured_distance_m, ' m')}, corrected ${display(r.corrected_distance_m, ' m')}, age ${display(r.reading_age_s, ' s')}, ${r.classification || 'unknown'}, building crossings ${r.building_crossings ?? '—'}${r.reflection_risk ? ', reflection / multipath risk' : ''}, environment weight ${display(r.environmental_weight)}, reliability ${display(r.reliability_weight)}, ${r.status || 'unknown'}`));
         return lines.join('\n');
     }
-    root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, groups, environment, settings, uncertaintyRadius,
+    root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, groups, environment, settings, positionSnapshot, uncertaintyRadius,
         drawUncertainty, isStale, fixTime, validPolygon, upsertEnvironment, upsertGroup, diagnosticsText});
 })(globalThis);

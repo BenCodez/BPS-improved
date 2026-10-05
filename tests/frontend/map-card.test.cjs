@@ -106,3 +106,51 @@ test('failed card poll repaints cached fixes so freshness can expire', async () 
     await c._pollOnce();
     assert.equal(repaints, 1, 'legacy failed-poll behavior is unchanged');
 });
+
+for (const kind of ['partial', 'empty', 'no-data']) {
+    test(`card clears vanished group marker and diagnostics on authoritative ${kind} response`, async () => {
+        const c = card(); const cv = canvas(); c._canvas = cv.value;
+        c._config.entities.push('sensor.bps_group_rover_bps_zone');
+        c._config.show_outdoor_diagnostics = true; c._outdoorSettings.enabled = true;
+        // Keep HA floor state unchanged to exercise the API cache cleanup.
+        c._hass.states['sensor.bps_group_rover_bps_floor'] = {state: 'Property'};
+        c._baseImage = {}; c._setStatus = text => {c.status = text;};
+        c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+        c._redraw = () => {cv.calls.length = 0; c._drawMarkers();};
+        const beacon = {ent: 'beacon_a', floor: 'Property', cords: [100, 100],
+            outdoor: {estimated_uncertainty_m: 3}};
+        const group = {...beacon, ent: 'bps_group_rover', group: true, name: 'Rover',
+            beacons_reporting: 1, total_beacons: 1, outdoor: {estimated_uncertainty_m: 7.4}};
+        c._apiFetch = async () => ({ok: true, json: async () => [beacon, group]});
+        await c._pollOnce();
+        assert.equal(c._positions.has('bps_group_rover'), true);
+        assert.match(c.status, /Rover: 1\/1/);
+        const body = kind === 'partial' ? [beacon] : kind === 'empty' ? [] : {error: 'No data available'};
+        c._apiFetch = async () => ({ok: kind !== 'no-data', status: kind === 'no-data' ? 404 : 200, json: async () => body});
+        await c._pollOnce();
+        assert.equal(c._positions.has('bps_group_rover'), false);
+        assert.equal(c._positions.has('beacon_a'), true, 'legacy beacon caching remains unchanged');
+        assert.ok(!cv.calls.some(v => Array.isArray(v) && v[2] === 148), 'removed group uncertainty is not drawn');
+        assert.ok(!cv.calls.includes('Rover'), 'removed group marker is not drawn');
+        assert.doesNotMatch(c.status, /Rover: 1\/1/);
+    });
+}
+
+test('card retains group fixes through HTTP failures and malformed responses', async () => {
+    const c = card(); c._outdoorSettings.enabled = true;
+    c._config.entities = ['sensor.bps_group_rover_bps_zone'];
+    c._hass.states['sensor.bps_group_rover_bps_floor'] = {state: 'Property'};
+    c._redraw = () => {};
+    const row = {ent: 'bps_group_rover', group: true, name: 'Rover', floor: 'Property', cords: [100, 100]};
+    c._apiFetch = async () => ({ok: true, json: async () => [row]});
+    await c._pollOnce();
+    const cached = c._positions.get('bps_group_rover');
+    for (const [status, body] of [[500, []], [401, []], [404, {error: 'Not found'}], [200, {}]]) {
+        c._apiFetch = async () => ({ok: status === 200, status, json: async () => body});
+        await c._pollOnce();
+        assert.equal(c._positions.get('bps_group_rover'), cached);
+    }
+    c._apiFetch = async () => {throw new Error('connection lost');};
+    await c._pollOnce();
+    assert.equal(c._positions.get('bps_group_rover'), cached);
+});

@@ -1051,27 +1051,26 @@ class BpsMapCard extends HTMLElement {
       // A 404 here just means no tracker has position data yet; receivers
       // should still render, so this is not an early return.
       const res = await this._apiFetch("/api/bps/cords");
-      if (res && res.ok) {
-        const list = await res.json();
-        if (Array.isArray(list)) {
-          for (const ent of this._config.entities) {
-            const key = this._trackerKeyFromEntity(ent);
-            if (!this._entityOnThisFloor(key)) {
-              this._positions.delete(key);
-              continue;
-            }
-            const row = list.find((item) => item.ent === key);
-            if (row && Array.isArray(row.cords) && row.cords.length >= 2) {
-              this._positions.set(key, {
-                x: row.cords[0],
-                y: row.cords[1],
-                label: row.group ? row.name || this._friendlyLabel(key) : this._friendlyLabel(key),
-                zone: row.zone != null ? row.zone : "",
-                outdoor: row.outdoor,
-                receivedAt: BPSOutdoor.fixTime(row),
-                payload: row,
-              });
-            }
+      const list = await BPSOutdoor.positionSnapshot(res);
+      if (Array.isArray(list)) {
+        for (const ent of this._config.entities) {
+          const key = this._trackerKeyFromEntity(ent);
+          if (!this._entityOnThisFloor(key)) {
+            this._positions.delete(key);
+            continue;
+          }
+          const row = list.find((item) => item.ent === key);
+          if (!row && this._positions.get(key)?.payload?.group === true) this._positions.delete(key);
+          if (row && Array.isArray(row.cords) && row.cords.length >= 2) {
+            this._positions.set(key, {
+              x: row.cords[0],
+              y: row.cords[1],
+              label: row.group ? row.name || this._friendlyLabel(key) : this._friendlyLabel(key),
+              zone: row.zone != null ? row.zone : "",
+              outdoor: row.outdoor,
+              receivedAt: BPSOutdoor.fixTime(row),
+              payload: row,
+            });
           }
         }
       }

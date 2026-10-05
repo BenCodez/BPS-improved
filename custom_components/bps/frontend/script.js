@@ -672,7 +672,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                     return;
                 }
                 let apiresponse = await fetchBPSCords();
-                if (!Array.isArray(apiresponse) || apiresponse.length === 0) {
+                if (!Array.isArray(apiresponse) || apiresponse.length === 0
+                    && ![...lastTracks.values()].some(t => t.group === true)) {
                     // Keep last-known outdoor fixes, but repaint their age even
                     // while requests fail. Poll success is not observation time.
                     if (outdoor.settings(finalcords).enabled && lastTracks.size && img.naturalWidth > 0) redrawAll();
@@ -685,6 +686,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 let activeResult = null, activeSame = true;
                 trackedDevices.forEach(entKey => {
                     const result = apiresponse.find(item => item.ent === entKey);
+                    if (!result && lastTracks.get(entKey)?.group === true) lastTracks.delete(entKey);
                     if (!result || !Array.isArray(result.cords) || result.cords.length < 2) return;
                     const x = result.cords[0], y = result.cords[1];
                     // Record every fix for the trace-path overlay, whether or not
@@ -2712,18 +2714,17 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 const response = await bpsFetch(apiUrl); // Make a GET request to the API
         
-            if (!response.ok) {
+            const data = await outdoor.positionSnapshot(response);
+            if (data === null) {
                 console.error("Failed to fetch BPS data:", response.statusText); // Handle error status
-                return [];
+                return null;
             }
-        
-            const data = await response.json();
             return data;
 
             } catch (error) {
             // Handle possible error during fetch-call
             console.error("Error fetching BPS data:", error);
-            return [];
+            return null;
             }
         }
 

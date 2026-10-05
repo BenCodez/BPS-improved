@@ -8,7 +8,7 @@ const plain = x => JSON.parse(JSON.stringify(x));
 
 async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
     const ids = new Map(), listeners = new Map(), requests = [], intervals = [], canvasCalls = [];
-    const network = {cords: [], failCords: false};
+    const network = {cords: [], cordsStatus: 200, failCords: false};
     let clock = Date.now();
     class ClockDate extends Date {static now() {return clock;}}
     const context = new Proxy({}, {get: (obj, key) => key === 'setLineDash' ? dash => canvasCalls.push(['dash', ...dash])
@@ -48,14 +48,15 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
             const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: []}
                 : url === '/api/bps/cords' ? network.cords
                 : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? {} : [];
-            return {ok: true, status: 200, json: async () => body};
+            const status = url === '/api/bps/cords' ? network.cordsStatus : 200;
+            return {ok: status === 200, status, json: async () => body};
         }});
     vm.runInContext(readFileSync(join(directory, 'outdoor.js'), 'utf8'), sandbox);
     // Expose closures only in the VM so production keeps its private state.
     const code = readFileSync(join(directory, 'script.js'), 'utf8').replace('    // With a single configured floor', `
         globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
-            setPoints: points => {zonePoints = points;}, editing: () => editTarget};
+            setPoints: points => {zonePoints = points;}, editing: () => editTarget, tracks: () => lastTracks};
     // With a single configured floor`);
     vm.runInContext(code, sandbox);
     const ready = listeners.get('DOMContentLoaded')();
@@ -229,4 +230,56 @@ test('failed position poll repaints last-known panel uncertainty as stale', asyn
     await poll.cb();
     assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 148), 'cached circle repainted on failure');
     assert.ok(p.canvasCalls.some(c => c[0] === 'dash' && c[1] === 3 && c[2] === 6), 'expired observation uses stale styling');
+});
+
+for (const kind of ['partial', 'empty', 'no-data']) {
+    test(`panel clears vanished groups from authoritative ${kind} response`, async () => {
+        const source = layout(); source.outdoor_tracking = {enabled: true};
+        source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a']}];
+        const p = await panel(source); p.hooks.select('Property'); p.setClock(1000000);
+        const beacon = {ent: 'beacon_a', cords: [100, 100], floor: 'Property', updated: 1000,
+            outdoor: {observed: 1000, estimated_uncertainty_m: 3}};
+        const group = {...beacon, ent: 'bps_group_rover', group: true, name: 'Rover',
+            beacons_reporting: 1, total_beacons: 1, outdoor: {...beacon.outdoor, estimated_uncertainty_m: 7.4}};
+        p.network.cords = [beacon, group];
+        for (const key of ['beacon_a', 'bps_group_rover']) {
+            p.el('entSelector').value = key; await p.el('entSelector').fire('change');
+        }
+        p.el('outdoorDiagnostics').checked = true;
+        await p.el('starttrack').fire('click');
+        const poll = p.intervals.findLast(i => i.ms === 500);
+        await poll.cb();
+        assert.equal(p.hooks.tracks().has('bps_group_rover'), true);
+        assert.match(p.el('outdoorDiagnosticText').textContent, /Rover: 1\/1/);
+        p.canvasCalls.length = 0;
+        p.network.cords = kind === 'partial' ? [beacon] : kind === 'empty' ? [] : {error: 'No data available'};
+        p.network.cordsStatus = kind === 'no-data' ? 404 : 200;
+        await poll.cb();
+        assert.equal(p.hooks.tracks().has('bps_group_rover'), false);
+        assert.equal(p.hooks.tracks().has('beacon_a'), true, 'legacy beacon caching remains unchanged');
+        assert.ok(!p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 148), 'removed group uncertainty is not drawn');
+        assert.doesNotMatch(p.el('outdoorDiagnosticText').textContent, /Rover: 1\/1/);
+        assert.equal(p.el('zonediv').style.display, kind === 'partial' ? '' : 'none');
+    });
+}
+
+test('panel retains group fixes through HTTP failures and malformed responses', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a']}];
+    const p = await panel(source); p.hooks.select('Property'); p.setClock(1000000);
+    p.network.cords = [{ent: 'bps_group_rover', group: true, name: 'Rover', cords: [100, 100],
+        floor: 'Property', updated: 1000, outdoor: {observed: 1000, estimated_uncertainty_m: 7.4}}];
+    p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click');
+    const poll = p.intervals.findLast(i => i.ms === 500);
+    await poll.cb();
+    const cached = p.hooks.tracks().get('bps_group_rover');
+    for (const [status, body] of [[500, []], [401, []], [404, {error: 'Not found'}], [200, {}]]) {
+        p.network.cordsStatus = status; p.network.cords = body;
+        await poll.cb();
+        assert.equal(p.hooks.tracks().get('bps_group_rover'), cached);
+    }
+    p.network.failCords = true;
+    await poll.cb();
+    assert.equal(p.hooks.tracks().get('bps_group_rover'), cached);
 });
