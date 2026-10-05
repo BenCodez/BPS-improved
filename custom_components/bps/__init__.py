@@ -1580,9 +1580,16 @@ async def update_tracker_groups(hass):
         position["outdoor"].update(stale_after_s=group_max_age,
                                    position_age_s=position["last_update_age_s"],
                                    observed=position["updated"], stale=False)
-        attrs = {k: v for k, v in position.items() if k not in {"ent", "zone"}}
-        update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_zone", position["zone"], attrs)
-        update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_floor", position["floor"], attrs)
+        # Entity attributes keep source timestamps rather than ticking ages.
+        # Live ages remain in the API payload for the panel/card diagnostics.
+        attrs = {k: v for k, v in position.items() if k not in {"ent", "zone", "last_update_age_s"}}
+        attrs["outdoor"] = {k: v for k, v in position["outdoor"].items() if k != "position_age_s"}
+        attrs["beacon_positions"] = [{k: v for k, v in beacon.items() if k != "age_s"}
+                                     for beacon in position["beacon_positions"]]
+        update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_zone", position["zone"], attrs,
+                                only_changed=True)
+        update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_floor", position["floor"], attrs,
+                                only_changed=True)
         # Freshness can change the fused point without another observation.
         # History dates the published result; API freshness keeps source time.
         # Its existing movement/interval/heartbeat gates bound repeated rows.
@@ -1600,7 +1607,7 @@ async def update_tracker_groups(hass):
         ent = "bps_group_" + group["id"]
         if ent not in live:
             for kind in ("zone", "floor"):
-                update_bps_sensor_state(hass, f"sensor.{ent}_bps_{kind}", "unknown", {})
+                update_bps_sensor_state(hass, f"sensor.{ent}_bps_{kind}", "unknown", {}, only_changed=True)
     for ent in previous.keys() - live:
         get_position_history(hass).mark_gap(ent)
     apitricords = originals + fused
@@ -1621,13 +1628,15 @@ def _assign_group_zone(position, lookup, scale):
     position["nearest_zone"] = find_nearest_zone(lookup, position["ent"], position["floor"], point)
 
 
-def update_bps_sensor_state(hass, entity_id, state, attributes=None):
+def update_bps_sensor_state(hass, entity_id, state, attributes=None, *, only_changed=False):
     """Update state (and optional extra attributes) on a registered BPS SensorEntity."""
     sensors_cache = hass.data.get("bps_sensors")
     if not sensors_cache:
         return
     sensor = sensors_cache.get(entity_id)
     if sensor is None:
+        return
+    if only_changed and sensor._state == state and (attributes is None or getattr(sensor, "_attrs", None) == attributes):
         return
     sensor._state = state
     if attributes is not None:

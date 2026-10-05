@@ -241,6 +241,8 @@ still apply; API observation timestamps retain the source age.
 Group sensors are `sensor.bps_group_<id>_bps_zone` and
 `sensor.bps_group_<id>_bps_floor`, with the fused pixel position, uncertainty,
 receiver count, beacon count, disagreement and observation time in attributes.
+Unchanged group results do not write sensor states on every poll. Sensor
+attributes retain source timestamps; live ages are derived in the API/UI.
 The sensor unique IDs follow the stable group ID, so keep that ID when renaming
 the dog. Disable or delete a group to remove its additional sensors.
 The panel and card clear a group's marker and diagnostics when a successful

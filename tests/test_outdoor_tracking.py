@@ -313,7 +313,7 @@ def test_generic_timeout_preserves_valid_groups_and_fusion_expires_them_once(has
     assert states_written == ["Property"]
     assert history.tracks["bps_group_rover"].force_gap is False
     run(bps.update_tracker_groups(hass))
-    assert states_written == ["Property", "Property"]
+    assert states_written == ["Property"]
     assert history.tracks["bps_group_rover"].force_gap is False
     assert history.query("bps_group_rover", 0, 2000, 100)["count"] == 1
 
@@ -324,9 +324,62 @@ def test_generic_timeout_preserves_valid_groups_and_fusion_expires_them_once(has
     assert any(p.get("group") for p in bps.apitricords)
     run(bps.update_tracker_groups(hass))
     assert bps.apitricords == [source]
-    assert states_written == ["Property", "Property", "unknown"]
+    assert states_written == ["Property", "unknown"]
     assert history.tracks["bps_group_rover"].force_gap is True
     assert history.query("bps_group_rover", 0, 2000, 100)["count"] == 1
+
+
+@pytest.mark.parametrize("members", [1, 2])
+def test_group_entities_publish_changes_without_ticking_age_attributes(hass, monkeypatch, members):
+    now = 1000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(True)
+    names = ["beacon_a", "beacon_b"][:members]
+    data["tracker_groups"] = [{"id": "rover", "beacons": names}]
+    run(save_bps_data(hass, data))
+    bps.apitricords = [{"ent": name, "floor": "Property", "cords": [0, 0],
+                       "updated": now - i, "outdoor": {"observed": now - i,
+                       "estimated_uncertainty_m": 3}}
+                      for i, name in enumerate(names)]
+    sensors = []
+    for kind in ("zone", "floor"):
+        sensor = SimpleNamespace(_state="unknown", _attrs={}, writes=0)
+        def write(sensor=sensor):
+            sensor.writes += 1
+        sensor.async_write_ha_state = write
+        hass.data.setdefault("bps_sensors", {})[f"sensor.bps_group_rover_bps_{kind}"] = sensor
+        sensors.append(sensor)
+    run(bps.update_tracker_groups(hass))
+    assert all(sensor.writes == 1 for sensor in sensors)
+    attrs = copy.deepcopy(sensors[0]._attrs)
+    assert "last_update_age_s" not in attrs
+    assert "position_age_s" not in attrs["outdoor"]
+    assert all("age_s" not in beacon for beacon in attrs["beacon_positions"])
+    for now in range(1001, 1011):
+        run(bps.update_tracker_groups(hass))
+    assert all(sensor.writes == 1 and sensor._attrs == attrs for sensor in sensors)
+    response = run(bps.BPSCordsAPI(hass).get(None))
+    group = response.json_body[-1]
+    assert group["outdoor"]["position_age_s"] == 10
+    assert group["beacon_positions"][0]["age_s"] == 10
+
+    # A new observation at the same coordinates still updates the entities.
+    now = 1011
+    bps.apitricords[0]["updated"] = now
+    bps.apitricords[0]["outdoor"]["observed"] = now
+    run(bps.update_tracker_groups(hass))
+    assert all(sensor.writes == 2 and sensor._attrs["updated"] == now for sensor in sensors)
+    if members == 2:
+        now = 1030  # The older member expires without a new observation.
+        run(bps.update_tracker_groups(hass))
+        assert all(sensor.writes == 3 and sensor._attrs["beacons_reporting"] == 1 for sensor in sensors)
+    now = 1042
+    run(bps.update_tracker_groups(hass))
+    writes = [sensor.writes for sensor in sensors]
+    assert all(sensor._state == "unknown" and sensor._attrs == {} for sensor in sensors)
+    now += 1
+    run(bps.update_tracker_groups(hass))
+    assert [sensor.writes for sensor in sensors] == writes
 
 
 def test_group_collision_with_unsolved_discovered_beacon(hass):
