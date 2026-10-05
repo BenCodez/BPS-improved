@@ -56,6 +56,7 @@ from .environment import outdoor_settings, finite_number
 from .outdoor_tracking import solve_outdoor, account_for_published_position
 from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
+from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1069,10 +1070,13 @@ async def update_receiver_radii(hass, eids):
     tracker_factor = _tracker_distance_factor(eids["data"], eids["entity"])
     max_age = _reading_max_age(eids["data"])
     outdoor = outdoor_settings(eids["data"])["enabled"]
+    recording = getattr(hass, "data", {}).get(DOMAIN, {}).get("_diagnostics")
+    capture = bool(recording and recording.active and eids["entity"] in recording.sources)
     if outdoor:
         max_age = finite_number(max_age, READING_MAX_AGE_SECS, minimum=0.0, maximum=1e6)
     for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
         for receiver in floor["receivers"]:
+            receiver.pop("_diagnostic_reading", None)
             if outdoor:
                 # A saved or previous-cycle radius is never a current reading.
                 receiver.pop("distance", None)
@@ -1173,6 +1177,16 @@ async def update_receiver_radii(hass, eids):
                     # through the slab shrink its through-floor slant and
                     # steal the election from the correct floor.
                     receiver["distance"] = distance
+                    if capture:
+                        ts = getattr(rec_value, "last_updated", None) or getattr(rec_value, "last_changed", None)
+                        try:
+                            observed = ts.timestamp()
+                        except (AttributeError, ValueError, TypeError, OSError, OverflowError):
+                            observed = None
+                        receiver["_diagnostic_reading"] = {
+                            "observed": observed, "corrected_distance_m": distance,
+                            "horizontal_distance_m": horizontal,
+                        }
                 except ValueError:
                     #_LOGGER.info(f"Invalid numerical value: {rec_value.state}")
                     pass
@@ -1403,6 +1417,18 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         # declared parent when inside one, otherwise the current main zone.
         parent_zone = sub_parent if sub_parent else zone
         extra = {}
+        recording = hass.data.get(DOMAIN, {}).get("_diagnostics")
+        if recording and recording.active and entity in recording.sources:
+            selected_floor = next(f for f in entity_layout["floor"] if f["name"] == lowest_floor_name)
+            selected_receivers = [r for r in selected_floor["receivers"]
+                if r.get("distance") is not None and "r" in r.get("cords", {})
+                and not (outdoor and r.get("outdoor_policy") == "ignore")]
+            extra["diagnostic_inputs"] = [{"receiver": r.get("entity_id"),
+                "observed": r.get("_diagnostic_reading", {}).get("observed"),
+                "corrected_distance_m": r.get("_diagnostic_reading", {}).get("corrected_distance_m"),
+                "horizontal_distance_m": r.get("_diagnostic_reading", {}).get("horizontal_distance_m"),
+                "radius_px": pt[2], "jump_environment_weight": pt[3]}
+                for r, pt in zip(selected_receivers, weighted)]
         if outdoor and elected["outdoor"] is not None:
             quality = elected["outdoor"]
             account_for_published_position(quality, tricords, (avg_x, avg_y), scale)
@@ -1475,6 +1501,9 @@ def update_or_add_entry(data, new_entry):
             item.pop("outdoor", None)
             if "outdoor" in new_entry:
                 item["outdoor"] = new_entry["outdoor"]
+            item.pop("diagnostic_inputs", None)
+            if "diagnostic_inputs" in new_entry:
+                item["diagnostic_inputs"] = new_entry["diagnostic_inputs"]
             return data
 
     # If "ent" was not found, add as new post
@@ -2046,6 +2075,7 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSSelfTestAPI(hass))
             hass.http.register_view(BPSTrackerTuneAPI())
             hass.http.register_view(BPSHistoryAPI(hass))
+            hass.http.register_view(BPSDiagnosticsAPI(_diagnostic_snapshot, _diagnostic_inventory))
             hass.data["bps_views_registered"] = True
 
         config_path = hass.config.path()
@@ -2113,6 +2143,7 @@ async def async_setup(hass, config):
         old_task = hass.data.get("bps_update_task")
         if old_task:
             old_task.cancel()
+        activate_diagnostics(hass)
         hass.data["bps_update_task"] = hass.async_create_task(update_tracked_entities(hass))
 
         async def handle_homeassistant_stop(event):
@@ -2121,6 +2152,7 @@ async def async_setup(hass, config):
             update_task = hass.data.pop("bps_update_task", None)
             if update_task:
                 update_task.cancel()
+            await shutdown_diagnostics(hass)
             try:
                 await flush_position_history(hass)
             except Exception as e:
@@ -2152,6 +2184,8 @@ async def async_unload_entry(hass: HomeAssistant, entry):
     state_listener_unsub = hass.data.pop("bps_state_listener_unsub", None)
     if state_listener_unsub:
         state_listener_unsub()
+
+    await shutdown_diagnostics(hass)
 
     # Get whatever the tracking loop buffered since the last 60 s flush onto
     # disk before the task goes away. The in-memory ring survives an unload
@@ -2462,6 +2496,104 @@ class BPSReadAPIText(HomeAssistantView):
         except Exception as e:
             _LOGGER.error(f"Failed to read coordinates: {e}")
             return web.Response(status=500, text="Failed to read coordinates")
+
+def _diagnostic_inventory(hass):
+    """Only actual Bermuda beacons and enabled logical groups are selectable."""
+    known = sorted({eid[len("sensor."):].split("_distance_to_", 1)[0]
+                    for eid in _bermuda_distance_sensor_ids(hass)})
+    data = get_bps_data(hass)
+    groups = normalize_groups(data, known)
+    return {"trackers": [{"key": key, "name": key} for key in known] + [
+        {"key": "bps_group_" + group["id"], "name": group["name"] + " (group)"}
+        for group in groups], "floors": [f["name"] for f in data.get("floor", [])
+        if isinstance(f.get("name"), str) and finite_number(f.get("scale"), minimum=1e-6) is not None]
+        if isinstance(data, dict) else []}
+
+
+def _diagnostic_snapshot(hass, targets, now):
+    """Detached, read-only snapshot. Published telemetry retains its own clock.
+
+    Current sensor readings are deliberately separate from the earlier solver
+    inputs in positions: polling never pretends these were one atomic solve.
+    """
+    data = get_bps_data(hass)
+    if not isinstance(data, dict):
+        raise ValueError("Save a BPS layout before recording")
+    known = {eid[len("sensor."):].split("_distance_to_", 1)[0]
+             for eid in _bermuda_distance_sensor_ids(hass)}
+    groups = {"bps_group_" + g["id"]: g["beacons"] for g in normalize_groups(data, known)}
+    members = {target: groups.get(target, [target]) for target in targets}
+    beacons = sorted({beacon for values in members.values() for beacon in values})
+    if len(beacons) > 16:
+        raise ValueError("Record at most 16 constituent beacons at once")
+    floors = data.get("floor", [])
+    if sum(len(f.get("receivers", [])) for f in floors) > 128:
+        raise ValueError("Diagnostic recording supports at most 128 receiver placements")
+    context = {"layout": {key: copy.deepcopy(data[key]) for key in (
+        "outdoor_tracking", "tracker_groups", "tracker_height", "tracker_heights",
+        "tracker_ref_offsets", "reading_max_age", "position_timeout") if key in data},
+        "target_members": members, "defaults": {"tracker_height_m": TRACKER_HEIGHT_M,
+        "reading_max_age_s": READING_MAX_AGE_SECS, "position_timeout_s": STALE_POSITION_SECS}}
+    context["layout"]["floor"] = [{key: copy.deepcopy(floor[key]) for key in (
+        "name", "scale", "receivers", "zones", "subzones", "environment") if key in floor} for floor in floors]
+    cal = hass.data.get(DOMAIN, {}).get("calibration", {})
+    context["calibration"] = {key: copy.deepcopy(cal.get(key)) for key in (
+        "mode", "floor", "results", "applied", "last_solved_at")}
+    readings = []
+    max_age = _reading_max_age(data)
+    for beacon in beacons:
+        factor, tracker_height = _tracker_distance_factor(data, beacon), _tracker_height(data, beacon)
+        for floor in floors:
+            for receiver in floor.get("receivers", []):
+                slug = receiver.get("entity_id", "")
+                source = f"sensor.{beacon}_distance_to_{slug}"
+                state = hass.states.get(source)
+                row = {"tracker": beacon, "receiver": slug, "floor": floor.get("name"),
+                       "entity_id": source, "status": "missing", "tracker_height_m": tracker_height,
+                       "tracker_distance_factor": factor, "ignored": receiver.get("outdoor_policy") == "ignore"}
+                if state is not None:
+                    raw = state.state
+                    unit = state.attributes.get("unit_of_measurement")
+                    age = _reading_age_secs(state, now=now)
+                    row.update({"raw_state": str(raw)[:256], "unit": str(unit)[:32] if unit is not None else None,
+                                "age_s": age, "status": "invalid"})
+                    ts = getattr(state, "last_updated", None) or getattr(state, "last_changed", None)
+                    try:
+                        row["observed"] = ts.timestamp()
+                    except (AttributeError, ValueError, TypeError, OSError, OverflowError):
+                        row["observed"] = None
+                    try:
+                        measured = float(raw)
+                        if unit in DistanceConverter.VALID_UNITS and unit != UnitOfLength.METERS:
+                            measured = DistanceConverter.convert(measured, unit, UnitOfLength.METERS)
+                        if math.isfinite(measured) and measured >= 0:
+                            correction = receiver.get("correction")
+                            correction = float(correction) if isinstance(correction, (int, float)) and correction > 0 else 1.0
+                            corrected = measured * correction * factor
+                            horizontal = corrected
+                            height = receiver.get("height")
+                            if isinstance(height, (int, float)) and 0 <= height <= 10:
+                                horizontal = math.sqrt(max(corrected ** 2 - (height - tracker_height) ** 2,
+                                    min(corrected ** 2, MIN_WEIGHT_RADIUS_M ** 2)))
+                            row.update({"measured_distance_m": measured, "corrected_distance_m": corrected,
+                                        "horizontal_distance_m": horizontal, "receiver_correction": correction,
+                                        "assumed_unit_m": unit not in DistanceConverter.VALID_UNITS,
+                                        "status": "current"})
+                            if max_age and age is not None and age >= max_age:
+                                row["status"] = "stale"
+                    except (ValueError, TypeError, OverflowError):
+                        pass
+                    if raw in ("unknown", "unavailable"):
+                        row["status"] = str(raw)
+                readings.append(row)
+    wanted = set(targets) | set(beacons)
+    positions = [copy.deepcopy(p) for p in hass.data.get(DOMAIN, {}).get("apitricords", [])
+                 if p.get("ent") in wanted]
+    return {"time": now, "context": context, "readings": readings, "positions": positions,
+            "calibration_status": {"state": cal.get("state", "idle"), "error": cal.get("error"),
+                "pair_counts": {str(k): len(v) for k, v in list(cal.get("samples", {}).items())[:256]}},
+            "offline_receivers": list(hass.data.get(DOMAIN, {}).get("rl_offline", []))[:128]}
+
 
 class BPSReceiverStatusAPI(HomeAssistantView):
     """Current offline receivers (Bermuda liveness), polled live by the panel."""

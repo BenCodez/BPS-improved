@@ -40,6 +40,7 @@ The setup panel
 - [Pre-populated receiver picker](#pre-populated-receiver-picker) — pick receivers from a searchable list instead of typing names.
 - [Offline receivers](#offline-receivers) — dead proxies are flagged red in the panel, updating live.
 - [Debugging tab](#debugging-tab) — a live view of how every receiver and beacon links to Bermuda, to untangle naming mismatches and quiet nodes.
+- [Diagnostic recordings](#diagnostic-recordings) — export receiver readings and known-position tests for accuracy analysis.
 
 Accuracy
 - [Receiver auto-calibration](#receiver-auto-calibration) — the probes calibrate each other, continuously.
@@ -486,6 +487,64 @@ not reporting right now; the Debugging tab is where the full per-entity detail
 lives.)
 
 ---
+
+## Diagnostic recordings
+
+Open **BPS → Debugging → Diagnostic recording**, click **Load trackers / refresh**,
+choose an original Bermuda tracker or an enabled dog group, and start a 5, 10,
+or 30 minute recording. A group records its constituent beacons as well as the
+fused result. Recording works with Outdoor Tracking enabled or disabled.
+It never applies corrections or changes tracking, layout, or calibration.
+
+For useful accuracy evidence:
+
+1. Save the receiver positions, map scale, and environment polygons first.
+2. Keep the actual collar still at a measured location. Enter its floor and
+   **X/Y in metres from the map's top-left corner** (right/down), and click
+   **Mark known position**. Leave it there for 30–60 seconds.
+3. Click **Clear known position before moving**. Repeat at several locations:
+   open yard, near the metal shop, behind a building, and among trees. Add notes
+   for collar orientation, doors, weather, or an observed jump. Walking without
+   a known-position marker still records useful availability and route data.
+4. Stop and **Download recording**. Attach `bps-diagnostics.json` when asking
+   for a diagnosis or improvements. Include what looked wrong and when.
+
+The authenticated export includes raw Bermuda distance states and units,
+normalised/corrected ranges, reading timestamps/ages, missing/stale/invalid
+readings, receiver heights and corrections, tracker power trims, original and
+group fixes, pre-filter coordinates, exact published solver radii, outdoor
+weights/classifications/reflection flags, calibration results/state/pair counts,
+offline receivers, notes, and known-position intervals. Configuration versions
+are retained when geometry or calibration changes during recording. Map images,
+icons, HA tokens, and unrelated entity states are not included. Sensor snapshots
+and previously published fixes keep separate timestamps: a poll does not claim
+to be an atomic solve or a BLE/RSSI packet capture.
+
+Capture is **off by default** and adds no sampling task until started. Samples
+are taken about every two seconds, with limits of 30 minutes, 16 MiB of encoded
+data, 128 receiver placements, and 16 constituent beacons (API: up to eight
+selected tracker keys). Limits or failures stop recording while preserving
+previous frames. Data stays in memory, survives a BPS reload, and is lost on an
+HA restart. Download before starting another recording, which replaces the old
+one. **Clear recording** removes the buffered data. The file contains property
+geometry, tracker identifiers, and location history; share it deliberately.
+
+For an offline report, run on any machine with Python 3:
+
+```sh
+python3 tools/bps_diagnose.py bps-diagnostics.json --out diagnosis.json
+```
+
+The report shows receiver availability, known-position range bias, wrong-floor
+fixes, raw versus filtered median/p95 error, and empirical uncertainty coverage.
+Unchanged fixes/readings are deduplicated for error measurements. Cached/future
+observations and fixes from before a known-position marker are excluded. A
+group's timestamps are checked against its recorded original fixes. A changed
+context is not used to rescale an older cached fix. Without valid known-position
+samples, accuracy metrics are `null`; availability still helps diagnose failures.
+This evidence can guide receiver placement, height/scale corrections, path
+weighting, or calibration work. Bias can also reflect wrong map geometry or
+collar height, so the analyser does not automatically change calibration.
 
 ## Receiver auto-calibration
 

@@ -6580,6 +6580,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
+    if (globalThis.BPSDiagnostics) globalThis.BPSDiagnostics.init(bpsFetch);
+
     // With a single configured floor there is nothing to choose: open it
     // right away. This must run LAST — drawElements touches state declared
     // throughout this closure, so everything has to be initialized first.

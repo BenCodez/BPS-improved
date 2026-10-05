@@ -410,6 +410,32 @@
         <!-- ============================ DEBUGGING ============================ -->
         <section class="bps-tabpanel" data-tabpanel="debugging">
             <div class="bps-card">
+                <h3>Diagnostic recording</h3>
+                <p>Record a tracker or dog group to investigate poor accuracy. Includes receiver readings, positions, map geometry, and calibration settings. Tracking and calibration continue as usual.</p>
+                <p>Recordings stay in memory until restart. Download before starting another recording. The file contains your property layout and location history.</p>
+                <div class="bps-field"><label for="diagnosticTarget">Tracker</label><select id="diagnosticTarget"></select></div>
+                <div class="bps-field"><label for="diagnosticDuration">Duration</label><select id="diagnosticDuration"><option value="600">10 minutes</option><option value="300">5 minutes</option><option value="1800">30 minutes</option></select></div>
+                <div class="bps-btn-row">
+                    <button type="button" id="diagnosticRefresh" class="bps-btn bps-btn-outline">Load trackers / refresh</button>
+                    <button type="button" id="diagnosticStart" class="bps-btn bps-btn-primary">Start recording</button>
+                    <button type="button" id="diagnosticStop" class="bps-btn bps-btn-outline" disabled>Stop</button>
+                    <button type="button" id="diagnosticDownload" class="bps-btn bps-btn-outline" disabled>Download recording</button>
+                    <button type="button" id="diagnosticClear" class="bps-btn bps-btn-outline" disabled>Clear recording</button>
+                </div>
+                <p id="diagnosticStatus" role="status">Load trackers to begin. Capture is off.</p>
+                <h4>Known-position markers</h4>
+                <p>For an accuracy measurement, keep the collar still at a measured location. Enter metres from the map's top-left corner: X to the right, Y downward. Mark the position, then clear it <strong>before moving</strong>. Keep each test location for 30–60 seconds.</p>
+                <div class="bps-field"><label for="diagnosticFloor">Known floor</label><select id="diagnosticFloor"></select></div>
+                <div class="bps-field"><label for="diagnosticX">Known X (m)</label><input id="diagnosticX" type="number" step="any"></div>
+                <div class="bps-field"><label for="diagnosticY">Known Y (m)</label><input id="diagnosticY" type="number" step="any"></div>
+                <div class="bps-field"><label for="diagnosticLabel">Marker / note</label><input id="diagnosticLabel" type="text" maxlength="240" placeholder="Near metal shop; collar facing north"></div>
+                <div class="bps-btn-row">
+                    <button type="button" id="diagnosticMark" class="bps-btn bps-btn-outline" disabled>Mark known position</button>
+                    <button type="button" id="diagnosticRelease" class="bps-btn bps-btn-outline" disabled>Clear known position</button>
+                    <button type="button" id="diagnosticNote" class="bps-btn bps-btn-outline" disabled>Add note</button>
+                </div>
+            </div>
+            <div class="bps-card">
                 <div class="bps-section-head">
                     <h3>Receiver linking</h3>
                     <span class="tooltip">❓
@@ -422,6 +448,7 @@
     </div>
 
     <script src="outdoor.js"></script>
+    <script src="diagnostics.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

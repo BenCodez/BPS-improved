@@ -66,6 +66,33 @@ def solve(hass, data):
     return copy.deepcopy(bps.apitricords), item
 
 
+@pytest.mark.parametrize("enabled", [None, True])
+def test_recording_records_actual_solver_observations_without_changing_fix(hass, monkeypatch, enabled):
+    data = layout(enabled)
+    now = 1000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    states(hass, age=5)
+    baseline, _ = solve(hass, data)
+    assert "diagnostic_inputs" not in baseline[0]
+    bps.apitricords = []
+    bps._kf_position_state.clear()
+    bps._floor_probability.clear()
+    bps._floor_challenge.clear()
+    bps._floor_dark_cycles.clear()
+    bps.update_trilateration_and_zone.last_r_values = {}
+    bps.update_trilateration_and_zone.last_floor = {}
+    recording = SimpleNamespace(active=True, sources=frozenset({"beacon_a"}))
+    hass.data.setdefault("bps", {})["_diagnostics"] = recording
+    captured, _ = solve(hass, data)
+    inputs = captured[0].pop("diagnostic_inputs")
+    assert len(inputs) == 4 and all(r["observed"] == 995 for r in inputs)
+    assert {r["receiver"] for r in inputs} == {"p0", "p1", "p2", "p3"}
+    assert captured == baseline
+    recording.active = False
+    next_fix, _ = solve(hass, data)
+    assert "diagnostic_inputs" not in next_fix[0]
+
+
 def test_missing_and_disabled_settings_never_enter_outdoor_solver(hass, monkeypatch):
     states(hass)
     def forbidden(*a, **kw):

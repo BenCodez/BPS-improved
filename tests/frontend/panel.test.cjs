@@ -52,6 +52,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
             return {ok: status === 200, status, json: async () => body};
         }});
     vm.runInContext(readFileSync(join(directory, 'outdoor.js'), 'utf8'), sandbox);
+    vm.runInContext(readFileSync(join(directory, 'diagnostics.js'), 'utf8'), sandbox);
     // Expose closures only in the VM so production keeps its private state.
     const code = readFileSync(join(directory, 'script.js'), 'utf8').replace('    // With a single configured floor', `
         globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata,
