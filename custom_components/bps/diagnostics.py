@@ -59,6 +59,7 @@ class Recording:
         self.annotations = []
         self.targets = []
         self.sources = frozenset()
+        self.members = {}
         self.started = None
         self.ended = None
         self.deadline = 0
@@ -86,11 +87,13 @@ class Recording:
             targets = list(dict.fromkeys(targets))
             initial = self.snapshot(self.hass, targets, started)
             sources = frozenset(b for values in initial["context"]["target_members"].values() for b in values)
+            members = {key: tuple(values) for key, values in initial["context"]["target_members"].items()}
             packed = await self.hass.async_add_executor_job(pack, initial)
             if not self.accepting:
                 raise ValueError("BPS stopped while preparing the recording")
             self.targets, self.started, self.ended = targets, started, None
             self.sources = sources
+            self.members = members
             self.frames, self.contexts, self.annotations, self.bytes = [], {}, [], 0
             self.deadline = time.monotonic() + duration
             self.active, self.reason = True, "Recording"
@@ -123,6 +126,7 @@ class Recording:
                     now = time.time()
                     data = self.snapshot(self.hass, self.targets, now)
                     self.sources = frozenset(b for values in data["context"]["target_members"].values() for b in values)
+                    self.members = {key: tuple(values) for key, values in data["context"]["target_members"].items()}
                     self._append(await self.hass.async_add_executor_job(pack, data))
         except asyncio.CancelledError:
             raise
@@ -153,6 +157,7 @@ class Recording:
                 task.cancel()
             self.frames, self.contexts, self.annotations = [], {}, []
             self.bytes, self.targets, self.started, self.ended = 0, [], None, None
+            self.sources, self.members = frozenset(), {}
             self.reason = "Cleared"
         if task:
             try:

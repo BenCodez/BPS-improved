@@ -2522,7 +2522,12 @@ def _diagnostic_snapshot(hass, targets, now):
     known = {eid[len("sensor."):].split("_distance_to_", 1)[0]
              for eid in _bermuda_distance_sensor_ids(hass)}
     groups = {"bps_group_" + g["id"]: g["beacons"] for g in normalize_groups(data, known)}
-    members = {target: groups.get(target, [target]) for target in targets}
+    recording = hass.data.get(DOMAIN, {}).get("_diagnostics")
+    retained = recording.members if recording else {}
+    # Keep recording the selected dog's original tags if its group or Outdoor
+    # Tracking is disabled/deleted during an A/B diagnostic session.
+    members = {target: [target] if target in known else list(groups.get(target, retained.get(target, [target])))
+               for target in targets}
     beacons = sorted({beacon for values in members.values() for beacon in values})
     if len(beacons) > 16:
         raise ValueError("Record at most 16 constituent beacons at once")

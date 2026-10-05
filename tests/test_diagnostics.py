@@ -302,3 +302,50 @@ def test_offline_command_reads_export_and_writes_machine_readable_report(tmp_pat
     source.write_text("[]", encoding="utf-8")
     failed = subprocess.run([sys.executable, str(tool), str(source)], capture_output=True, text=True)
     assert failed.returncode == 2 and "Expected a bps-diagnostics-v1" in failed.stderr
+
+
+@pytest.mark.parametrize("member_time", [1, 3])
+def test_new_original_cannot_refresh_an_older_group_for_ground_truth(member_time):
+    data = bundle()
+    for frame in data["frames"][1:]:
+        frame["positions"][0].update({"updated": 4})
+        frame["positions"][0]["outdoor"]["observed"] = 4
+        frame["positions"].append({"ent": "bps_group_dog", "group": True, "floor": "Yard", "updated": member_time,
+            "cords": [40, 40], "beacon_positions": [{"ent": "tag", "updated": member_time,
+                "used": True, "cords": [40, 40], "floor": "Yard"}]})
+    report = analyse_tool.analyse(data)
+    assert report["trackers"]["bps_group_dog"]["published_error"]["samples"] == 0
+
+
+@pytest.mark.parametrize("age_gate", [0, 30])
+def test_matching_group_sources_are_scored_with_the_correct_fusion_clock(age_gate):
+    data = bundle()
+    data["contexts"]["c"]["layout"]["reading_max_age"] = age_gate
+    for frame in data["frames"][1:]:
+        frame["positions"][0]["updated"] = 4
+        member_time = 4 if age_gate == 0 else 3
+        frame["positions"].append({"ent": "bps_group_dog", "group": True, "floor": "Yard", "updated": member_time,
+            "cords": [40, 40], "beacon_positions": [{"ent": "tag", "updated": member_time,
+                "used": True, "cords": [40, 40], "floor": "Yard"}]})
+    report = analyse_tool.analyse(data)
+    assert report["trackers"]["bps_group_dog"]["published_error"]["samples"] == 1
+
+
+def test_repeated_solves_of_identical_observations_are_not_independent_error_samples():
+    data = bundle()
+    data["frames"][2]["positions"][0]["updated"] = 5
+    assert analyse_tool.analyse(data)["trackers"]["tag"]["published_error"]["samples"] == 1
+
+
+def test_recorded_group_keeps_original_measurements_when_outdoor_tracking_is_disabled(hass, monkeypatch):
+    async def scenario():
+        data, _states = configure(hass, monkeypatch)
+        rec = diag.get_recording(hass, bps._diagnostic_snapshot)
+        await rec.start(["bps_group_dog"], 10)
+        data["outdoor_tracking"]["enabled"] = False
+        snap = bps._diagnostic_snapshot(hass, ["bps_group_dog"], 100)
+        assert {row["tracker"] for row in snap["readings"]} == {"tag", "tag2"}
+        assert snap["context"]["target_members"] == {"bps_group_dog": ["tag", "tag2"]}
+        await rec.clear()
+        assert rec.members == {} and not rec.sources
+    asyncio.run(scenario())

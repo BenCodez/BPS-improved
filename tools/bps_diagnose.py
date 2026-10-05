@@ -45,7 +45,7 @@ def truth_for(bundle, target, at, members):
     return max(candidates, key=lambda m: m["time"]) if candidates else None
 
 
-def observation_times(position, positions):
+def observation_times(position, positions, use_observation_age=True):
     if position.get("group"):
         # With reading_max_age=0 a group's member timestamp is the solve time,
         # not the measurement time. Consult the original fixes as well.
@@ -53,7 +53,18 @@ def observation_times(position, positions):
         for source in position.get("beacon_positions", []):
             if source.get("used"):
                 original = positions.get(source.get("ent"))
-                times.extend(observation_times(original, positions) if original and not original.get("group") else [None])
+                if not original or original.get("group"):
+                    times.append(None)
+                    continue
+                clock = original.get("outdoor", {}).get("observed", original.get("updated")) if use_observation_age else original.get("updated")
+                if (source.get("updated") != clock or source.get("cords") != original.get("cords")
+                        or source.get("floor") != original.get("floor")):
+                    # A poll can interleave between individual publication and
+                    # group fusion. New originals cannot refresh an old group.
+                    times.append(None)
+                    continue
+                times.append(source.get("updated"))
+                times.extend(observation_times(original, positions, use_observation_age))
         return times
     if "diagnostic_inputs" in position:
         return [reading.get("observed") for reading in position["diagnostic_inputs"]]
@@ -83,6 +94,7 @@ def analyse(bundle):
         layout = context["layout"]
         floors = {f["name"]: f for f in layout.get("floor", [])}
         positions = {p["ent"]: p for p in frame.get("positions", [])}
+        use_observation_age = layout.get("reading_max_age", 30) != 0
         wanted = set(bundle["targets"]) | {b for v in members.values() for b in v}
         for key in wanted:
             stats = tracker[key]
@@ -92,7 +104,9 @@ def analyse(bundle):
                 continue
             # Fusion can change while the same newest member remains unchanged;
             # retain meaningful output changes without counting identical polls.
-            fingerprint = (key, position.get("updated"), json.dumps(position.get("cords")),
+            times = observation_times(position, positions, use_observation_age)
+            epoch = tuple(times) if times and all(number(t) for t in times) else (position.get("updated"),)
+            fingerprint = (key, epoch, json.dumps(position.get("cords")),
                            json.dumps(position.get("raw")), position.get("floor"),
                            json.dumps([(p.get("ent"), p.get("updated"), p.get("used"))
                                        for p in position.get("beacon_positions", [])]))
@@ -107,7 +121,6 @@ def analyse(bundle):
                     seen_diagnostics.add(ident)
                     receiver[(key, position.get("floor"), d.get("receiver"))]["source_diagnostics"][d.get("classification", "unknown")] += 1
             truth = truth_for(bundle, key, now, members)
-            times = observation_times(position, positions)
             # Never score old/future fixes against a newly marked location, or
             # reproject a cached fix using newly changed geometry/calibration.
             if not truth or not times or any(not number(t) or t < truth["time"] or t > now for t in times):

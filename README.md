@@ -493,7 +493,9 @@ lives.)
 Open **BPS → Debugging → Diagnostic recording**, click **Load trackers / refresh**,
 choose an original Bermuda tracker or an enabled dog group, and start a 5, 10,
 or 30 minute recording. A group records its constituent beacons as well as the
-fused result. Recording works with Outdoor Tracking enabled or disabled.
+fused result. Its original tags continue recording if the group or Outdoor
+Tracking is disabled during the session, allowing comparisons. Recording works
+with Outdoor Tracking enabled or disabled.
 It never applies corrections or changes tracking, layout, or calibration.
 
 For useful accuracy evidence:
