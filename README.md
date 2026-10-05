@@ -163,9 +163,12 @@ inputs. Bermuda remains required and no Sextant migration or Bermuda changes are
 needed. Enabling it does not change the existing beacon trackers or their
 entities.
 
-Open **Map & Setup → Outdoor tracking** to enable the feature. On each floor,
-choose **Building**, **Dense trees**, **Light vegetation**, or **Custom**, then
-draw and name a polygon on the existing floor plan. Building polygons also have
+Open **Map & Setup → Outdoor tracking: trees, buildings & dog groups** and
+enable the feature. Select a saved floor and click **Add building** or **Add
+trees**. Click at least three corners on the map, name the shape, press **✓
+Save**, then **Save Floor Plan**. Use **Environment type → Light vegetation**
+or **Custom** with **Draw environment polygon** for other areas. Click a saved
+shape's name to edit it, or **×** to delete it. Building polygons also have
 a material classification: **Unknown**, **Light**, **Heavy**, or **Metal / reflective (shop)**.
 These are conservative starting weights, not universal dB values. BPS examines
 the receiver-to-fix path: for example, an indoor receiver reaching outdoors can

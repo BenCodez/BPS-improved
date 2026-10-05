@@ -322,7 +322,7 @@
                          Bermuda sensor, and scanners reporting a distance but unplaced. -->
                     <div id="scannerissues"></div>
                     <details id="outdoorEditor" class="bps-outdoor-editor">
-                        <summary>Outdoor tracking &amp; dog groups</summary>
+                        <summary>Outdoor tracking: trees, buildings &amp; dog groups</summary>
                         <p class="bps-hint">Optional. Changes are persisted with Save Floor Plan. Environment shapes change measurement trust, not distance.</p>
                         <label class="bps-switch"><input type="checkbox" id="outdoorEnabled"><span>Enable Outdoor Tracking</span></label>
                         <div id="outdoorControls" hidden>
@@ -331,6 +331,9 @@
                             <input id="outdoorThreshold" type="number" min="0" step="0.1" class="bps-input" value="0">
                             <label class="bps-switch"><input type="checkbox" id="outdoorDiagnostics"><span>Show tracking diagnostics</span></label>
                             <p class="bps-hint">Estimated uncertainty is a heuristic radius, not a guaranteed confidence interval. Grey dotted circles mark stale fixes.</p>
+                            <p class="bps-hint">Select a saved floor, add a building or tree area, click at least three corners on the map and name the shape. Press ✓ Save, then Save Floor Plan.</p>
+                            <button type="button" id="addBuilding" class="bps-btn bps-btn-outline">Add building</button>
+                            <button type="button" id="addTrees" class="bps-btn bps-btn-outline">Add trees</button>
                             <label class="bps-label" for="environmentType">Environment type</label>
                             <select id="environmentType" class="bps-input"><option value="building">Building</option><option value="dense_trees">Dense trees</option><option value="light_vegetation">Light vegetation</option><option value="custom">Custom</option></select>
                             <label class="bps-label" for="environmentMaterial">Building material</label>

@@ -110,6 +110,29 @@ test('panel shared polygon editor creates/edits/cancels/deletes environments and
     assert.equal(reloaded.hooks.layout().floor[0].environment.length, 0);
 });
 
+test('Add building and Add trees save separate editable map areas', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const p = await panel(source); p.hooks.select('Property');
+    p.el('environmentMaterial').value = 'metal';
+    await p.el('addBuilding').fire('click');
+    assert.equal(p.hooks.editing().kind, 'environment');
+    assert.equal(p.el('environmentType').value, 'building');
+    p.hooks.setPoints(points); p.el('zoneName').value = 'Metal shop';
+    assert.equal(p.hooks.finalizeShape(), true); p.hooks.cancelShapeEdit();
+    await p.el('addTrees').fire('click');
+    assert.equal(p.hooks.editing().kind, 'environment');
+    assert.equal(p.el('environmentType').value, 'dense_trees');
+    assert.equal(p.el('environmentMaterial').value, 'unknown');
+    p.hooks.setPoints(points.map(p => ({x: p.x + 300, y: p.y}))); p.el('zoneName').value = 'Tree line';
+    assert.equal(p.hooks.finalizeShape(), true); p.hooks.cancelShapeEdit();
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].environment.map(p => [p.name, p.type, p.material]),
+        [['Metal shop', 'building', 'metal'], ['Tree line', 'dense_trees', 'unknown']]);
+    const reloaded = await panel(saved);
+    assert.deepEqual(plain(reloaded.hooks.layout().floor[0].environment), saved.floor[0].environment);
+});
+
 test('panel groups retain stable IDs and original beacon picker entries', async () => {
     const p = await panel(layout());
     p.el('outdoorEnabled').checked = true; await p.el('outdoorEnabled').fire('change');

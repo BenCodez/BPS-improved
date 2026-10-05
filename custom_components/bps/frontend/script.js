@@ -6058,6 +6058,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         messdiv.textContent = 'Draw corners, drag a corner or the whole shape, right-click to delete a corner. Choose type/material in Outdoor settings, name the polygon, then press ✓ Save. Save Floor Plan to persist.';
     }
     document.getElementById('drawEnvironment').addEventListener('click', () => beginEnvironmentEdit());
+    document.getElementById('addBuilding').addEventListener('click', () => {
+        document.getElementById('environmentType').value = 'building';
+        beginEnvironmentEdit();
+    });
+    document.getElementById('addTrees').addEventListener('click', () => {
+        document.getElementById('environmentType').value = 'dense_trees';
+        document.getElementById('environmentMaterial').value = 'unknown';
+        beginEnvironmentEdit();
+    });
     function drawEnvironmentPolygons(floor) {
         if (!outdoor.settings(finalcords).enabled) return;
         for (const p of outdoor.environment(floor)) {
