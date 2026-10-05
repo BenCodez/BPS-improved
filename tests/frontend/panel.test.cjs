@@ -147,6 +147,37 @@ test('panel groups retain stable IDs and original beacon picker entries', async 
     assert.deepEqual(p.el('entSelector').options.map(o => o.value).filter(Boolean), ['beacon_a', 'beacon_b']);
 });
 
+test('accepted optional group defaults remain visible, enabled and preserved across edits', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [
+        {id: 'rover', beacons: ['beacon_a']},
+        {id: 'spot', name: 'Spot', beacons: ['beacon_b']},
+        {id: 'paused', name: 'Paused', enabled: false, beacons: ['beacon_a']},
+    ];
+    const p = await panel(source);
+    const picker = () => p.el('entSelector').options.map(o => o.value).filter(Boolean);
+    assert.deepEqual(picker(), ['beacon_a', 'beacon_b', 'bps_group_rover', 'bps_group_spot']);
+    // Loading defaults must not rewrite the stored layout.
+    assert.deepEqual(plain(p.hooks.layout().tracker_groups), source.tracker_groups);
+    p.el('groupSelector').value = 'rover'; await p.el('groupSelector').fire('change');
+    assert.equal(p.el('groupName').value, 'rover');
+    assert.equal(p.el('groupEnabled').checked, true);
+    p.el('groupSelector').value = 'spot'; await p.el('groupSelector').fire('change');
+    assert.equal(p.el('groupEnabled').checked, true);
+    p.el('groupName').value = 'Spot renamed'; await p.el('saveGroup').fire('click');
+    assert.equal(p.hooks.layout().tracker_groups.find(g => g.id === 'spot').enabled, true);
+    p.el('groupSelector').value = 'paused'; await p.el('groupSelector').fire('change');
+    assert.equal(p.el('groupEnabled').checked, false);
+    await p.el('deleteGroup').fire('click');
+    assert.deepEqual(plain(p.hooks.layout().tracker_groups.map(g => g.id)), ['rover', 'spot']);
+    p.hooks.select('Property');
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    const reloaded = await panel(saved);
+    assert.deepEqual(reloaded.el('entSelector').options.map(o => o.value).filter(Boolean),
+        ['beacon_a', 'beacon_b', 'bps_group_rover', 'bps_group_spot']);
+});
+
 test('disabled outdoor groups do not alter picker and genuine group-prefixed beacons remain', async () => {
     const source = layout();
     source.tracker_groups = [{id: 'rover', name: 'Rover', enabled: true, beacons: ['beacon_a']}];

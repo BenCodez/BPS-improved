@@ -93,6 +93,17 @@ test('group editing preserves original beacons, updates in place, and rejects en
     for (const beacon of ['sensor.beacon_a', 'bps_group_other']) assert.throws(() => out.upsertGroup(layout, {id: 'rover', name: 'Dog', enabled: true, beacons: [beacon]}));
 });
 
+test('group readers and writers use backend optional defaults without mutating input', () => {
+    const layout = {tracker_groups: [{id: 'rover', beacons: ['beacon_a']},
+        {id: 'paused', name: '  ', enabled: false, beacons: ['beacon_b']}]};
+    const original = plain(layout);
+    assert.deepEqual(plain(out.groups(layout)), [{id: 'rover', name: 'rover', enabled: true, beacons: ['beacon_a']},
+        {id: 'paused', name: 'paused', enabled: false, beacons: ['beacon_b']}]);
+    assert.deepEqual(plain(layout), original);
+    out.upsertGroup(layout, {id: 'spot', name: 'Spot', beacons: ['beacon_a']});
+    assert.equal(layout.tracker_groups.find(g => g.id === 'spot').enabled, true);
+});
+
 test('diagnostics explain measurement trust and fused beacon disagreement', () => {
     const text = out.diagnosticsText({ent: 'bps_group_rover', group: true, name: 'Rover', beacons_reporting: 2, total_beacons: 2,
         beacon_disagreement_m: 4.5, fusion_confidence: 'moderate', beacon_positions: [{ent: 'beacon_a', estimated_uncertainty_m: 3}],

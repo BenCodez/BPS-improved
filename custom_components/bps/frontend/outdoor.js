@@ -6,7 +6,10 @@
     const POLICIES = ['auto', 'normal', 'prefer', 'deprioritize', 'ignore'];
     const number = v => typeof v === 'number' && Number.isFinite(v);
     const groups = layout => Array.isArray(layout && layout.tracker_groups)
-        ? layout.tracker_groups.filter(g => g && typeof g.id === 'string' && typeof g.name === 'string' && Array.isArray(g.beacons)) : [];
+        ? layout.tracker_groups.filter(g => g && typeof g.id === 'string'
+            && (g.name === undefined || typeof g.name === 'string') && Array.isArray(g.beacons))
+            .map(g => ({...g, name: (typeof g.name === 'string' && g.name.trim() || g.id).slice(0, 128),
+                enabled: g.enabled === undefined || g.enabled === true})) : [];
     const environment = floor => Array.isArray(floor && floor.environment)
         ? floor.environment.filter(p => p && typeof p.id === 'string' && typeof p.name === 'string') : [];
     function settings(layout) {
@@ -94,7 +97,7 @@
             || !Array.isArray(group.beacons) || !group.beacons.length
             || group.beacons.some(b => typeof b !== 'string' || !b || b.startsWith('sensor.') || b.startsWith('bps_group_')))
             throw new Error('Choose a name, a stable lowercase ID (letters, numbers, underscores), and at least one beacon.');
-        const copy = {...group, name: group.name.trim(), enabled: group.enabled === true,
+        const copy = {...group, name: group.name.trim(), enabled: group.enabled === undefined || group.enabled === true,
             beacons: [...new Set(group.beacons)]};
         if (!Array.isArray(layout.tracker_groups)) layout.tracker_groups = [];
         const index = layout.tracker_groups.findIndex(g => g.id === group.id);
