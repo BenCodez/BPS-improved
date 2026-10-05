@@ -358,8 +358,19 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             # group's zone/floor cache IDs. Reclaim those sensors after their
             # former owner is removed; ordinary value updates do not discover
             # sensors again. This scan only runs when groups are retired.
+            positions = {p["ent"]: p for p in hass.data.get("bps", {}).get("apitricords", [])
+                         if not p.get("group")}
             for entity in get_filtered_entities(hass):
                 ensure_sensors_for_entity(hass, entity, cache, additions)
+                position = positions.get(entity)
+                if position is not None:
+                    # The real beacon may already have solved before this
+                    # ownership handoff. Buffer its fix for the initial HA
+                    # write instead of waiting for another successful solve.
+                    for kind in ("zone", "floor"):
+                        sensor = cache.get(f"sensor.{entity}_bps_{kind}")
+                        if sensor in additions:
+                            sensor._state = position.get(kind, "unknown")
         for group in groups:
             ent = "bps_group_" + group["id"]
             for kind in ("zone", "floor"):

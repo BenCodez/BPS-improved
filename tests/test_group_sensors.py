@@ -124,6 +124,7 @@ def test_discovered_colliding_beacon_reclaims_group_zone_and_floor_sensors(platf
     listeners["state_changed"](types.SimpleNamespace(data={"entity_id": distance_id, "old_state": None}))
     # Discovery cannot create ordinary zone/floor sensors until the group owner retires.
     assert hass.data["bps_sensors"]["sensor.bps_group_rover_bps_zone"].unique_id == "bps_group_zone_rover"
+    hass.data["bps"]["apitricords"] = [{"ent": "bps_group_rover", "zone": "Yard", "floor": "Property"}]
     asyncio.run(sync([]))
     assert all(sensor.removed for sensor in old_group_sensors)
     for suffix, _label in module.SENSOR_KINDS:
@@ -133,6 +134,8 @@ def test_discovered_colliding_beacon_reclaims_group_zone_and_floor_sensors(platf
         assert sensor.unique_id == f"{suffix}_bps_group_rover"
         assert registry.entities[eid].unique_id == sensor.unique_id
     zone = hass.data["bps_sensors"]["sensor.bps_group_rover_bps_zone"]
+    assert zone.state == "Yard" and getattr(zone, "writes", 0) == 0
+    assert hass.data["bps_sensors"]["sensor.bps_group_rover_bps_floor"].state == "Property"
     bps.update_bps_sensor_state(hass, zone.entity_id, "Yard")
     assert zone.state == "Yard" and zone.writes == 1
     # Ordinary value changes and unchanged group sync avoid another registry scan.

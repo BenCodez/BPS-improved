@@ -1455,8 +1455,13 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         update_bps_sensor_state(hass, f"sensor.{entity}_bps_sub_zone", sub_zone, {"parent_zone": parent_zone})
 
 def update_or_add_entry(data, new_entry):
-    for item in data:
+    for index, item in enumerate(data):
         if item["ent"] == new_entry["ent"]:  # Check if "ent" already exists
+            if item.get("group") and not new_entry.get("group"):
+                # A discovered real beacon takes ownership of this map key.
+                # Replace all fused metadata so reconciliation keeps its fix.
+                data[index] = new_entry
+                return data
             item["cords"] = new_entry["cords"]  # Update "cords"
             item["zone"] = new_entry["zone"]  # Update "zone"
             item["floor"] = new_entry["floor"]  # Floor the fix belongs to

@@ -412,6 +412,32 @@ def test_solver_delay_preserves_used_reading_time_and_group_freshness(hass, monk
     assert quality["stale"] is (delay == 5)
 
 
+def test_first_real_beacon_solve_replaces_published_colliding_group(hass):
+    data = layout(True)
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]
+    run(save_bps_data(hass, data))
+    states(hass)
+    solve(hass, data)
+    run(bps.update_tracker_groups(hass))
+    assert bps.apitricords[-1]["ent"] == "bps_group_rover"
+    assert bps.apitricords[-1]["group"] is True
+    bps.tracked_entities = ["sensor.bps_group_rover_distance_to_p0"]
+    item = {"entity": "bps_group_rover", "data": copy.deepcopy(data)}
+    run(bps.process_single_entity(hass, [item], item))
+    real = copy.deepcopy(bps.apitricords[-1])
+    assert real["ent"] == "bps_group_rover"
+    assert not real.get("group")
+    for field in ("name", "beacon_positions", "beacons_reporting", "fusion_confidence"):
+        assert field not in real
+    assert "radii" in real and "raw" in real
+    run(bps.update_tracker_groups(hass))
+    assert bps.apitricords[-1] == real
+    assert [p["ent"] for p in bps.apitricords] == ["beacon_a", "bps_group_rover"]
+    response = run(bps.BPSCordsAPI(hass).get(None))
+    assert response.json_body[-1]["cords"] == real["cords"]
+    assert not response.json_body[-1].get("group")
+
+
 def test_group_collision_with_unsolved_discovered_beacon(hass):
     data = layout(True)
     data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]
