@@ -104,7 +104,7 @@ def _position_index(positions):
     return result
 
 
-def _fix(beacon, position, scales, now, max_age_s):
+def _fix(beacon, position, scales, now, max_age_s, use_observation_age):
     if not isinstance(position, Mapping) or position.get("group"):
         return None
     updated = _number(position.get("updated"))
@@ -124,13 +124,14 @@ def _fix(beacon, position, scales, now, max_age_s):
         return None
     outdoor = position.get("outdoor")
     outdoor = outdoor if isinstance(outdoor, Mapping) else {}
-    # A solve may reuse a reading shortly before it expires. Its solve time
-    # must not extend the observation's lifetime by another group timeout.
+    # With the reading gate enabled, a recent solve must not extend an old
+    # observation's lifetime. Validate observations even when the gate is off.
     if "observed" in outdoor:
         observed = _number(outdoor["observed"])
         if observed is None or observed > updated:
             return None
-        updated = observed
+        if use_observation_age:
+            updated = observed
     if now - updated > max_age_s:
         return None
     residual = _number(position.get("rms_m"))
@@ -176,13 +177,16 @@ def _distance(first, second):
                       first["cords"][1] - second["cords"][1]) / first["scale"]
 
 
-def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S):
+def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
+               use_observation_age=True):
     """Fuse one normalized enabled group, returning a fresh payload or None.
 
     Different floors are never averaged. A distant fix cannot drag a better
     fix into a midpoint: the best-quality anchor accepts only nearby members.
     Discarded fixes still increase uncertainty and remain in diagnostics.
-    ``updated`` is a source observation timestamp, never this refresh's time.
+    ``updated`` is a source timestamp, never this refresh's time. When the
+    caller disables the reading-age gate, expire by source solve time instead
+    of observation time using ``use_observation_age=False``.
     Callers recompute zones using the resulting point and the existing rules.
     """
     if not isinstance(group, Mapping) or group.get("enabled", True) is not True:
@@ -200,7 +204,7 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S):
     index = _position_index(positions)
     fixes = []
     for beacon in dict.fromkeys(members):
-        fix = _fix(beacon, index.get(beacon), scales, now, max_age_s)
+        fix = _fix(beacon, index.get(beacon), scales, now, max_age_s, use_observation_age)
         if fix is not None:
             fixes.append(fix)
     if not fixes:
@@ -271,7 +275,8 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S):
                         "receiver_observations": sum(p["receivers_used"] for p in accepted)}}
 
 
-def fuse_groups(layout, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S):
+def fuse_groups(layout, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
+                use_observation_age=True):
     """Normalize and fuse configured groups; disabled layouts do no work."""
     if not normalize_groups(layout):
         return []
@@ -279,4 +284,5 @@ def fuse_groups(layout, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S):
     groups = normalize_groups(layout, known_trackers=(
         ent for ent, p in index.items() if not p.get("group")))
     return [payload for group in groups
-            if (payload := fuse_group(group, index, scales, now, max_age_s)) is not None]
+            if (payload := fuse_group(group, index, scales, now, max_age_s,
+                                      use_observation_age=use_observation_age)) is not None]

@@ -348,11 +348,11 @@
                         <label class="bps-label" for="groupSelector">Dog / tracker group</label>
                         <select id="groupSelector" class="bps-input"><option value="">New group</option></select>
                         <label class="bps-label" for="groupName">Name</label><input id="groupName" class="bps-input" placeholder="Rover">
-                        <label class="bps-label" for="groupId">Stable ID</label><input id="groupId" class="bps-input" placeholder="rover" pattern="[a-z0-9]+(_[a-z0-9]+)*">
+                        <label class="bps-label" for="groupId">Stable ID</label><input id="groupId" class="bps-input" placeholder="rover" maxlength="64" pattern="[a-z0-9_]{1,64}">
                         <label class="bps-label" for="groupBeacons">Beacons (select multiple)</label><select id="groupBeacons" class="bps-input" multiple size="4"></select>
                         <label class="bps-switch"><input id="groupEnabled" type="checkbox" checked><span>Enable group</span></label>
                         <div class="bps-btnrow"><button type="button" id="saveGroup" class="bps-btn bps-btn-outline">Apply group</button><button type="button" id="deleteGroup" class="bps-btn bps-btn-outline">Delete group</button></div>
-                        <p class="bps-hint">Original beacon trackers remain available. Apply group, Save Floor Plan, then add the group from the Tracking picker.</p>
+                        <p class="bps-hint">Up to 32 groups, 16 beacons per group, and 64 characters per ID. Original beacon trackers remain available. Apply group, Save Floor Plan, then add the group from the Tracking picker.</p>
                     </details>
                     <!-- Compact "not reporting" heads-up (issue #64): placed receivers on
                          this floor that are linked but have no distance right now (names

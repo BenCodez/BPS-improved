@@ -1558,8 +1558,15 @@ async def update_tracker_groups(hass):
     scales = {f["name"]: f.get("scale") for f in layout.get("floor", [])} if isinstance(layout, dict) else {}
     safe_layout = {**layout, "tracker_groups": groups} if isinstance(layout, dict) else {}
     group_max_age = finite_number(_reading_max_age(layout), READING_MAX_AGE_SECS,
-                                  minimum=0.0, maximum=1e6) or READING_MAX_AGE_SECS
-    fused = fuse_groups(safe_layout, originals, scales, time.time(), max_age_s=group_max_age)
+                                  minimum=0.0, maximum=1e6)
+    use_observation_age = group_max_age > 0
+    if not use_observation_age:
+        # Disabling the measurement-age gate also applies to group sources.
+        # Expire by the last source solve, using the normal position grace.
+        group_max_age = finite_number(layout.get("position_timeout"), STALE_POSITION_SECS,
+                                      minimum=0.0) or STALE_POSITION_SECS
+    fused = fuse_groups(safe_layout, originals, scales, time.time(), max_age_s=group_max_age,
+                        use_observation_age=use_observation_age)
     lookup = [{"entity": p["ent"], "data": layout} for p in fused]
     previous = {p["ent"]: p for p in apitricords if p.get("group")}
     for position in fused:

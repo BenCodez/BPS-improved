@@ -210,7 +210,9 @@ metres; circle radii use the floor's pixels-per-metre scale before zooming.
 
 To represent one dog with multiple beacons, use the **Dog / tracker group**
 controls to give a group a name and stable ID and select its Bermuda tracker
-slugs. The group produces additional zone and floor sensors; the original
+slugs. A layout supports up to 32 groups, with up to 16 beacons per group;
+group IDs and beacon slugs use 1–64 lowercase letters, digits or underscores.
+The group produces additional zone and floor sensors; the original
 beacon trackers and their sensors remain available. BPS combines their existing
 position fixes using estimated quality, and reports beacon count, disagreement,
 and fusion confidence as attributes. It does not combine raw BLE or Bermuda
@@ -218,6 +220,12 @@ measurements. A group only combines fixes on the same floor; stale or unavailabl
 beacons do not produce a fix, and disagreement lowers confidence instead of
 being hidden by an unconditional average. Select the group in the existing
 Tracking picker to display it on the map.
+
+With `reading_max_age: 0`, the receiver reading-age gate is disabled for groups
+too. Group expiry then follows the last source position solve and
+`position_timeout` (300 seconds by default). Re-fusing a retained position does
+not refresh its timestamp. Positive reading-age cutoffs continue using the
+source measurement observation time.
 
 Group sensors are `sensor.bps_group_<id>_bps_zone` and
 `sensor.bps_group_<id>_bps_floor`, with the fused pixel position, uncertainty,

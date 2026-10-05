@@ -151,6 +151,18 @@ def test_invalid_observation_time_is_excluded(observed):
     assert fuse(p) is None
 
 
+def test_disabled_observation_gate_retains_old_readings_without_refreshing_source_solve():
+    p = position(updated=NOW - 40)
+    p["outdoor"]["observed"] = NOW - 1000
+    before = copy.deepcopy(p)
+    result = G.fuse_group(GROUP, [p], SCALES, NOW, max_age_s=300, use_observation_age=False)
+    assert result["updated"] == NOW - 40
+    assert result["beacon_positions"][0]["age_s"] == 40
+    assert G.fuse_group(GROUP, [p], SCALES, NOW + 261, max_age_s=300,
+                        use_observation_age=False) is None
+    assert p == before
+
+
 def test_different_floor_pixels_are_never_averaged_or_compared_as_metres():
     result = fuse(position(), position("beacon_b", x=10000, floor="Barn", uncertainty=20))
     assert result["floor"] == "Yard" and result["cords"] == [100, 100]

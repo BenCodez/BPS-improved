@@ -4,6 +4,9 @@
     const TYPES = ['building', 'dense_trees', 'light_vegetation', 'custom'];
     const MATERIALS = ['unknown', 'light', 'heavy', 'metal'];
     const POLICIES = ['auto', 'normal', 'prefer', 'deprioritize', 'ignore'];
+    const GROUP_LIMITS = Object.freeze({groups: 32, beacons: 16, id_length: 64});
+    const slug = value => typeof value === 'string' && value.length > 0
+        && value.length <= GROUP_LIMITS.id_length && !/[^a-z0-9_]/.test(value);
     const number = v => typeof v === 'number' && Number.isFinite(v);
     const groups = layout => Array.isArray(layout && layout.tracker_groups)
         ? layout.tracker_groups.filter(g => g && typeof g.id === 'string'
@@ -92,15 +95,20 @@
         return copy;
     }
     function upsertGroup(layout, group) {
-        if (!group || !/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(group.id || '')
+        if (!group || !slug(group.id)
             || typeof group.name !== 'string' || !group.name.trim()
             || !Array.isArray(group.beacons) || !group.beacons.length
-            || group.beacons.some(b => typeof b !== 'string' || !b || b.startsWith('sensor.') || b.startsWith('bps_group_')))
-            throw new Error('Choose a name, a stable lowercase ID (letters, numbers, underscores), and at least one beacon.');
+            || group.beacons.some(b => !slug(b) || b.startsWith('bps_group_')))
+            throw new Error('Choose a name, a stable lowercase ID of 1–64 letters, digits or underscores, and valid individual beacon slugs.');
+        if (group.beacons.length > GROUP_LIMITS.beacons)
+            throw new Error('A group supports at most 16 beacons.');
+        const entries = Array.isArray(layout.tracker_groups) ? layout.tracker_groups : [];
+        const index = entries.findIndex(g => g.id === group.id);
+        if (entries.length > GROUP_LIMITS.groups || index < 0 && entries.length >= GROUP_LIMITS.groups)
+            throw new Error('A layout supports at most 32 groups. Delete a group before adding another.');
         const copy = {...group, name: group.name.trim(), enabled: group.enabled === undefined || group.enabled === true,
             beacons: [...new Set(group.beacons)]};
         if (!Array.isArray(layout.tracker_groups)) layout.tracker_groups = [];
-        const index = layout.tracker_groups.findIndex(g => g.id === group.id);
         if (index < 0) layout.tracker_groups.push(copy); else layout.tracker_groups[index] = copy;
         return copy;
     }

@@ -104,6 +104,28 @@ test('group readers and writers use backend optional defaults without mutating i
     assert.equal(layout.tracker_groups.find(g => g.id === 'spot').enabled, true);
 });
 
+test('group validation accepts exact backend limits and rejects overflow before mutation', () => {
+    const beacons = Array.from({length: 16}, (_, i) => `beacon_${i}`);
+    const group = {id: 'r'.repeat(64), name: 'Rover', enabled: true, beacons};
+    const layout = {tracker_groups: Array.from({length: 31}, (_, i) => ({...group, id: `dog_${i}`}))};
+    out.upsertGroup(layout, group);
+    assert.equal(layout.tracker_groups.length, 32);
+    assert.equal(layout.tracker_groups[31].id.length, 64);
+    assert.equal(layout.tracker_groups[31].beacons.length, 16);
+    out.upsertGroup(layout, {...group, name: 'Renamed'});
+    assert.equal(layout.tracker_groups[31].name, 'Renamed');
+    const before = JSON.stringify(layout);
+    for (const invalid of [{...group, id: 'r'.repeat(65)},
+        {...group, beacons: [...beacons, 'beacon_16']}, {...group, id: 'dog_32'},
+        ...['A', 'bad slug', 'beacon\n', 'b'.repeat(65), 'bps_group_other'].map(b => ({...group, beacons: [b]}))]) {
+        assert.throws(() => out.upsertGroup(layout, invalid));
+        assert.equal(JSON.stringify(layout), before);
+    }
+    const accepted = {};
+    out.upsertGroup(accepted, {...group, id: '_rover__', beacons: ['_beacon__', 'b'.repeat(64)]});
+    assert.equal(accepted.tracker_groups[0].id, '_rover__');
+});
+
 test('diagnostics explain measurement trust and fused beacon disagreement', () => {
     const text = out.diagnosticsText({ent: 'bps_group_rover', group: true, name: 'Rover', beacons_reporting: 2, total_beacons: 2,
         beacon_disagreement_m: 4.5, fusion_confidence: 'moderate', beacon_positions: [{ent: 'beacon_a', estimated_uncertainty_m: 3}],

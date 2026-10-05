@@ -178,6 +178,30 @@ test('accepted optional group defaults remain visible, enabled and preserved acr
         ['beacon_a', 'beacon_b', 'bps_group_rover', 'bps_group_spot']);
 });
 
+test('Apply group rejects backend limit overflows and allows editing at capacity', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const entities = Array.from({length: 17}, (_, i) => `beacon_${i}`);
+    source.tracker_groups = Array.from({length: 32}, (_, i) =>
+        ({id: `dog_${i}`, name: `Dog ${i}`, enabled: true, beacons: ['beacon_0']}));
+    const p = await panel(source, entities);
+    const before = JSON.stringify(plain(p.hooks.layout()));
+    p.el('groupName').value = 'New dog'; p.el('groupId').value = 'r'.repeat(65);
+    p.el('groupBeacons').options.forEach(o => {o.selected = o.value === 'beacon_0';});
+    await p.el('saveGroup').fire('click');
+    assert.equal(JSON.stringify(plain(p.hooks.layout())), before);
+    p.el('groupId').value = 'rover';
+    p.el('groupBeacons').options.forEach(o => {o.selected = true;});
+    await p.el('saveGroup').fire('click');
+    assert.equal(JSON.stringify(plain(p.hooks.layout())), before);
+    p.el('groupBeacons').options.forEach(o => {o.selected = o.value === 'beacon_0';});
+    await p.el('saveGroup').fire('click');
+    assert.equal(JSON.stringify(plain(p.hooks.layout())), before);
+    p.el('groupSelector').value = 'dog_0'; await p.el('groupSelector').fire('change');
+    p.el('groupName').value = 'Dog renamed'; await p.el('saveGroup').fire('click');
+    assert.equal(p.hooks.layout().tracker_groups.length, 32);
+    assert.equal(p.hooks.layout().tracker_groups[0].name, 'Dog renamed');
+});
+
 test('disabled outdoor groups do not alter picker and genuine group-prefixed beacons remain', async () => {
     const source = layout();
     source.tracker_groups = [{id: 'rover', name: 'Rover', enabled: true, beacons: ['beacon_a']}];

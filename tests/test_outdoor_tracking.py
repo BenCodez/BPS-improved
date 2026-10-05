@@ -264,6 +264,38 @@ def test_group_runtime_uses_configured_measurement_freshness(hass, cutoff, age, 
         assert response.json_body[-1]["outdoor"]["stale"] is False
 
 
+@pytest.mark.parametrize("timeout, solve_age, observation_age, expected", [
+    (None, 45, 45, True), (None, 301, 301, False),
+    (120, 45, 45, True), (120, 121, 121, False), (120, 10, 1000, True),
+])
+def test_disabled_reading_gate_groups_follow_source_position_timeout(
+        hass, monkeypatch, timeout, solve_age, observation_age, expected):
+    now = 2000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(True)
+    data["reading_max_age"] = 0
+    if timeout is not None:
+        data["position_timeout"] = timeout
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]
+    run(save_bps_data(hass, data))
+    source = {"ent": "beacon_a", "floor": "Property", "cords": [50, 50],
+              "updated": now - solve_age, "outdoor": {"observed": now - observation_age,
+              "estimated_uncertainty_m": 3}}
+    bps.apitricords = [copy.deepcopy(source)]
+    sensor = SimpleNamespace(_state="Property", async_write_ha_state=lambda: None)
+    hass.data["bps_sensors"] = {"sensor.bps_group_rover_bps_floor": sensor}
+    run(bps.update_tracker_groups(hass))
+    groups = [p for p in bps.apitricords if p.get("group")]
+    assert bool(groups) is expected
+    assert bps.apitricords[0] == source
+    assert sensor._state == ("Property" if expected else "unknown")
+    if groups:
+        assert groups[0]["updated"] == source["updated"]
+        assert groups[0]["outdoor"]["stale_after_s"] == (timeout or bps.STALE_POSITION_SECS)
+        response = run(bps.BPSCordsAPI(hass).get(None))
+        assert response.json_body[-1]["outdoor"]["stale"] is False
+
+
 def test_ignored_receivers_do_not_consume_candidate_floor_slots(hass):
     states(hass)
     data = layout(True)
