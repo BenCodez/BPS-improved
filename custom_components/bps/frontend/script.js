@@ -6171,7 +6171,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 enabled: document.getElementById('groupEnabled').checked,
                 beacons: [...document.getElementById('groupBeacons').selectedOptions].map(o => o.value)});
         } catch (error) { bpsToast(error.message); return; }
-        if (!document.getElementById('groupEnabled').checked) removeTrackedDevice(`bps_group_${id}`);
+        if (!document.getElementById('groupEnabled').checked && !availableBeaconKeys.includes(`bps_group_${id}`))
+            removeTrackedDevice(`bps_group_${id}`);
         refreshGroupEditor(); document.getElementById('groupSelector').value = id; loadGroupFields(); markOutdoorChanged();
         if (refreshTrackLegend) refreshTrackLegend();
     });
@@ -6179,7 +6180,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const id = document.getElementById('groupSelector').value;
         if (!id) return;
         finalcords.tracker_groups = outdoor.groups(finalcords).filter(g => g.id !== id);
-        removeTrackedDevice(`bps_group_${id}`);
+        if (!availableBeaconKeys.includes(`bps_group_${id}`)) removeTrackedDevice(`bps_group_${id}`);
         refreshGroupEditor(); markOutdoorChanged();
     });
 

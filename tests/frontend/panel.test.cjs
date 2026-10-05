@@ -56,7 +56,8 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
     const code = readFileSync(join(directory, 'script.js'), 'utf8').replace('    // With a single configured floor', `
         globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
-            setPoints: points => {zonePoints = points;}, editing: () => editTarget, tracks: () => lastTracks};
+            setPoints: points => {zonePoints = points;}, editing: () => editTarget,
+            tracks: () => lastTracks, tracked: () => trackedDevices};
     // With a single configured floor`);
     vm.runInContext(code, sandbox);
     const ready = listeners.get('DOMContentLoaded')();
@@ -214,6 +215,30 @@ test('disabled outdoor groups do not alter picker and genuine group-prefixed bea
     p.el('outdoorEnabled').checked = false; await p.el('outdoorEnabled').fire('change');
     assert.deepEqual(keys(), ['beacon_a', 'bps_group_beacon']);
 });
+
+for (const action of ['disable', 'delete']) {
+    test(`${action} of a colliding group preserves tracking of the genuine beacon`, async () => {
+        const source = layout(); source.outdoor_tracking = {enabled: true};
+        source.tracker_groups = [{id: 'rover', name: 'Rover', enabled: true, beacons: ['beacon_a']}];
+        const p = await panel(source, ['beacon_a', 'bps_group_rover']); p.hooks.select('Property');
+        p.network.cords = [{ent: 'bps_group_rover', floor: 'Property', cords: [100, 100]}];
+        p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
+        await p.el('starttrack').fire('click');
+        await p.intervals.findLast(i => i.ms === 500).cb();
+        const cached = p.hooks.tracks().get('bps_group_rover');
+        p.el('groupSelector').value = 'rover'; await p.el('groupSelector').fire('change');
+        if (action === 'disable') {
+            p.el('groupEnabled').checked = false; await p.el('saveGroup').fire('click');
+            assert.equal(p.hooks.layout().tracker_groups[0].enabled, false);
+        } else {
+            await p.el('deleteGroup').fire('click');
+            assert.equal(p.hooks.layout().tracker_groups.length, 0);
+        }
+        assert.deepEqual(plain(p.hooks.tracked()), ['bps_group_rover']);
+        assert.equal(p.hooks.tracks().get('bps_group_rover'), cached);
+        assert.ok(p.el('entSelector').options.some(o => o.value === 'bps_group_rover'));
+    });
+}
 
 test('failed position poll repaints last-known panel uncertainty as stale', async () => {
     const source = layout(); source.outdoor_tracking = {enabled: true};
