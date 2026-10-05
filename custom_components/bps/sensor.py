@@ -382,8 +382,14 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 eid = f"sensor.{ent}_bps_{kind}"
                 label = f"{group['name']} BPS {kind.title()}"
                 if eid in cache:
-                    cache[eid]._name = cache[eid]._attr_name = label
-                    cache[eid]._attr_device_info["name"] = device_name
+                    sensor = cache[eid]
+                    renamed = sensor._attr_name != label
+                    sensor._name = sensor._attr_name = label
+                    sensor._attr_device_info["name"] = device_name
+                    if renamed and getattr(sensor, "hass", None) is not None and not getattr(sensor, "_bps_group_pending", False):
+                        # A no-fix group stays unknown with empty attributes;
+                        # the value-change gate will not publish its new name.
+                        sensor.async_write_ha_state()
                     continue
                 sensor = BPSGroupSensor(label, f"bps_group_{kind}_{group['id']}", eid, ent)
                 sensor._attr_device_info["name"] = device_name

@@ -75,6 +75,7 @@ def platform(monkeypatch):
             if not getattr(self, "ready", False):
                 raise RuntimeError("Entity has not been registered")
             self.writes = getattr(self, "writes", 0) + 1
+            self.published_names = [*getattr(self, "published_names", []), getattr(self, "_attr_name", None)]
 
     sensor_mod = types.ModuleType("homeassistant.components.sensor")
     sensor_mod.SensorEntity = Entity
@@ -227,6 +228,35 @@ def test_group_rename_and_repeated_sync_preserve_unique_id(platform, registered_
         assert devices.updates == []
     asyncio.run(sync([{"id": "rover", "name": "Rover the dog"}]))
     assert len(devices.updates) == int(registered_device)
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_group_rename_publishes_labels_without_fix_and_respects_pending_registration(platform, monkeypatch, pending):
+    import bps
+    hass, registry, module, add, added = platform
+    hass.defer_group_registration = pending
+    monkeypatch.setattr(bps, "apitricords", [])
+    monkeypatch.setattr(bps, "tracked_entities", [])
+    hass.data.setdefault("bps", {})["layout"] = {"floor": [], "outdoor_tracking": {"enabled": True},
+        "tracker_groups": [{"id": "rover", "name": "Rover", "beacons": ["tag"]}]}
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    asyncio.run(bps.update_tracker_groups(hass))
+    entities = [hass.data["bps_sensors"][f"sensor.bps_group_rover_bps_{kind}"] for kind in ("zone", "floor")]
+    assert all(entity._state == "unknown" and entity._attrs == {} for entity in entities)
+    hass.data["bps"]["layout"]["tracker_groups"][0]["name"] = "Rover renamed"
+    asyncio.run(bps.update_tracker_groups(hass))
+    for kind, entity in zip(("zone", "floor"), entities):
+        label = f"Rover renamed BPS {kind.title()}"
+        assert entity.name == label
+        assert getattr(entity, "published_names", []) == ([] if pending else [label])
+        if pending:
+            # HA's eventual initial publication adopts the updated label.
+            entity.hass = hass
+            asyncio.run(entity.async_added_to_hass())
+            entity.async_write_ha_state()
+            assert entity.published_names == [label]
+    asyncio.run(bps.update_tracker_groups(hass))
+    assert all(entity.writes == 1 for entity in entities)
 
 
 @pytest.mark.parametrize("retired_id", ["rover", "bps_group_floor_rover", "bps_group_zone_rover"])
