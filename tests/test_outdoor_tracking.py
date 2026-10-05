@@ -382,6 +382,36 @@ def test_group_entities_publish_changes_without_ticking_age_attributes(hass, mon
     assert [sensor.writes for sensor in sensors] == writes
 
 
+@pytest.mark.parametrize("delay", [0, 5])
+def test_solver_delay_preserves_used_reading_time_and_group_freshness(hass, monkeypatch, delay):
+    now = 1000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(True)
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]
+    data["floor"][0]["receivers"].append({"entity_id": "ignored", "cords": {"x": 200, "y": 200},
+                                         "correction": 1.0, "outdoor_policy": "ignore"})
+    run(save_bps_data(hass, data))
+    def state(eid):
+        timestamp = 999 if eid.endswith("_ignored") else 971
+        return SimpleNamespace(state="7.0710678118654755", attributes={"unit_of_measurement": "m"},
+                               last_updated=datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc))
+    hass.states = SimpleNamespace(get=state)
+    async def executor(func, *args):
+        nonlocal now
+        now += delay
+        return func(*args)
+    hass.async_add_executor_job = executor
+    result, _ = solve(hass, data)
+    assert result[0]["updated"] == 1000 + delay
+    assert result[0]["outdoor"]["observed"] == 971
+    run(bps.update_tracker_groups(hass))
+    assert bool([p for p in bps.apitricords if p.get("group")]) is (delay == 0)
+    response = run(bps.BPSCordsAPI(hass).get(None))
+    quality = response.json_body[0]["outdoor"]
+    assert quality["position_age_s"] == 29 + delay
+    assert quality["stale"] is (delay == 5)
+
+
 def test_group_collision_with_unsolved_discovered_beacon(hass):
     data = layout(True)
     data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]

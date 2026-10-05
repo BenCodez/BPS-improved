@@ -51,6 +51,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
             "receiver": rec.get("entity_id", ""),
             "measured_distance_m": reading.get("measured_distance_m"),
             "corrected_distance_m": rec["distance"],
+            "observed": reading.get("observed"),
         })
         # The environment helper clamps the final product, not a distance.
         weight = diagnostic["reliability_weight"]
@@ -74,6 +75,8 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
     quality["position_age_s"] = 0.0
     ages = [d["reading_age_s"] for d in diagnostics if d.get("reading_age_s") is not None]
     quality["newest_reading_age_s"] = min(ages) if ages else None
+    observations = [finite_number(d.get("observed"), minimum=0.0) for d in diagnostics]
+    quality["observed"] = max((ts for ts in observations if ts is not None), default=None)
     # Preserve explicit exclusions in diagnostics, but never feed zero weights
     # into the normal solver or claim excluded receivers corroborate the fix.
     for rec in receivers:

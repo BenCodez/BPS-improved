@@ -414,7 +414,7 @@ def _reading_max_age(data):
     return READING_MAX_AGE_SECS
 
 
-def _reading_age_secs(state):
+def _reading_age_secs(state, *, now=None):
     """Age of a state in seconds, or None when it can't be determined.
 
     Uses ``last_updated`` (falling back to ``last_changed``) rather than
@@ -428,7 +428,7 @@ def _reading_age_secs(state):
     if ts is None:
         return None
     try:
-        return max(0.0, time.time() - ts.timestamp())
+        return max(0.0, (time.time() if now is None else now) - ts.timestamp())
     except (AttributeError, OSError, OverflowError, TypeError, ValueError):
         return None
 
@@ -1086,7 +1086,8 @@ async def update_receiver_radii(hass, eids):
                 # fix to a receiver that can no longer see the device. Removing
                 # "distance" takes this receiver out of the cycle's candidate
                 # solve (see extract_candidate_floors).
-                age = _reading_age_secs(rec_value)
+                reading_time = time.time() if outdoor else None
+                age = _reading_age_secs(rec_value, now=reading_time)
                 if max_age and age is not None and (age >= max_age if outdoor else age > max_age):
                     receiver.pop("distance", None)
                     _LOGGER.debug(
@@ -1110,6 +1111,7 @@ async def update_receiver_radii(hass, eids):
                             continue
                         receiver["_outdoor_reading"] = {
                             "measured_distance_m": distance, "reading_age_s": age,
+                            "observed": reading_time - (age if age is not None else 0.0),
                         }
                     # Per-receiver correction factor learned by the
                     # calibration (calibration.py); equivalent to a
@@ -1404,8 +1406,10 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         if outdoor and elected["outdoor"] is not None:
             quality = elected["outdoor"]
             account_for_published_position(quality, tricords, (avg_x, avg_y), scale)
-            reading_age = quality.get("newest_reading_age_s")
-            quality["observed"] = time.time() - (reading_age if reading_age is not None else 0.0)
+            # Captured with the measurements before executor queuing/solving.
+            # Never reconstruct it using a later publication clock.
+            if quality.get("observed") is None:
+                quality["observed"] = time.time()
             extra["outdoor"] = quality
         apitricords = update_or_add_entry(
             apitricords,
