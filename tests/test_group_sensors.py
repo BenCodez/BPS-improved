@@ -30,6 +30,28 @@ class Registry:
         self.entities[eid] = types.SimpleNamespace(entity_id=eid, unique_id=uid, platform="bps", device_id=None)
 
 
+class Devices:
+    def __init__(self):
+        self.entries = {}
+        self.updates = []
+
+    def async_get(self, device_id):
+        return self.entries.get(device_id)
+
+    def async_get_device(self, *, identifiers):
+        return next((device for device in self.entries.values() if device.identifiers & identifiers), None)
+
+    def register(self, info):
+        if self.async_get_device(identifiers=info["identifiers"]) is None:
+            device_id = str(len(self.entries))
+            self.entries[device_id] = types.SimpleNamespace(
+                id=device_id, identifiers=info["identifiers"], name=info["name"], name_by_user=None)
+
+    def async_update_device(self, device_id, *, name):
+        self.updates.append((device_id, name))
+        self.entries[device_id].name = name
+
+
 @pytest.fixture
 def platform(monkeypatch):
     class Entity:
@@ -59,7 +81,8 @@ def platform(monkeypatch):
     er = sys.modules["homeassistant.helpers.entity_registry"]
     dr = sys.modules["homeassistant.helpers.device_registry"]
     monkeypatch.setattr(er, "async_get", lambda _hass: registry, raising=False)
-    monkeypatch.setattr(dr, "async_get", lambda _hass: types.SimpleNamespace(async_get=lambda _id: None), raising=False)
+    devices = Devices()
+    monkeypatch.setattr(dr, "async_get", lambda _hass: devices, raising=False)
     module = importlib.import_module("bps.sensor")
     # Other suites must retain their minimal stubs after this fixture finishes.
     monkeypatch.delitem(sys.modules, "bps.sensor", raising=False)
@@ -71,6 +94,9 @@ def platform(monkeypatch):
         for entity in entities:
             added.append(entity)
             registry.add(entity.entity_id, entity.unique_id)
+            info = getattr(entity, "_attr_device_info", None)
+            if info:
+                devices.register(info)
             if not getattr(hass, "defer_group_registration", False) or not str(entity.unique_id).startswith("bps_group_"):
                 entity.hass = hass
                 entity.ready = True
@@ -159,18 +185,38 @@ def test_renamed_registry_entity_removed_by_unique_id(platform):
     assert "sensor.bps_group_rover_bps_zone" not in hass.data["bps_sensors"]
 
 
-def test_group_rename_and_repeated_sync_preserve_unique_id(platform):
+@pytest.mark.parametrize("registered_device", [True, False])
+def test_group_rename_and_repeated_sync_preserve_unique_id(platform, registered_device):
     hass, registry, module, add, added = platform
     asyncio.run(module.async_setup_entry(hass, None, add))
     sync = hass.data["bps"]["sync_group_sensors"]
     asyncio.run(sync([{"id": "rover", "name": "Rover"}]))
     count = len(added)
+    devices = module.dr.async_get(hass)
+    device = devices.async_get_device(identifiers={("bps", "bps_group_rover")})
+    assert device.name == "Rover (BPS group)"
+    device.name_by_user = "My custom collar"
+    if not registered_device:
+        devices.entries.clear()  # Registration can still be pending during rename.
     asyncio.run(sync([{"id": "rover", "name": "Rover"}]))
+    assert devices.updates == []
     asyncio.run(sync([{"id": "rover", "name": "Rover the dog"}]))
     assert len(added) == count
     sensor = hass.data["bps_sensors"]["sensor.bps_group_rover_bps_zone"]
     assert sensor.name == "Rover the dog BPS Zone"
     assert sensor.unique_id == "bps_group_zone_rover"
+    for kind in ("zone", "floor"):
+        entity = hass.data["bps_sensors"][f"sensor.bps_group_rover_bps_{kind}"]
+        assert entity._attr_device_info["name"] == "Rover the dog (BPS group)"
+    if registered_device:
+        assert devices.async_get_device(identifiers={("bps", "bps_group_rover")}) is device
+        assert device.name == "Rover the dog (BPS group)"
+        assert device.name_by_user == "My custom collar"
+        assert devices.updates == [(device.id, "Rover the dog (BPS group)")]
+    else:
+        assert devices.updates == []
+    asyncio.run(sync([{"id": "rover", "name": "Rover the dog"}]))
+    assert len(devices.updates) == int(registered_device)
 
 
 def test_group_state_buffers_while_entity_addition_is_scheduled(platform):

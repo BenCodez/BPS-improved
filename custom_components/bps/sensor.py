@@ -373,16 +373,23 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                             sensor._state = position.get(kind, "unknown")
         for group in groups:
             ent = "bps_group_" + group["id"]
+            device_name = f"{group['name']} (BPS group)"
             for kind in ("zone", "floor"):
                 eid = f"sensor.{ent}_bps_{kind}"
                 label = f"{group['name']} BPS {kind.title()}"
                 if eid in cache:
                     cache[eid]._name = cache[eid]._attr_name = label
+                    cache[eid]._attr_device_info["name"] = device_name
                     continue
                 sensor = BPSGroupSensor(label, f"bps_group_{kind}_{group['id']}", eid, ent)
-                sensor._attr_device_info["name"] = f"{group['name']} (BPS group)"
+                sensor._attr_device_info["name"] = device_name
                 cache[eid] = sensor
                 additions.append(sensor)
+            device_registry = dr.async_get(hass)
+            device = device_registry.async_get_device(identifiers={("bps", ent)})
+            if device is not None and device.name != device_name:
+                # Preserve the device ID and any user-assigned name override.
+                device_registry.async_update_device(device.id, name=device_name)
         if additions:
             async_add_entities(additions, update_before_add=True)
             normalize_bps_registry_entity_ids_from_cache(hass)
