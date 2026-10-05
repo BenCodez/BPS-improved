@@ -89,6 +89,7 @@ class BpsMapCard extends HTMLElement {
     this._entityByTrackerKey = new Map();
     this._groupTrackerKeys = new Set();
     this._knownBeaconKeys = new Set();
+    this._groupEntityKeys = new Map();
     this._trackerIcons = {};
     this._iconCache = new Map();
     this._tintedIconCache = new Map();
@@ -200,6 +201,9 @@ class BpsMapCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (!this._config || !hass) return;
+    this._entityByTrackerKey = new Map(
+      this._config.entities.map(eid => [this._trackerKeyFromEntity(eid), eid]),
+    );
 
     if (!this._bootstrapPromise) {
       this._runGeneration += 1;
@@ -286,7 +290,7 @@ class BpsMapCard extends HTMLElement {
       .map((eid) => {
         const k = this._trackerKeyFromEntity(eid);
         if (!this._entityOnThisFloor(k)) return "";
-        return this._hass.states[`sensor.${k}_bps_zone`]?.state ?? "";
+        return this._groupAttributesForTracker(k)?.zone ?? this._hass.states[`sensor.${k}_bps_zone`]?.state ?? "";
       })
       .join("|");
   }
@@ -296,18 +300,30 @@ class BpsMapCard extends HTMLElement {
     return this._config.entities
       .map((eid) => {
         const k = this._trackerKeyFromEntity(eid);
-        return this._hass.states[`sensor.${k}_bps_floor`]?.state ?? "";
+        return this._floorStateForTracker(k) ?? "";
       })
       .join("|");
   }
 
   _entityOnThisFloor(trackerKey) {
     const target = this._normalize(this._config.floor);
-    const st = this._hass?.states?.[`sensor.${trackerKey}_bps_floor`]?.state;
+    const st = this._floorStateForTracker(trackerKey);
     if (st == null || st === "unknown" || st === "unavailable") {
       return false;
     }
     return this._normalize(st) === target;
+  }
+
+  _groupAttributesForTracker(trackerKey) {
+    const entity = this._entityByTrackerKey.get(trackerKey);
+    const state = this._hass?.states?.[entity];
+    if (state?.state === 'unknown' || state?.state === 'unavailable') return null;
+    return state?.attributes?.group === true ? state.attributes : null;
+  }
+
+  _floorStateForTracker(trackerKey) {
+    return this._groupAttributesForTracker(trackerKey)?.floor
+      ?? this._hass?.states?.[`sensor.${trackerKey}_bps_floor`]?.state;
   }
 
   _prunePositionsByFloor() {
@@ -654,7 +670,16 @@ class BpsMapCard extends HTMLElement {
   _trackerKeyFromEntity(entityId) {
     if (!entityId || typeof entityId !== "string") return "";
     const key = entityId.replace(/^sensor\./, "");
-    if (!entityId.startsWith('sensor.bps_group_') || this._knownBeaconKeys?.has(key)) return key;
+    if (this._knownBeaconKeys?.has(key)) return key;
+    const attributes = this._hass?.states?.[entityId]?.attributes;
+    if (attributes?.group === true && typeof attributes.tracker_key === 'string'
+      && attributes.tracker_key.startsWith('bps_group_')) {
+      this._groupEntityKeys ||= new Map();
+      this._groupEntityKeys.set(entityId, attributes.tracker_key);
+      return attributes.tracker_key;
+    }
+    if (this._groupEntityKeys?.has(entityId)) return this._groupEntityKeys.get(entityId);
+    if (!entityId.startsWith('sensor.bps_group_')) return key;
     const groupKey = key.replace(/_bps_(zone|floor)$/, '');
     const isGroup = this._groupTrackerKeys?.has(groupKey)
       || this._hass?.states?.[entityId]?.attributes?.group === true;

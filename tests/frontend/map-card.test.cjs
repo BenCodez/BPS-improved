@@ -139,6 +139,39 @@ for (const enabled of [false, true]) {
     }
 }
 
+for (const kind of ['zone', 'floor']) {
+    test(`card resolves renamed group ${kind} sensors by stable metadata and clears removed markers`, async () => {
+        const c = card(), cv = canvas(); c._canvas = cv.value;
+        const entity = `sensor.rover_${kind}`, key = 'bps_group_rover';
+        c._config.entities = [entity];
+        c._hass.states = {[entity]: {state: kind === 'zone' ? 'Yard' : 'Property', attributes: {
+            group: true, tracker_key: key, floor: 'Property', zone: 'Yard', friendly_name: 'Rover renamed'}}};
+        const row = {ent: key, group: true, name: 'Rover', floor: 'Property', zone: 'Yard', cords: [200, 100]};
+        c._apiFetch = async () => ({ok: true, json: async () => [row]});
+        c._redraw = () => {}; c._setStatus = () => {};
+        c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+        await c._pollOnce();
+        assert.equal(c._trackerKeyFromEntity(entity), key);
+        assert.ok(c._positions.has(key));
+        assert.equal(c._floorPresenceSignature(), 'Property');
+        assert.equal(c._zoneLabelSignature(), 'Yard');
+        c._drawMarkers();
+        assert.equal(cv.calls.filter(Array.isArray).length, 1);
+        // Floor metadata changes remain authoritative with both sensors renamed.
+        c._hass.states[entity].attributes.floor = 'Barn';
+        await c._pollOnce();
+        assert.ok(!c._positions.has(key));
+        c._hass.states[entity].attributes.floor = 'Property';
+        await c._pollOnce();
+        assert.ok(c._positions.has(key));
+        delete c._hass.states[entity];
+        c._apiFetch = async () => ({ok: true, json: async () => []});
+        await c._pollOnce();
+        assert.equal(c._trackerKeyFromEntity(entity), key, 'cached identity permits cleanup after deletion');
+        assert.ok(!c._positions.has(key));
+    });
+}
+
 test('failed card poll repaints cached fixes so freshness can expire', async () => {
     const c = card();
     c._outdoorSettings.enabled = true;

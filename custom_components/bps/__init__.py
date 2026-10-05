@@ -1592,6 +1592,7 @@ async def update_tracker_groups(hass):
         # Entity attributes keep source timestamps rather than ticking ages.
         # Live ages remain in the API payload for the panel/card diagnostics.
         attrs = {k: v for k, v in position.items() if k not in {"ent", "zone", "last_update_age_s"}}
+        attrs.update(tracker_key=position["ent"], zone=position["zone"])
         attrs["outdoor"] = {k: v for k, v in position["outdoor"].items() if k != "position_age_s"}
         attrs["beacon_positions"] = [{k: v for k, v in beacon.items() if k != "age_s"}
                                      for beacon in position["beacon_positions"]]
