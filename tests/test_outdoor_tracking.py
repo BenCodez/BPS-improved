@@ -11,12 +11,24 @@ import pytest
 import bps
 from bps.environment import compile_environment
 from bps.outdoor_config import validate_outdoor_layout
-from bps.outdoor_tracking import solve_outdoor
+from bps.outdoor_tracking import solve_outdoor, account_for_published_position
 from bps.storage import load_bps_data, save_bps_data, STORAGE_KEY_LAYOUT
 
 
 def run(coro):
     return asyncio.run(coro)
+
+
+@pytest.mark.parametrize("initial, displacement, expected", [
+    ("good", 4.0, "moderate"), ("moderate", 0.0, "moderate"),
+    ("poor", 1.0, "poor"), ("stale", 1.0, "stale"),
+])
+def test_published_displacement_can_only_reduce_confidence(initial, displacement, expected):
+    quality = {"estimated_uncertainty_m": 2.0, "confidence": initial}
+    account_for_published_position(quality, (0, 0), (displacement * 10, 0), 10)
+    assert quality["publication_displacement_m"] == displacement
+    assert quality["estimated_uncertainty_m"] == pytest.approx(math.hypot(2, displacement))
+    assert quality["confidence"] == expected
 
 
 def layout(enabled=None):

@@ -160,6 +160,24 @@ def test_different_floor_pixels_are_never_averaged_or_compared_as_metres():
     assert len(result["beacon_positions"]) == 2
 
 
+def test_zone_snapping_preserves_fused_floor_conflict_warning():
+    import bps
+    result = fuse(position(uncertainty=1),
+                  position("beacon_b", x=10000, floor="Barn", uncertainty=20))
+    assert result["outdoor"]["confidence"] == "poor"
+    radius = result["outdoor"]["estimated_uncertainty_m"]
+    lookup = [{"entity": result["ent"], "data": {"floor": [{"name": "Yard", "zones": [
+        {"entity_id": "Yard zone", "poly": True,
+         "cords": [{"x": 0, "y": 0}, {"x": 90, "y": 0},
+                   {"x": 90, "y": 200}, {"x": 0, "y": 200}]},
+    ]}]}}]
+    bps._assign_group_zone(result, lookup, SCALES["Yard"])
+    assert result["cords"] == [90, 100]
+    assert result["outdoor"]["estimated_uncertainty_m"] > radius
+    assert result["outdoor"]["confidence"] == "poor"
+    assert result["fusion_confidence"] == "floor_conflict"
+
+
 def test_scale_conversion_is_in_metres():
     a = position(floor="Barn")
     b = position("beacon_b", x=160, floor="Barn", uncertainty=4)

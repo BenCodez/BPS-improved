@@ -97,4 +97,9 @@ def account_for_published_position(quality, raw, published, scale):
         quality["estimated_uncertainty_m"], displacement,
     )
     radius = quality["estimated_uncertainty_m"]
-    quality["confidence"] = "good" if radius <= 3 else "moderate" if radius <= 10 else "poor"
+    confidence = "good" if radius <= 3 else "moderate" if radius <= 10 else "poor"
+    # Moving the published point adds uncertainty; it cannot resolve a source
+    # conflict or make stale evidence current. Preserve any worse assessment.
+    levels = {"good": 0, "moderate": 1, "poor": 2, "stale": 3}
+    if levels.get(quality.get("confidence"), 0) <= levels[confidence]:
+        quality["confidence"] = confidence
