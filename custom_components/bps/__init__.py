@@ -1565,7 +1565,8 @@ async def update_tracker_groups(hass):
         # Expire by the last source solve, using the normal position grace.
         group_max_age = finite_number(layout.get("position_timeout"), STALE_POSITION_SECS,
                                       minimum=0.0) or STALE_POSITION_SECS
-    fused = fuse_groups(safe_layout, originals, scales, time.time(), max_age_s=group_max_age,
+    fusion_time = time.time()
+    fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
                         use_observation_age=use_observation_age)
     lookup = [{"entity": p["ent"], "data": layout} for p in fused]
     previous = {p["ent"]: p for p in apitricords if p.get("group")}
@@ -1578,17 +1579,18 @@ async def update_tracker_groups(hass):
         attrs = {k: v for k, v in position.items() if k not in {"ent", "zone"}}
         update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_zone", position["zone"], attrs)
         update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_floor", position["floor"], attrs)
-        old = previous.get(position["ent"])
-        if old is None or position["updated"] > old.get("updated", 0):
-            try:
-                get_position_history(hass).record(
-                    position["ent"], position["updated"],
-                    position["cords"][0] / scales[position["floor"]],
-                    position["cords"][1] / scales[position["floor"]],
-                    position["floor"], scales[position["floor"]], position["zone"],
-                )
-            except Exception as error:
-                _LOGGER.debug("Group history record failed for %s: %s", position["ent"], error)
+        # Freshness can change the fused point without another observation.
+        # History dates the published result; API freshness keeps source time.
+        # Its existing movement/interval/heartbeat gates bound repeated rows.
+        try:
+            get_position_history(hass).record(
+                position["ent"], fusion_time,
+                position["cords"][0] / scales[position["floor"]],
+                position["cords"][1] / scales[position["floor"]],
+                position["floor"], scales[position["floor"]], position["zone"],
+            )
+        except Exception as error:
+            _LOGGER.debug("Group history record failed for %s: %s", position["ent"], error)
     live = {p["ent"] for p in fused}
     for group in groups:
         ent = "bps_group_" + group["id"]

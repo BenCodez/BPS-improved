@@ -130,6 +130,29 @@ test('panel shared polygon editor creates/edits/cancels/deletes environments and
     assert.equal(reloaded.hooks.layout().floor[0].environment.length, 0);
 });
 
+test('panel rejects a 129th environment polygon but edits and saves at capacity', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.floor[0].environment = Array.from({length: 128}, (_, i) => ({id: `area_${i}`,
+        name: `Area ${i}`, type: 'building', material: 'metal', points}));
+    const p = await panel(source); p.hooks.select('Property');
+    await p.el('addTrees').fire('click');
+    p.hooks.setPoints(points); p.el('zoneName').value = 'Extra trees';
+    const before = JSON.stringify(plain(p.hooks.layout()));
+    assert.equal(p.hooks.finalizeShape(), false);
+    assert.equal(JSON.stringify(plain(p.hooks.layout())), before);
+    assert.equal(p.hooks.editing().kind, 'environment', 'failed insertion leaves the editor open');
+    p.hooks.cancelShapeEdit();
+    p.hooks.beginEnvironmentEdit(p.hooks.layout().floor[0].environment[0]);
+    p.hooks.setPoints(points.map(p => ({x: p.x + 10, y: p.y}))); p.el('zoneName').value = 'Shop renamed';
+    assert.equal(p.hooks.finalizeShape(), true);
+    p.hooks.cancelShapeEdit(); await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[0].environment.length, 128);
+    assert.equal(saved.floor[0].environment[0].id, 'area_0');
+    assert.equal(saved.floor[0].environment[0].name, 'Shop renamed');
+    assert.equal(saved.floor[0].environment[0].points[0].x, 110);
+});
+
 test('Add building and Add trees save separate editable map areas', async () => {
     const source = layout(); source.outdoor_tracking = {enabled: true};
     const p = await panel(source); p.hooks.select('Property');

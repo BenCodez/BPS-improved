@@ -180,7 +180,9 @@ reading by itself.
 
 Environment data is stored with the floor as `environment` polygons, each with
 an `id`, `name`, `type`, `material`, and `points` array of `{x, y}` map
-coordinates. Outdoor settings are stored under `outdoor_tracking`:
+coordinates. Each floor supports up to 128 environment polygons; the editor
+rejects another polygon at capacity while allowing existing ones to be edited.
+Outdoor settings are stored under `outdoor_tracking`:
 
 ```json
 {
@@ -230,6 +232,11 @@ too. Group expiry then follows the last source position solve and
 `position_timeout` (300 seconds by default). Re-fusing a retained position does
 not refresh its timestamp. Positive reading-age cutoffs continue using the
 source measurement observation time.
+
+Group history dates the published fused result, so a position or zone change
+caused by an expiring member reaches the time scrubber without waiting for a
+new observation. The usual history movement, interval, and heartbeat gates
+still apply; API observation timestamps retain the source age.
 
 Group sensors are `sensor.bps_group_<id>_bps_zone` and
 `sensor.bps_group_<id>_bps_floor`, with the fused pixel position, uncertainty,

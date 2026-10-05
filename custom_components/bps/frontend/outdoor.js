@@ -5,6 +5,7 @@
     const MATERIALS = ['unknown', 'light', 'heavy', 'metal'];
     const POLICIES = ['auto', 'normal', 'prefer', 'deprioritize', 'ignore'];
     const MAX_UNCERTAINTY_THRESHOLD_M = 10000;
+    const MAX_ENVIRONMENT_POLYGONS = 128;
     const GROUP_LIMITS = Object.freeze({groups: 32, beacons: 16, id_length: 64});
     const slug = value => typeof value === 'string' && value.length > 0
         && value.length <= GROUP_LIMITS.id_length && !/[^a-z0-9_]/.test(value);
@@ -98,9 +99,12 @@
             || typeof item.name !== 'string' || !item.name.trim()
             || !TYPES.includes(item.type) || !MATERIALS.includes(item.material)
             || !validPolygon(item.points)) throw new Error('Use a named polygon with at least three distinct corners and no crossing edges.');
+        const entries = Array.isArray(floor.environment) ? floor.environment : [];
+        const index = entries.findIndex(p => p.id === item.id);
+        if (entries.length > MAX_ENVIRONMENT_POLYGONS || index < 0 && entries.length >= MAX_ENVIRONMENT_POLYGONS)
+            throw new Error('A floor supports at most 128 environment polygons. Delete a polygon before adding another.');
         const copy = {...item, name: item.name.trim(), points: item.points.map(p => ({x: p.x, y: p.y}))};
         if (!Array.isArray(floor.environment)) floor.environment = [];
-        const index = floor.environment.findIndex(p => p.id === item.id);
         if (index < 0) floor.environment.push(copy); else floor.environment[index] = copy;
         return copy;
     }
@@ -137,7 +141,7 @@
         (out.receiver_diagnostics || []).forEach(r => lines.push(`${r.receiver}: measured ${display(r.measured_distance_m, ' m')}, corrected ${display(r.corrected_distance_m, ' m')}, age ${display(r.reading_age_s, ' s')}, ${r.classification || 'unknown'}, building crossings ${r.building_crossings ?? '—'}${r.reflection_risk ? ', reflection / multipath risk' : ''}, environment weight ${display(r.environmental_weight)}, reliability ${display(r.reliability_weight)}, ${r.status || 'unknown'}`));
         return lines.join('\n');
     }
-    root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, MAX_UNCERTAINTY_THRESHOLD_M,
+    root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, MAX_UNCERTAINTY_THRESHOLD_M, MAX_ENVIRONMENT_POLYGONS,
         groups, environment, settings, positionSnapshot, uncertaintyRadius,
         drawUncertainty, isStale, fixTime, validPolygon, upsertEnvironment, upsertGroup, diagnosticsText});
 })(globalThis);

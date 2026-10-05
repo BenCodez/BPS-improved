@@ -234,6 +234,55 @@ def test_group_runtime_preserves_originals_and_deletes_disabled_group(hass):
     assert bps.apitricords == originals
 
 
+def test_group_history_records_expiry_driven_transition_without_refreshing_sources(hass, monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(True)
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a", "beacon_b"]}]
+    data["floor"][0]["zones"] = [
+        {"entity_id": name, "poly": True,
+         "cords": [{"x": left, "y": 0}, {"x": right, "y": 0},
+                   {"x": right, "y": 1000}, {"x": left, "y": 1000}]}
+        for name, left, right in (("Left", 0, 498), ("Right", 498, 1000))
+    ]
+    run(save_bps_data(hass, data))
+    originals = [{"ent": name, "floor": "Property", "cords": [x, 50],
+                  "updated": updated, "rms_m": 1,
+                  "outdoor": {"observed": updated, "estimated_uncertainty_m": 3,
+                              "receivers_used": 4}}
+                 for name, x, updated in (("beacon_a", 500, now), ("beacon_b", 450, now - 29))]
+    bps.apitricords = copy.deepcopy(originals)
+    run(bps.update_tracker_groups(hass))
+    first = copy.deepcopy(bps.apitricords[-1])
+    assert first["zone"] == "Left"
+    assert first["beacons_reporting"] == 2
+
+    now += 3  # Older beacon expires; the newest observation is unchanged.
+    run(bps.update_tracker_groups(hass))
+    second = bps.apitricords[-1]
+    assert second["zone"] == "Right"
+    assert second["beacons_reporting"] == 1
+    assert second["cords"] == [500, 50]
+    assert second["updated"] == first["updated"] == 1000
+    assert second["outdoor"]["observed"] == 1000
+    assert second["outdoor"]["position_age_s"] == 3
+    assert bps.apitricords[:2] == originals
+    history = bps.get_position_history(hass)
+    rows = [json.loads(line) for lines in history.drain_pending().values() for line in lines]
+    assert [(row["t"], row["z"]) for row in rows] == [(1000, "Left"), (1003, "Right")]
+    assert rows[-1]["x"] == 50
+    assert history.query("bps_group_rover", 0, 2000, 100)["count"] == 2
+
+    # Unchanged polling stays gated, and an expired group cannot add history.
+    now += 3
+    run(bps.update_tracker_groups(hass))
+    assert history.pending_count() == 0
+    now = 1031
+    run(bps.update_tracker_groups(hass))
+    assert not any(p.get("group") for p in bps.apitricords)
+    assert history.pending_count() == 0
+
+
 def test_group_collision_with_unsolved_discovered_beacon(hass):
     data = layout(True)
     data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]

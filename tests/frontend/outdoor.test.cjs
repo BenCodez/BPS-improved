@@ -92,6 +92,20 @@ test('environment edits clone points, retain IDs, survive JSON storage, and reje
     }
 });
 
+test('environment polygon capacity rejects insertion atomically and permits editing at capacity', () => {
+    const item = {id: 'shop', name: 'Shop', type: 'building', material: 'metal', points: polygon};
+    const floor = {environment: Array.from({length: 127}, (_, i) => ({...item, id: `area_${i}`}))};
+    out.upsertEnvironment(floor, item);
+    assert.equal(floor.environment.length, 128);
+    const before = JSON.stringify(floor);
+    assert.throws(() => out.upsertEnvironment(floor, {...item, id: 'extra'}), /at most 128 environment polygons/);
+    assert.equal(JSON.stringify(floor), before);
+    out.upsertEnvironment(floor, {...item, name: 'Renamed shop', points: polygon.map(p => ({x: p.x + 10, y: p.y}))});
+    assert.equal(floor.environment.length, 128);
+    assert.equal(floor.environment[127].name, 'Renamed shop');
+    assert.equal(floor.environment[127].points[0].x, 10);
+});
+
 test('group editing preserves original beacons, updates in place, and rejects entity IDs or nested groups', () => {
     const layout = {tracker_icons: {beacon_a: 'person.svg'}};
     out.upsertGroup(layout, {id: 'rover', name: 'Rover', enabled: true, beacons: ['beacon_a', 'beacon_b', 'beacon_a']});
