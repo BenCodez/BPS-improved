@@ -283,6 +283,52 @@ def test_group_history_records_expiry_driven_transition_without_refreshing_sourc
     assert history.pending_count() == 0
 
 
+def test_generic_timeout_preserves_valid_groups_and_fusion_expires_them_once(hass, monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(True)
+    data["position_timeout"] = 10
+    data["reading_max_age"] = 30
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]
+    run(save_bps_data(hass, data))
+    source = {"ent": "beacon_a", "floor": "Property", "cords": [50, 50],
+              "updated": now, "outdoor": {"observed": now - 20, "estimated_uncertainty_m": 3}}
+    bps.apitricords = [source]
+    states_written = []
+    sensor = SimpleNamespace(_state="unknown")
+    sensor.async_write_ha_state = lambda: states_written.append(sensor._state)
+    hass.data["bps_sensors"] = {"sensor.bps_group_rover_bps_floor": sensor}
+    run(bps.update_tracker_groups(hass))
+    group = copy.deepcopy(bps.apitricords[-1])
+    assert group["updated"] == 980
+    assert states_written == ["Property"]
+    history = bps.get_position_history(hass)
+    assert history.tracks["bps_group_rover"].force_gap is False
+
+    # Ordinary trackers, including genuine group-prefixed beacons, still prune.
+    bps.apitricords.append({"ent": "bps_group_real", "updated": 980})
+    now += 3
+    run(bps.prune_stale_positions(hass))
+    assert bps.apitricords == [source, group]
+    assert states_written == ["Property"]
+    assert history.tracks["bps_group_rover"].force_gap is False
+    run(bps.update_tracker_groups(hass))
+    assert states_written == ["Property", "Property"]
+    assert history.tracks["bps_group_rover"].force_gap is False
+    assert history.query("bps_group_rover", 0, 2000, 100)["count"] == 1
+
+    # A recent solve cannot extend the group's positive observation-age gate.
+    now = 1011
+    source["updated"] = now
+    run(bps.prune_stale_positions(hass))
+    assert any(p.get("group") for p in bps.apitricords)
+    run(bps.update_tracker_groups(hass))
+    assert bps.apitricords == [source]
+    assert states_written == ["Property", "Property", "unknown"]
+    assert history.tracks["bps_group_rover"].force_gap is True
+    assert history.query("bps_group_rover", 0, 2000, 100)["count"] == 1
+
+
 def test_group_collision_with_unsolved_discovered_beacon(hass):
     data = layout(True)
     data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]

@@ -1488,7 +1488,11 @@ async def prune_stale_positions(hass):
             timeout = configured
 
     now = time.time()
-    stale_ents = {e["ent"] for e in apitricords if now - e.get("updated", now) > timeout}
+    # Fused groups retain source observation time, which can be older than
+    # this timeout while still valid under their configured freshness gate.
+    # Group fusion owns their expiry and marks the history gap once.
+    stale_ents = {e["ent"] for e in apitricords
+                  if not e.get("group") and now - e.get("updated", now) > timeout}
     if not stale_ents:
         return
     apitricords = [e for e in apitricords if e["ent"] not in stale_ents]
