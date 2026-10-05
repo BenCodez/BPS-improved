@@ -87,6 +87,8 @@ class BpsMapCard extends HTMLElement {
     this._imgNaturalH = 0;
     this._positions = new Map();
     this._entityByTrackerKey = new Map();
+    this._groupTrackerKeys = new Set();
+    this._knownBeaconKeys = new Set();
     this._trackerIcons = {};
     this._iconCache = new Map();
     this._tintedIconCache = new Map();
@@ -652,7 +654,11 @@ class BpsMapCard extends HTMLElement {
   _trackerKeyFromEntity(entityId) {
     if (!entityId || typeof entityId !== "string") return "";
     const key = entityId.replace(/^sensor\./, "");
-    return entityId.startsWith('sensor.bps_group_') ? key.replace(/_bps_(zone|floor)$/, '') : key;
+    if (!entityId.startsWith('sensor.bps_group_') || this._knownBeaconKeys?.has(key)) return key;
+    const groupKey = key.replace(/_bps_(zone|floor)$/, '');
+    const isGroup = this._groupTrackerKeys?.has(groupKey)
+      || this._hass?.states?.[entityId]?.attributes?.group === true;
+    return isGroup ? groupKey : key;
   }
 
   _normalize(value) {
@@ -672,6 +678,7 @@ class BpsMapCard extends HTMLElement {
       return;
     }
     const coords = JSON.parse(data.coordinates);
+    this._knownBeaconKeys = new Set(Array.isArray(data.entities) ? data.entities : []);
     this._outdoorSettings = BPSOutdoor.settings(coords);
     this._trackerIcons = coords.tracker_icons && typeof coords.tracker_icons === "object"
       ? coords.tracker_icons
@@ -1055,6 +1062,15 @@ class BpsMapCard extends HTMLElement {
       const res = await this._apiFetch("/api/bps/cords");
       const list = await BPSOutdoor.positionSnapshot(res);
       if (Array.isArray(list)) {
+        this._groupTrackerKeys ||= new Set();
+        this._knownBeaconKeys ||= new Set();
+        for (const row of list) {
+          if (row?.group === true) this._groupTrackerKeys.add(row.ent);
+          else if (typeof row?.ent === 'string') this._knownBeaconKeys.add(row.ent);
+        }
+        this._entityByTrackerKey = new Map(
+          this._config.entities.map(eid => [this._trackerKeyFromEntity(eid), eid]),
+        );
         for (const ent of this._config.entities) {
           const key = this._trackerKeyFromEntity(ent);
           if (!this._entityOnThisFloor(key)) {

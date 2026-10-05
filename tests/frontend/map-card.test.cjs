@@ -114,6 +114,31 @@ test('card constituent circles inherit group freshness limits and age cached sou
     assert.ok(!cv.dashes.some(dash => dash[0] === 3 && dash[1] === 6), 'disabled reading gate uses the group position timeout');
 });
 
+for (const enabled of [false, true]) {
+    for (const suffix of ['zone', 'floor']) {
+        test(`card preserves genuine group-prefixed beacon ending in ${suffix} with outdoor ${enabled}`, async () => {
+            const c = card(), cv = canvas(); c._canvas = cv.value;
+            const key = `bps_group_rover_bps_${suffix}`, entity = `sensor.${key}`;
+            c._config.entities = [entity];
+            c._outdoorSettings.enabled = enabled;
+            c._hass.states = {[entity]: {state: 'home', attributes: {}},
+                [`sensor.${key}_bps_floor`]: {state: 'Property'}};
+            c._apiFetch = async () => ({ok: true, json: async () => [{ent: key, floor: 'Property', cords: [200, 100]}]});
+            c._redraw = () => {}; c._setStatus = () => {};
+            c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+            // Even a previously identified group cannot override an actual raw beacon key.
+            c._groupTrackerKeys = new Set(['bps_group_rover']);
+            await c._pollOnce();
+            assert.equal(c._trackerKeyFromEntity(entity), key);
+            assert.ok(c._positions.has(key));
+            assert.equal(c._entityByTrackerKey.get(key), entity);
+            c._drawMarkers();
+            assert.equal(cv.calls.filter(Array.isArray).length, 1);
+            assert.equal(cv.calls.find(Array.isArray)[0], 200);
+        });
+    }
+}
+
 test('failed card poll repaints cached fixes so freshness can expire', async () => {
     const c = card();
     c._outdoorSettings.enabled = true;
