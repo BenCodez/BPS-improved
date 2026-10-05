@@ -34,6 +34,7 @@ class Devices:
     def __init__(self):
         self.entries = {}
         self.updates = []
+        self.removed = []
 
     def async_get(self, device_id):
         return self.entries.get(device_id)
@@ -46,10 +47,15 @@ class Devices:
             device_id = str(len(self.entries))
             self.entries[device_id] = types.SimpleNamespace(
                 id=device_id, identifiers=info["identifiers"], name=info["name"], name_by_user=None)
+        return self.async_get_device(identifiers=info["identifiers"])
 
     def async_update_device(self, device_id, *, name):
         self.updates.append((device_id, name))
         self.entries[device_id].name = name
+
+    def async_remove_device(self, device_id):
+        self.removed.append(device_id)
+        del self.entries[device_id]
 
 
 @pytest.fixture
@@ -96,7 +102,7 @@ def platform(monkeypatch):
             registry.add(entity.entity_id, entity.unique_id)
             info = getattr(entity, "_attr_device_info", None)
             if info:
-                devices.register(info)
+                registry.entities[entity.entity_id].device_id = devices.register(info).id
             if not getattr(hass, "defer_group_registration", False) or not str(entity.unique_id).startswith("bps_group_"):
                 entity.hass = hass
                 entity.ready = True
@@ -143,6 +149,8 @@ def test_discovered_colliding_beacon_reclaims_group_zone_and_floor_sensors(platf
     sync = hass.data["bps"]["sync_group_sensors"]
     asyncio.run(sync([{"id": "rover", "name": "Rover"}]))
     old_group_sensors = [sensor for sensor in added if isinstance(sensor, module.BPSGroupSensor)]
+    devices = module.dr.async_get(hass)
+    group_device = devices.async_get_device(identifiers={("bps", "bps_group_rover")})
     distance_id = "sensor.bps_group_rover_distance_to_proxy"
     registry.entities[distance_id] = types.SimpleNamespace(
         entity_id=distance_id, unique_id="bermuda_distance", platform="bermuda", device_id=None)
@@ -162,6 +170,8 @@ def test_discovered_colliding_beacon_reclaims_group_zone_and_floor_sensors(platf
     zone = hass.data["bps_sensors"]["sensor.bps_group_rover_bps_zone"]
     assert zone.state == "Yard" and getattr(zone, "writes", 0) == 0
     assert hass.data["bps_sensors"]["sensor.bps_group_rover_bps_floor"].state == "Property"
+    assert devices.async_get(group_device.id) is group_device
+    assert devices.removed == []
     bps.update_bps_sensor_state(hass, zone.entity_id, "Yard")
     assert zone.state == "Yard" and zone.writes == 1
     # Ordinary value changes and unchanged group sync avoid another registry scan.
@@ -217,6 +227,41 @@ def test_group_rename_and_repeated_sync_preserve_unique_id(platform, registered_
         assert devices.updates == []
     asyncio.run(sync([{"id": "rover", "name": "Rover the dog"}]))
     assert len(devices.updates) == int(registered_device)
+
+
+@pytest.mark.parametrize("retired_id", ["rover", "bps_group_floor_rover", "bps_group_zone_rover"])
+def test_retired_group_devices_are_removed_without_touching_active_devices(platform, retired_id):
+    hass, registry, module, add, added = platform
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    sync = hass.data["bps"]["sync_group_sensors"]
+    rover, spot = {"id": retired_id, "name": "Rover"}, {"id": "spot", "name": "Spot"}
+    asyncio.run(sync([rover, spot]))
+    devices = module.dr.async_get(hass)
+    rover_device = devices.async_get_device(identifiers={("bps", "bps_group_" + retired_id)})
+    spot_device = devices.async_get_device(identifiers={("bps", "bps_group_spot")})
+    asyncio.run(sync([spot]))
+    assert devices.async_get(rover_device.id) is None
+    assert devices.async_get(spot_device.id) is spot_device
+    assert devices.removed == [rover_device.id]
+    asyncio.run(sync([]))
+    assert devices.async_get(spot_device.id) is None
+    assert devices.removed == [rover_device.id, spot_device.id]
+    asyncio.run(sync([]))
+    assert len(devices.removed) == 2
+
+
+def test_retired_group_device_with_another_entity_is_preserved(platform):
+    hass, registry, module, add, added = platform
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    sync = hass.data["bps"]["sync_group_sensors"]
+    asyncio.run(sync([{"id": "rover", "name": "Rover"}]))
+    devices = module.dr.async_get(hass)
+    device = devices.async_get_device(identifiers={("bps", "bps_group_rover")})
+    registry.entities["sensor.shared"] = types.SimpleNamespace(entity_id="sensor.shared", unique_id="shared",
+        platform="other", device_id=device.id)
+    asyncio.run(sync([]))
+    assert devices.async_get(device.id) is device
+    assert devices.removed == []
 
 
 def test_group_state_buffers_while_entity_addition_is_scheduled(platform):

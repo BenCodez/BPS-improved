@@ -342,6 +342,10 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         stale = [e for e in registry.entities.values()
                  if e.platform == "bps" and str(e.unique_id).startswith(("bps_group_zone_", "bps_group_floor_"))
                  and e.unique_id not in expected]
+        retired_devices = {entry.device_id for entry in stale if entry.device_id}
+        retired_identifiers = {("bps", "bps_group_" + str(entry.unique_id)[len(prefix):])
+                               for entry in stale for prefix in ("bps_group_zone_", "bps_group_floor_")
+                               if str(entry.unique_id).startswith(prefix)}
         for entry in stale:
             owned = [(key, sensor) for key, sensor in cache.items()
                      if sensor.unique_id == entry.unique_id]
@@ -393,6 +397,19 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         if additions:
             async_add_entities(additions, update_before_add=True)
             normalize_bps_registry_entity_ids_from_cache(hass)
+        device_registry = dr.async_get(hass)
+        for device_id in retired_devices:
+            device = device_registry.async_get(device_id)
+            if device is None or not device.identifiers & retired_identifiers:
+                continue
+            if any(entry.device_id == device_id for entry in registry.entities.values()):
+                continue
+            # AddEntitiesCallback may still be registering reclaimed beacon
+            # entities. Their cached DeviceInfo also owns this device already.
+            if any(set(getattr(sensor, "_attr_device_info", {}).get("identifiers", ())) & device.identifiers
+                   for sensor in cache.values()):
+                continue
+            device_registry.async_remove_device(device_id)
         group_signature = signature
 
     hass.data.setdefault("bps", {})["sync_group_sensors"] = sync_group_sensors
