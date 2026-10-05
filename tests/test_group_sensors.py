@@ -105,6 +105,43 @@ def test_group_disable_removes_owned_entities_preserves_beacons(platform):
     assert not any("bps_group_rover" in eid for eid in hass.data["bps_sensors"])
 
 
+def test_discovered_colliding_beacon_reclaims_group_zone_and_floor_sensors(platform, monkeypatch):
+    import bps
+    hass, registry, module, add, added = platform
+    listeners = {}
+    def listen(name, callback):
+        listeners[name] = callback
+        return lambda: None
+    hass.bus.async_listen = listen
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    sync = hass.data["bps"]["sync_group_sensors"]
+    asyncio.run(sync([{"id": "rover", "name": "Rover"}]))
+    old_group_sensors = [sensor for sensor in added if isinstance(sensor, module.BPSGroupSensor)]
+    distance_id = "sensor.bps_group_rover_distance_to_proxy"
+    registry.entities[distance_id] = types.SimpleNamespace(
+        entity_id=distance_id, unique_id="bermuda_distance", platform="bermuda", device_id=None)
+    hass.states.async_all = lambda: [types.SimpleNamespace(entity_id=distance_id)]
+    listeners["state_changed"](types.SimpleNamespace(data={"entity_id": distance_id, "old_state": None}))
+    # Discovery cannot create ordinary zone/floor sensors until the group owner retires.
+    assert hass.data["bps_sensors"]["sensor.bps_group_rover_bps_zone"].unique_id == "bps_group_zone_rover"
+    asyncio.run(sync([]))
+    assert all(sensor.removed for sensor in old_group_sensors)
+    for suffix, _label in module.SENSOR_KINDS:
+        eid = f"sensor.bps_group_rover_{suffix}"
+        sensor = hass.data["bps_sensors"][eid]
+        assert not isinstance(sensor, module.BPSGroupSensor)
+        assert sensor.unique_id == f"{suffix}_bps_group_rover"
+        assert registry.entities[eid].unique_id == sensor.unique_id
+    zone = hass.data["bps_sensors"]["sensor.bps_group_rover_bps_zone"]
+    bps.update_bps_sensor_state(hass, zone.entity_id, "Yard")
+    assert zone.state == "Yard" and zone.writes == 1
+    # Ordinary value changes and unchanged group sync avoid another registry scan.
+    monkeypatch.setattr(module, "get_filtered_entities", lambda _hass: pytest.fail("unexpected rescan"))
+    listeners["state_changed"](types.SimpleNamespace(data={"entity_id": distance_id, "old_state": object()}))
+    asyncio.run(sync([]))
+    assert hass.data["bps_sensors"][zone.entity_id] is zone
+
+
 def test_renamed_registry_entity_removed_by_unique_id(platform):
     hass, registry, module, add, added = platform
     asyncio.run(module.async_setup_entry(hass, None, add))

@@ -353,6 +353,13 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     await sensor.async_remove()
             registry.async_remove(entry.entity_id)
         additions = []
+        if stale:
+            # A newly discovered real beacon may have been blocked by the
+            # group's zone/floor cache IDs. Reclaim those sensors after their
+            # former owner is removed; ordinary value updates do not discover
+            # sensors again. This scan only runs when groups are retired.
+            for entity in get_filtered_entities(hass):
+                ensure_sensors_for_entity(hass, entity, cache, additions)
         for group in groups:
             ent = "bps_group_" + group["id"]
             for kind in ("zone", "floor"):
