@@ -4,6 +4,7 @@
     const TYPES = ['building', 'dense_trees', 'light_vegetation', 'custom'];
     const MATERIALS = ['unknown', 'light', 'heavy', 'metal'];
     const POLICIES = ['auto', 'normal', 'prefer', 'deprioritize', 'ignore'];
+    const MAX_UNCERTAINTY_THRESHOLD_M = 10000;
     const GROUP_LIMITS = Object.freeze({groups: 32, beacons: 16, id_length: 64});
     const slug = value => typeof value === 'string' && value.length > 0
         && value.length <= GROUP_LIMITS.id_length && !/[^a-z0-9_]/.test(value);
@@ -19,6 +20,7 @@
         const s = layout && layout.outdoor_tracking || {};
         return {enabled: s.enabled === true, show_uncertainty: s.show_uncertainty !== false,
             hide_uncertainty_below_m: number(s.hide_uncertainty_below_m) && s.hide_uncertainty_below_m >= 0
+                && s.hide_uncertainty_below_m <= MAX_UNCERTAINTY_THRESHOLD_M
                 ? s.hide_uncertainty_below_m : 0};
     }
     async function positionSnapshot(response) {
@@ -102,7 +104,7 @@
         if (index < 0) floor.environment.push(copy); else floor.environment[index] = copy;
         return copy;
     }
-    function upsertGroup(layout, group) {
+    function upsertGroup(layout, group, knownTrackers = []) {
         if (!group || !slug(group.id)
             || typeof group.name !== 'string' || !group.name.trim()
             || !Array.isArray(group.beacons) || !group.beacons.length
@@ -112,9 +114,13 @@
             throw new Error('A group supports at most 16 beacons.');
         const entries = Array.isArray(layout.tracker_groups) ? layout.tracker_groups : [];
         const index = entries.findIndex(g => g.id === group.id);
+        const enabled = group.enabled === undefined || group.enabled === true;
+        const key = `bps_group_${group.id}`;
+        if (knownTrackers.includes(key) && (index < 0 || enabled))
+            throw new Error(`Group ID '${group.id}' conflicts with real tracker '${key}'. Choose another ID, or disable/delete the existing group.`);
         if (entries.length > GROUP_LIMITS.groups || index < 0 && entries.length >= GROUP_LIMITS.groups)
             throw new Error('A layout supports at most 32 groups. Delete a group before adding another.');
-        const copy = {...group, name: group.name.trim(), enabled: group.enabled === undefined || group.enabled === true,
+        const copy = {...group, name: group.name.trim(), enabled,
             beacons: [...new Set(group.beacons)]};
         if (!Array.isArray(layout.tracker_groups)) layout.tracker_groups = [];
         if (index < 0) layout.tracker_groups.push(copy); else layout.tracker_groups[index] = copy;
@@ -131,6 +137,7 @@
         (out.receiver_diagnostics || []).forEach(r => lines.push(`${r.receiver}: measured ${display(r.measured_distance_m, ' m')}, corrected ${display(r.corrected_distance_m, ' m')}, age ${display(r.reading_age_s, ' s')}, ${r.classification || 'unknown'}, building crossings ${r.building_crossings ?? '—'}${r.reflection_risk ? ', reflection / multipath risk' : ''}, environment weight ${display(r.environmental_weight)}, reliability ${display(r.reliability_weight)}, ${r.status || 'unknown'}`));
         return lines.join('\n');
     }
-    root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, groups, environment, settings, positionSnapshot, uncertaintyRadius,
+    root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, MAX_UNCERTAINTY_THRESHOLD_M,
+        groups, environment, settings, positionSnapshot, uncertaintyRadius,
         drawUncertainty, isStale, fixTime, validPolygon, upsertEnvironment, upsertGroup, diagnosticsText});
 })(globalThis);

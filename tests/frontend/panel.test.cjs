@@ -89,6 +89,24 @@ test('panel old layout loads without outdoor fields and opt-in saves via authent
     assert.equal(JSON.parse(request.options.body.get('coordinates')).outdoor_tracking.enabled, true);
 });
 
+test('panel enforces uncertainty threshold bounds before changing or saving the layout', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const p = await panel(source);
+    for (const value of ['0', '10000']) {
+        p.el('outdoorThreshold').value = value; await p.el('outdoorThreshold').fire('change');
+        assert.equal(p.hooks.layout().outdoor_tracking.hide_uncertainty_below_m, Number(value));
+    }
+    const before = JSON.stringify(plain(p.hooks.layout()));
+    for (const value of ['10000.1', '1e309', '-0.1', 'invalid']) {
+        p.el('outdoorThreshold').value = value; await p.el('outdoorThreshold').fire('change');
+        assert.equal(JSON.stringify(plain(p.hooks.layout())), before);
+        assert.equal(Number(p.el('outdoorThreshold').value), 10000, 'restore the valid saved value');
+    }
+    p.hooks.select('Property'); await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.outdoor_tracking.hide_uncertainty_below_m, 10000);
+});
+
 test('panel shared polygon editor creates/edits/cancels/deletes environments and reloads saved points', async () => {
     const source = layout(); source.outdoor_tracking = {enabled: true};
     const p = await panel(source); p.hooks.select('Property');
@@ -147,6 +165,43 @@ test('panel groups retain stable IDs and original beacon picker entries', async 
     assert.equal(p.hooks.layout().tracker_groups.length, 1); assert.equal(p.hooks.layout().tracker_groups[0].id, 'rover');
     await p.el('deleteGroup').fire('click'); assert.equal(p.hooks.layout().tracker_groups.length, 0);
     assert.deepEqual(p.el('entSelector').options.map(o => o.value).filter(Boolean), ['beacon_a', 'beacon_b']);
+});
+
+test('panel rejects group creation colliding with a known beacon and accepts a different ID', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const p = await panel(source, ['beacon_a', 'bps_group_rover']);
+    const before = JSON.stringify(plain(p.hooks.layout()));
+    p.el('groupId').value = 'rover'; p.el('groupName').value = 'Rover';
+    p.el('groupBeacons').options.forEach(o => {o.selected = o.value === 'beacon_a';});
+    for (const enabled of [true, false]) {
+        p.el('groupEnabled').checked = enabled;
+        await p.el('saveGroup').fire('click');
+        assert.equal(JSON.stringify(plain(p.hooks.layout())), before);
+        assert.equal(p.el('entSelector').options.filter(o => o.value === 'bps_group_rover').length, 1);
+    }
+    p.el('groupId').value = 'rover_dog'; p.el('groupEnabled').checked = true;
+    await p.el('saveGroup').fire('click');
+    assert.equal(p.hooks.layout().tracker_groups[0].id, 'rover_dog');
+    assert.ok(p.el('entSelector').options.some(o => o.value === 'bps_group_rover_dog'));
+    p.hooks.select('Property'); await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.tracker_groups[0].id, 'rover_dog');
+});
+
+test('panel rejects re-enabling a saved group that collides with a known beacon', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [{id: 'rover', name: 'Rover', enabled: false, beacons: ['beacon_a']}];
+    const p = await panel(source, ['beacon_a', 'bps_group_rover']);
+    p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
+    p.el('groupSelector').value = 'rover'; await p.el('groupSelector').fire('change');
+    const before = JSON.stringify(plain(p.hooks.layout()));
+    p.el('groupEnabled').checked = true; await p.el('saveGroup').fire('click');
+    assert.equal(JSON.stringify(plain(p.hooks.layout())), before);
+    assert.deepEqual(plain(p.hooks.tracked()), ['bps_group_rover']);
+    p.el('groupEnabled').checked = false; p.el('groupName').value = 'Retired group';
+    await p.el('saveGroup').fire('click');
+    assert.equal(p.hooks.layout().tracker_groups[0].name, 'Retired group');
+    assert.deepEqual(plain(p.hooks.tracked()), ['bps_group_rover']);
 });
 
 test('accepted optional group defaults remain visible, enabled and preserved across edits', async () => {

@@ -21,6 +21,16 @@ test('old layouts do not enable or mutate optional tracking', () => {
     assert.deepEqual(plain(out.environment({environment: [null, 3]})), []);
 });
 
+test('uncertainty settings honor backend threshold bounds without rewriting stored values', () => {
+    for (const value of [0, 10000]) {
+        assert.equal(out.settings({outdoor_tracking: {hide_uncertainty_below_m: value}}).hide_uncertainty_below_m, value);
+    }
+    const layout = {outdoor_tracking: {enabled: true, hide_uncertainty_below_m: 10000.1}};
+    const before = JSON.stringify(layout);
+    assert.equal(out.settings(layout).hide_uncertainty_below_m, 0);
+    assert.equal(JSON.stringify(layout), before);
+});
+
 test('uncertainty is radius in floor pixels, respects toggle/threshold, and rejects invalid numbers', () => {
     const config = out.settings({outdoor_tracking: {enabled: true, hide_uncertainty_below_m: 5}});
     assert.equal(out.uncertaintyRadius({estimated_uncertainty_m: 7.4}, 20, config), 148);
@@ -124,6 +134,27 @@ test('group validation accepts exact backend limits and rejects overflow before 
     const accepted = {};
     out.upsertGroup(accepted, {...group, id: '_rover__', beacons: ['_beacon__', 'b'.repeat(64)]});
     assert.equal(accepted.tracker_groups[0].id, '_rover__');
+});
+
+test('known tracker collisions reject group creation and activation while permitting retirement', () => {
+    const known = ['beacon_a', 'bps_group_rover'];
+    const group = {id: 'rover', name: 'Rover', beacons: ['beacon_a']};
+    const layout = {tracker_icons: {bps_group_rover: 'beacon.svg'}};
+    const before = JSON.stringify(layout);
+    for (const enabled of [true, false]) {
+        assert.throws(() => out.upsertGroup(layout, {...group, enabled}, known), /conflicts with real tracker 'bps_group_rover'/);
+        assert.equal(JSON.stringify(layout), before);
+    }
+    out.upsertGroup(layout, {...group, id: 'rover_dog'}, known);
+    assert.equal(layout.tracker_groups[0].id, 'rover_dog');
+    const saved = {tracker_groups: [{...group, enabled: false}]};
+    const savedBefore = JSON.stringify(saved);
+    for (const enabled of [true, undefined]) {
+        assert.throws(() => out.upsertGroup(saved, {...group, enabled}, known), /conflicts with real tracker/);
+        assert.equal(JSON.stringify(saved), savedBefore);
+    }
+    out.upsertGroup(saved, {...group, name: 'Retired group', enabled: false}, known);
+    assert.equal(saved.tracker_groups[0].enabled, false);
 });
 
 test('diagnostics explain measurement trust and fused beacon disagreement', () => {

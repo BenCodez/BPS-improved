@@ -328,7 +328,7 @@
                         <div id="outdoorControls" hidden>
                             <label class="bps-switch"><input type="checkbox" id="outdoorUncertainty"><span>Show estimated uncertainty</span></label>
                             <label class="bps-label" for="outdoorThreshold">Hide circle below (metres)</label>
-                            <input id="outdoorThreshold" type="number" min="0" step="0.1" class="bps-input" value="0">
+                            <input id="outdoorThreshold" type="number" min="0" max="10000" step="0.1" class="bps-input" value="0">
                             <label class="bps-switch"><input type="checkbox" id="outdoorDiagnostics"><span>Show tracking diagnostics</span></label>
                             <p class="bps-hint">Estimated uncertainty is a heuristic radius, not a guaranteed confidence interval. Grey dotted circles mark stale fixes.</p>
                             <p class="bps-hint">Select a saved floor, add a building or tree area, click at least three corners on the map and name the shape. Press ✓ Save, then Save Floor Plan.</p>

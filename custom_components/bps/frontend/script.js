@@ -5992,8 +5992,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold']) {
         document.getElementById(id).addEventListener('change', () => {
             const threshold = Number(document.getElementById('outdoorThreshold').value);
-            if (!Number.isFinite(threshold) || threshold < 0) {
-                bpsToast('Uncertainty threshold must be a finite non-negative number.');
+            if (!Number.isFinite(threshold) || threshold < 0 || threshold > outdoor.MAX_UNCERTAINTY_THRESHOLD_M) {
+                bpsToast('Uncertainty threshold must be a finite number from 0 to 10000 metres.');
                 syncOutdoorSettings();
                 return;
             }
@@ -6169,7 +6169,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         try {
             outdoor.upsertGroup(finalcords, {id, name: document.getElementById('groupName').value,
                 enabled: document.getElementById('groupEnabled').checked,
-                beacons: [...document.getElementById('groupBeacons').selectedOptions].map(o => o.value)});
+                beacons: [...document.getElementById('groupBeacons').selectedOptions].map(o => o.value)}, availableBeaconKeys);
         } catch (error) { bpsToast(error.message); return; }
         if (!document.getElementById('groupEnabled').checked && !availableBeaconKeys.includes(`bps_group_${id}`))
             removeTrackedDevice(`bps_group_${id}`);

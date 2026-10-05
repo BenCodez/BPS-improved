@@ -204,7 +204,8 @@ When enabled, BPS can draw an **estimated uncertainty** circle around a fix.
 Its radius is a conservative heuristic using factors such as receiver geometry,
 residual, reading freshness, and path reliability. It is useful as a relative
 quality cue, but it is not a guaranteed confidence interval or GPS-like accuracy
-radius. The circle can be hidden globally or below a configured metre threshold.
+radius. The circle can be hidden globally or below a configured metre threshold
+from 0 to 10,000 metres.
 Stale last-known fixes have a distinct dashed grey circle. Distances are in
 metres; circle radii use the floor's pixels-per-metre scale before zooming.
 
@@ -212,6 +213,9 @@ To represent one dog with multiple beacons, use the **Dog / tracker group**
 controls to give a group a name and stable ID and select its Bermuda tracker
 slugs. A layout supports up to 32 groups, with up to 16 beacons per group;
 group IDs and beacon slugs use 1–64 lowercase letters, digits or underscores.
+Choose an ID whose `bps_group_<id>` does not match an existing beacon. The
+editor prevents creating or enabling a conflicting group; disable/delete a
+conflicting saved group and recreate it with another ID.
 The group produces additional zone and floor sensors; the original
 beacon trackers and their sensors remain available. BPS combines their existing
 position fixes using estimated quality, and reports beacon count, disagreement,
