@@ -22,10 +22,10 @@ function card() {
     return item;
 }
 function canvas() {
-    const calls = [];
-    const ctx = {save() {}, restore() {}, beginPath() {}, fill() {}, stroke() {}, setLineDash() {}, moveTo() {}, lineTo() {},
+    const calls = [], dashes = [];
+    const ctx = {save() {}, restore() {}, beginPath() {}, fill() {}, stroke() {}, setLineDash(dash) {dashes.push([...dash]);}, moveTo() {}, lineTo() {},
         arc(...args) {calls.push(args);}, fillText(text) {calls.push(text);}, measureText() {return {width: 50};}};
-    return {calls, value: {width: 2000, height: 1000, getContext: () => ctx}};
+    return {calls, dashes, value: {width: 2000, height: 1000, getContext: () => ctx}};
 }
 
 test('card loads floor scale/settings from authenticated existing layout endpoint', async () => {
@@ -89,6 +89,29 @@ test('group zone sensor resolves fused map key/name and shows constituent beacon
     row.updated = 1; row.outdoor.observed = .5;
     await c._pollOnce();
     assert.equal(c._positions.get('bps_group_rover').receivedAt, 500, 'repeated poll preserves source observation time');
+});
+
+test('card constituent circles inherit group freshness limits and age cached source times', () => {
+    const c = card(), cv = canvas(), now = Date.now(); c._canvas = cv.value;
+    c._config.entities = ['sensor.bps_group_rover_bps_zone']; c._config.show_outdoor_diagnostics = true;
+    c._entityByTrackerKey.set('bps_group_rover', c._config.entities[0]);
+    c._hass.states['sensor.bps_group_rover_bps_floor'] = {state: 'Property'};
+    c._outdoorSettings.enabled = true;
+    c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+    const beacon = {ent: 'beacon_a', floor: 'Property', cords: [205, 100], age_s: 45,
+        updated: now / 1000 - 45, estimated_uncertainty_m: 3};
+    const pos = {x: 200, y: 100, receivedAt: now, outdoor: {estimated_uncertainty_m: 4, stale_after_s: 90},
+        payload: {group: true, beacon_positions: [beacon]}};
+    c._positions.set('bps_group_rover', pos); c._drawMarkers();
+    assert.ok(cv.calls.some(v => Array.isArray(v) && v[2] === 60));
+    assert.ok(!cv.dashes.some(dash => dash[0] === 3 && dash[1] === 6), '45-second beacon remains fresh with a 90-second cutoff');
+    // An old cached diagnostic age cannot keep a source circle fresh forever.
+    beacon.updated = now / 1000 - 91;
+    cv.dashes.length = 0; c._drawMarkers();
+    assert.ok(cv.dashes.some(dash => dash[0] === 3 && dash[1] === 6));
+    pos.outdoor.stale_after_s = 300; beacon.age_s = 200; beacon.updated = now / 1000 - 200;
+    cv.dashes.length = 0; c._drawMarkers();
+    assert.ok(!cv.dashes.some(dash => dash[0] === 3 && dash[1] === 6), 'disabled reading gate uses the group position timeout');
 });
 
 test('failed card poll repaints cached fixes so freshness can expire', async () => {

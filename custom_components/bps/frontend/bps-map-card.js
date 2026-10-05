@@ -804,7 +804,9 @@ class BpsMapCard extends HTMLElement {
           if (!Array.isArray(beacon.cords) || beacon.cords.length < 2 || !beacon.cords.every(Number.isFinite)
             || beacon.floor && this._normalize(beacon.floor) !== this._normalize(this._config.floor)) continue;
           const [x, y] = beacon.cords;
-          BPSOutdoor.drawUncertainty(ctx, {x, y, outdoor: {estimated_uncertainty_m: beacon.estimated_uncertainty_m, position_age_s: beacon.age_s}},
+          BPSOutdoor.drawUncertainty(ctx, {x, y, receivedAt: BPSOutdoor.fixTime(beacon), outdoor: {
+            estimated_uncertainty_m: beacon.estimated_uncertainty_m, position_age_s: beacon.age_s,
+            stale_after_s: pos.outdoor?.stale_after_s}},
             this._floorScale, {...this._outdoorSettings, show_uncertainty: this._outdoorSettings.show_uncertainty && this._config.show_uncertainty}, '#2196f3');
           ctx.save(); ctx.strokeStyle = '#2196f3'; ctx.globalAlpha = 0.65; ctx.setLineDash([4, 4]);
           ctx.beginPath(); ctx.moveTo(pos.x, pos.y); ctx.lineTo(x, y); ctx.stroke();

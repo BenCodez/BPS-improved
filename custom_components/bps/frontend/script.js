@@ -6028,7 +6028,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!Array.isArray(p.cords) || p.cords.length < 2 || !p.cords.every(Number.isFinite)
                 || p.floor && !sameFloorName(p.floor, SelMapName)) continue;
             const x = p.cords[0], y = p.cords[1];
-            outdoor.drawUncertainty(ctx, {x, y, outdoor: {estimated_uncertainty_m: p.estimated_uncertainty_m, position_age_s: p.age_s}},
+            outdoor.drawUncertainty(ctx, {x, y, receivedAt: outdoor.fixTime(p), outdoor: {
+                estimated_uncertainty_m: p.estimated_uncertainty_m, position_age_s: p.age_s,
+                stale_after_s: position.outdoor?.stale_after_s}},
                 (currentFloor() || {}).scale, outdoor.settings(finalcords), color, view.zoom || 1);
             ctx.save();
             ctx.strokeStyle = color;

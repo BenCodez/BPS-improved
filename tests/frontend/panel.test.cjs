@@ -366,6 +366,31 @@ for (const kind of ['partial', 'empty', 'no-data']) {
     });
 }
 
+test('panel constituent circles inherit group freshness and expire during failed polling', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a', 'beacon_b']}];
+    const p = await panel(source); p.hooks.select('Property'); p.setClock(1000000);
+    p.el('outdoorDiagnostics').checked = true;
+    p.network.cords = [{ent: 'bps_group_rover', group: true, name: 'Rover', cords: [100, 100],
+        floor: 'Property', updated: 1000, outdoor: {observed: 1000, estimated_uncertainty_m: 7.4, stale_after_s: 90},
+        beacon_positions: [{ent: 'beacon_a', cords: [120, 100], floor: 'Property',
+            updated: 955, age_s: 45, estimated_uncertainty_m: 3}]}];
+    p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click');
+    const poll = p.intervals.findLast(i => i.ms === 500);
+    p.canvasCalls.length = 0; await poll.cb();
+    assert.ok(p.canvasCalls.some(call => call[0] === 'arc' && call[3] === 60));
+    const staleDash = call => call[0] === 'dash' && call[1] === 3 && call[2] === 6;
+    assert.ok(!p.canvasCalls.some(staleDash), '45-second beacon is fresh under the 90-second cutoff');
+    p.setClock(1046000); p.network.failCords = true;
+    p.canvasCalls.length = 0; await poll.cb();
+    assert.ok(p.canvasCalls.some(staleDash), 'cached beacon expires at its inherited cutoff');
+    const cached = p.hooks.tracks().get('bps_group_rover');
+    cached.outdoor.stale_after_s = 300; p.setClock(1155000);
+    p.canvasCalls.length = 0; await poll.cb();
+    assert.ok(!p.canvasCalls.some(staleDash), 'group position timeout applies when the reading gate is disabled');
+});
+
 test('panel retains group fixes through HTTP failures and malformed responses', async () => {
     const source = layout(); source.outdoor_tracking = {enabled: true};
     source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a']}];
