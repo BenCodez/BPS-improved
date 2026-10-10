@@ -47,7 +47,8 @@
             || number(receivedAt) && now - receivedAt >= limit * 1000;
     }
     function fixTime(row, now = Date.now()) {
-        const observed = row && row.outdoor && row.outdoor.observed;
+        const observed = row && row.outdoor && row.outdoor.use_observation_age === false
+            ? row.updated : row && row.outdoor && row.outdoor.observed;
         const timestamp = number(observed) && observed >= 0 ? observed : row && row.updated;
         if (number(timestamp) && timestamp >= 0 && number(timestamp * 1000)) return Math.min(now, timestamp * 1000);
         const age = row && row.outdoor && row.outdoor.position_age_s;

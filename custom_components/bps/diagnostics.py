@@ -125,8 +125,6 @@ class Recording:
                         break
                     now = time.time()
                     data = self.snapshot(self.hass, self.targets, now)
-                    self.sources = frozenset(b for values in data["context"]["target_members"].values() for b in values)
-                    self.members = {key: tuple(values) for key, values in data["context"]["target_members"].items()}
                     self._append(await self.hass.async_add_executor_job(pack, data))
         except asyncio.CancelledError:
             raise

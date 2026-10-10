@@ -11,7 +11,7 @@ from .uncertainty import estimate_uncertainty
 
 
 def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
-                  previous, solver):
+                  previous, solver, *, position_timeout_s=300.0):
     """Return an outdoor candidate, or None with fewer than three usable inputs.
 
     ``weighted`` and ``floor.receivers`` share the ordering of the live candidate
@@ -70,7 +70,9 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
         fix, base, scale, diagnostics, bounds=bounds, previous=previous,
     )
     quality["receiver_diagnostics"] = diagnostics
-    quality["stale_after_s"] = max_age_s or 30.0
+    quality["stale_after_s"] = max_age_s or finite_number(
+        position_timeout_s, 300.0, minimum=0.0) or 300.0
+    quality["use_observation_age"] = max_age_s > 0
     quality["stale"] = False
     quality["position_age_s"] = 0.0
     ages = [d["reading_age_s"] for d in diagnostics if d.get("reading_age_s") is not None]

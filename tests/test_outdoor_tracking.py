@@ -148,6 +148,46 @@ def test_stale_readings_excluded_before_solve(hass):
     assert result == []
 
 
+@pytest.mark.parametrize("timeout,expected", [(None, 300), (120, 120), (0, 300),
+    (-1, 300), (float("inf"), 300)])
+def test_disabled_reading_gate_ordinary_fixes_age_by_last_solve(hass, monkeypatch, timeout, expected):
+    now = 2000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(True)
+    data["reading_max_age"] = 0
+    if timeout is not None:
+        data["position_timeout"] = timeout
+    states(hass, age=1000)
+    result, _ = solve(hass, data)
+    assert len(result) == 1
+    source = result[0]
+    assert source["outdoor"]["observed"] == 1000, 'measurement clock remains truthful'
+    assert source["outdoor"]["use_observation_age"] is False
+    assert source["outdoor"]["stale_after_s"] == expected
+    for elapsed, stale in [(0, False), (expected - 1, False), (expected, True)]:
+        now = 2000 + elapsed
+        response = run(bps.BPSCordsAPI(hass).get(None)).json_body[0]
+        assert response["outdoor"]["stale"] is stale
+        assert response["outdoor"]["position_age_s"] == elapsed
+        assert response["outdoor"]["observed"] == 1000
+        assert response["updated"] == 2000, 'polling cannot refresh the solve clock'
+
+
+def test_enabled_reading_gate_ordinary_fix_ages_by_measurement(hass, monkeypatch):
+    now = 2000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(True)
+    data.update(reading_max_age=90, position_timeout=300)
+    states(hass, age=45)
+    result, _ = solve(hass, data)
+    assert result[0]["outdoor"]["use_observation_age"] is True
+    now += 45
+    response = run(bps.BPSCordsAPI(hass).get(None)).json_body[0]
+    assert response["outdoor"]["position_age_s"] == 90
+    assert response["outdoor"]["stale"] is True
+    assert response["outdoor"]["stale_after_s"] == 90
+
+
 def points(floor, truth=(50, 50), liar=False):
     weighted = []
     for i, rec in enumerate(floor["receivers"]):

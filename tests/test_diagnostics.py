@@ -349,3 +349,39 @@ def test_recorded_group_keeps_original_measurements_when_outdoor_tracking_is_dis
         await rec.clear()
         assert rec.members == {} and not rec.sources
     asyncio.run(scenario())
+
+
+def test_recording_freezes_members_through_group_edits_and_restarts_with_new_members(hass, monkeypatch):
+    async def scenario():
+        data, _states = configure(hass, monkeypatch)
+        monkeypatch.setattr(bps, "_bermuda_distance_sensor_ids", lambda _h: [
+            f"sensor.{tag}_distance_to_proxy" for tag in ("tag", "tag2", "tag3")])
+        rec = diag.get_recording(hass, bps._diagnostic_snapshot)
+        await rec.start(["bps_group_dog"], 10)
+        await rec.annotate({"kind": "known_position", "target": "bps_group_dog", "floor": "Yard", "x_m": 1, "y_m": 2})
+        data["tracker_groups"][0]["beacons"] = ["tag3"]
+        def changed_snapshot(*args):
+            snap = bps._diagnostic_snapshot(*args)
+            rec.deadline = 0  # Finish after the real worker appends this frame.
+            return snap
+        rec.snapshot = changed_snapshot
+        monkeypatch.setattr(diag, "INTERVAL_S", 0)
+        await rec.task
+        export = json.loads(await rec.export())
+        assert len(export["frames"]) == 2
+        assert rec.sources == frozenset({"tag", "tag2"})
+        assert rec.members == {"bps_group_dog": ("tag", "tag2")}
+        for frame in export["frames"]:
+            assert {row["tracker"] for row in frame["readings"]} == {"tag", "tag2"}
+            context = export["contexts"][frame["context_id"]]
+            assert context["target_members"] == {"bps_group_dog": ["tag", "tag2"]}
+        assert len(export["annotations"]) == 1
+        assert any(context["layout"]["tracker_groups"][0]["beacons"] == ["tag3"]
+                   for context in export["contexts"].values()), 'live settings changes remain visible'
+        rec.snapshot = bps._diagnostic_snapshot
+        await rec.start(["bps_group_dog"], 10)
+        assert rec.sources == frozenset({"tag3"})
+        assert rec.members == {"bps_group_dog": ("tag3",)}
+        assert {row["tracker"] for row in json.loads(rec.frames[0])["readings"]} == {"tag3"}
+        await rec.stop()
+    asyncio.run(scenario())

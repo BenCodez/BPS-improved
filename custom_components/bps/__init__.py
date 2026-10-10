@@ -1296,6 +1296,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
             outdoor_result = await hass.async_add_executor_job(partial(
                 solve_outdoor, floor, weighted, floor_bounds, scale, min_wr,
                 _reading_max_age(entity_layout), prior, trilaterate,
+                position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS),
             ))
             if outdoor_result is None:
                 continue
@@ -2523,10 +2524,11 @@ def _diagnostic_snapshot(hass, targets, now):
              for eid in _bermuda_distance_sensor_ids(hass)}
     groups = {"bps_group_" + g["id"]: g["beacons"] for g in normalize_groups(data, known)}
     recording = hass.data.get(DOMAIN, {}).get("_diagnostics")
-    retained = recording.members if recording else {}
-    # Keep recording the selected dog's original tags if its group or Outdoor
-    # Tracking is disabled/deleted during an A/B diagnostic session.
-    members = {target: [target] if target in known else list(groups.get(target, retained.get(target, [target])))
+    retained = recording.members if recording and recording.active else {}
+    # Freeze subjects for this session, including when a group is edited or
+    # disabled/deleted. A new recording resolves the current membership afresh.
+    members = {target: list(retained[target]) if target in retained else
+               [target] if target in known else list(groups.get(target, [target]))
                for target in targets}
     beacons = sorted({beacon for values in members.values() for beacon in values})
     if len(beacons) > 16:
@@ -2762,7 +2764,10 @@ class BPSCordsAPI(HomeAssistantView):
                 payload.append(position)
                 continue
             quality = dict(position["outdoor"])
-            observed = quality.get("observed", position.get("updated", now))
+            # Disabling measurement-age gating retains the normal last-solve
+            # grace. Keep the real measurement observation in the payload.
+            observed = position.get("updated", now) if quality.get("use_observation_age") is False \
+                else quality.get("observed", position.get("updated", now))
             age = max(0.0, now - observed)
             quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0))
             payload.append({**position, "outdoor": quality})

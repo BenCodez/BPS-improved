@@ -54,6 +54,18 @@ test('old layouts do not enable or mutate optional tracking', () => {
     assert.deepEqual(plain(out.environment({environment: [null, 3]})), []);
 });
 
+test('disabled reading gate uses the solve clock without refreshing it on polls', () => {
+    const row = {updated: 200, outdoor: {observed: 5, use_observation_age: false,
+        stale_after_s: 120, position_age_s: 0}};
+    assert.equal(out.fixTime(row, 250000), 200000);
+    assert.equal(out.fixTime(row, 310000), 200000);
+    assert.equal(out.isStale(row.outdoor, out.fixTime(row, 310000), 310000), false);
+    assert.equal(out.isStale(row.outdoor, out.fixTime(row, 320000), 320000), true);
+    row.outdoor.use_observation_age = true;
+    assert.equal(out.fixTime(row, 250000), 5000, 'enabled gate retains measurement freshness');
+    assert.equal(out.isStale(row.outdoor, out.fixTime(row, 250000), 250000), true);
+});
+
 test('uncertainty settings honor backend threshold bounds without rewriting stored values', () => {
     for (const value of [0, 10000]) {
         assert.equal(out.settings({outdoor_tracking: {hide_uncertainty_below_m: value}}).hide_uncertainty_below_m, value);

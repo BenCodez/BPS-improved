@@ -306,11 +306,12 @@ Stale or excluded member fixes appear grey and faded. Enable diagnostics for
 member names, uncertainty circles, and connecting lines; those extras stay hidden
 during normal tracking. Overlapping member icons sit underneath the main icon.
 
-With `reading_max_age: 0`, the receiver reading-age gate is disabled for groups
-too. Group expiry then follows the last source position solve and
+With `reading_max_age: 0`, the receiver reading-age gate is disabled for ordinary
+outdoor fixes and groups. Map freshness then follows the last position solve and
 `position_timeout` (300 seconds by default). Re-fusing a retained position does
-not refresh its timestamp. Positive reading-age cutoffs continue using the
-source measurement observation time.
+not refresh its timestamp. Original measurement observation timestamps remain
+available for diagnostics. Positive reading-age cutoffs continue using the source
+measurement observation time.
 
 Group history dates the published fused result, so a position or zone change
 caused by an expiring member reaches the time scrubber without waiting for a
@@ -571,7 +572,9 @@ lives.)
 Open **BPS → Debugging → Diagnostic recording**, click **Load trackers / refresh**,
 choose an original Bermuda tracker or an enabled dog group, and start a 5, 10,
 or 30 minute recording. A group records its constituent beacons as well as the
-fused result. Its original tags continue recording if the group or Outdoor
+fused result. Membership is fixed at recording start: editing a group's beacon
+list does not switch the session's subjects. Start a new recording to capture
+the updated membership. Its original tags continue recording if the group or Outdoor
 Tracking is disabled during the session, allowing comparisons. Recording works
 with Outdoor Tracking enabled or disabled.
 It never applies corrections or changes tracking, layout, or calibration.
