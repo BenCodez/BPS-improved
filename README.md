@@ -103,22 +103,39 @@ It uses the same `bps` domain and configuration entry, layout/calibration storag
 keys, and history location. An existing BPS setup should be reused after restart.
 Older flat-file layouts and calibration data use the existing migration path.
 
-1. Take a full Home Assistant backup before switching.
-2. Remove the older BPS download/repository from **HACS**, then install this
-   fork's release. Keep the existing **BPS integration entry in Settings →
-   Devices & Services**; do not delete it or add another BPS entry.
-3. Install the replacement into the same `custom_components/bps` directory
-   before restarting Home Assistant. Keep `.storage` and `www/bps_maps` intact.
-   For a manual installation, replace the old component directory with this
-   fork's `custom_components/bps` directory.
-4. Restart Home Assistant and refresh the BPS panel/dashboard browser cache.
-   Verify your existing entities, maps, receivers, calibration, and history.
-   Leave Outdoor Tracking off initially, then enable it when ready.
+Take a full Home Assistant backup and obtain the replacement files before
+switching. **Keep the existing BPS entry in Settings → Devices & Services**;
+do not delete it or add another BPS entry. Keep `.storage` and `www/bps_maps`
+intact as well.
 
-Use `BenCodez/BPS-improved` as the HACS update source afterward; reinstalling or
-updating the older repository would replace this fork's code. Compatibility is
-covered by automated tests, but replacement on a live Home Assistant installation
-still needs verification.
+**HACS replacement:** HACS can display **Integration is configured** and tell
+you to delete its configuration first. That would work against retaining your
+existing setup. In current HACS, the dialog offers **Ignore** as well as
+navigation to Integrations. If your version has **Ignore**, choose it, then
+confirm removal of the older HACS download and install this fork's release
+before restarting Home Assistant. HACS removes the downloaded component files;
+this path keeps the Home Assistant BPS configuration entry. If your HACS UI
+requires deleting that entry and provides no **Ignore** option, use the manual
+replacement below instead.
+
+**Manual replacement:** Leave HACS and the BPS configuration entry in place.
+Replace only the code directory at `config/custom_components/bps` with this
+fork's `custom_components/bps` directory. The feature branch can be downloaded
+as a source ZIP while the PR is unmerged. A release's `bps.zip` contains the
+component files directly; extract those into `config/custom_components/bps`,
+without an extra nested `bps` directory. Complete the replacement before
+restarting Home Assistant.
+
+After either path, restart Home Assistant, refresh the BPS panel/dashboard
+browser cache, and verify existing entities, maps, receivers, calibration, and
+history. Leave Outdoor Tracking off initially, then enable it when ready.
+
+After the HACS replacement, use `BenCodez/BPS-improved` for updates. A manual
+replacement does **not** change the repository HACS manages: do not update BPS
+from the older HACS repository, or it will overwrite this fork. Manage subsequent
+updates manually until you can switch the HACS source while retaining the BPS
+entry. Compatibility is covered by automated tests, but replacement on a live
+Home Assistant installation still needs verification.
 
 ### SciPy dependency
 
