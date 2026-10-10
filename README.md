@@ -622,8 +622,10 @@ The report shows receiver availability, known-position range bias, wrong-floor
 fixes, raw versus filtered median/p95 error, and empirical uncertainty coverage.
 Unchanged fixes/readings are deduplicated for error measurements. Cached/future
 observations and fixes from before a known-position marker are excluded. A
-group's timestamps are checked against its recorded original fixes. A changed
-context is not used to rescale an older cached fix. Without valid known-position
+group's timestamps are checked against its recorded original fixes. After a
+layout/calibration context change, contributing measurements and receiver samples
+must be observed at or after the first frame with that context, even if an older
+reading was reused in a newly published solve. Without valid known-position
 samples, accuracy metrics are `null`; availability still helps diagnose failures.
 This evidence can guide receiver placement, height/scale corrections, path
 weighting, or calibration work. Bias can also reflect wrong map geometry or

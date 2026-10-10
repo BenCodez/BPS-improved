@@ -242,6 +242,15 @@ def test_old_future_unknown_observations_never_gain_ground_truth(observed):
     assert report["receivers"][0]["known_position_samples"] == 0
 
 
+def test_future_publication_clock_does_not_score_a_fix_with_older_valid_measurements():
+    data = bundle()
+    for frame in data["frames"][1:]:
+        frame["positions"][0]["updated"] = 8
+    report = analyse_tool.analyse(data)
+    assert report["trackers"]["tag"]["published_error"]["samples"] == 0
+    assert report["receivers"][0]["known_position_samples"] == 1
+
+
 def test_clear_marker_excludes_later_samples_and_wrong_floor_is_reported():
     data = bundle()
     wrong = copy.deepcopy(data["frames"][1])
@@ -278,6 +287,57 @@ def test_context_change_never_rescales_an_older_fix():
     data["frames"][1]["context_id"] = "new"
     data["frames"][2]["context_id"] = "new"
     assert analyse_tool.analyse(data)["trackers"]["tag"]["published_error"]["samples"] == 0
+
+
+@pytest.mark.parametrize("change", ["scale", "geometry", "calibration"])
+@pytest.mark.parametrize("age_gate", [0, 30])
+def test_context_change_rejects_old_inputs_in_a_new_solve_and_old_receiver_samples(change, age_gate):
+    data = bundle()
+    data["contexts"]["c"]["layout"]["reading_max_age"] = age_gate
+    newer = copy.deepcopy(data["contexts"]["c"])
+    floor = newer["layout"]["floor"][0]
+    if change == "scale":
+        floor["scale"] = 20
+    elif change == "geometry":
+        floor["receivers"][0]["cords"]["x"] = 10
+    else:
+        floor["receivers"][0]["correction"] = 2
+        newer["calibration"] = {"applied": {"proxy": 2}, "last_solved_at": 4}
+    data["contexts"]["new"] = newer
+    for frame in data["frames"][1:]:
+        frame["context_id"] = "new"
+        position = frame["positions"][0]
+        position["updated"] = frame["time"]  # A new solve from retained sensor values.
+        position["diagnostic_inputs"] = [{"receiver": "proxy", "observed": 3},
+                                         {"receiver": "other", "observed": 4}]
+        frame["positions"].append({"ent": "bps_group_dog", "group": True, "floor": "Yard",
+            "updated": position["updated"] if age_gate == 0 else 3, "cords": position["cords"],
+            "beacon_positions": [{"ent": "tag", "used": True, "floor": "Yard", "cords": position["cords"],
+                "updated": position["updated"] if age_gate == 0 else 3}]})
+    report = analyse_tool.analyse(data)
+    for key in ("tag", "bps_group_dog"):
+        assert report["trackers"][key]["published_error"]["samples"] == 0
+        assert report["trackers"][key]["raw_error"]["samples"] == 0
+        assert report["trackers"][key]["uncertainty_coverage_samples"] == 0
+    receiver = next(row for row in report["receivers"] if row["receiver"] == "proxy")
+    assert receiver["known_position_samples"] == 0
+    assert receiver["status"] == {"current": 2}, 'availability reporting remains useful'
+    # Once every contributing measurement belongs to the new context, score it.
+    fresh = copy.deepcopy(data["frames"][2])
+    for position in fresh["positions"]:
+        position["updated"] = 5
+        if position.get("group"):
+            position["beacon_positions"][0]["updated"] = 5
+        else:
+            position["outdoor"]["observed"] = 5
+            for reading in position["diagnostic_inputs"]:
+                reading["observed"] = 5
+    fresh["readings"][0]["observed"] = 5
+    data["frames"].append(fresh)
+    report = analyse_tool.analyse(data)
+    assert report["trackers"]["tag"]["published_error"]["samples"] == 1
+    assert report["trackers"]["bps_group_dog"]["published_error"]["samples"] == 1
+    assert next(row for row in report["receivers"] if row["receiver"] == "proxy")["known_position_samples"] == 1
 
 
 def test_legacy_solve_timestamp_alone_is_not_measurement_evidence():

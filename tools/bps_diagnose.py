@@ -123,9 +123,10 @@ def analyse(bundle):
             truth = truth_for(bundle, key, now, members)
             # Never score old/future fixes against a newly marked location, or
             # reproject a cached fix using newly changed geometry/calibration.
-            if not truth or not times or any(not number(t) or t < truth["time"] or t > now for t in times):
+            if not truth or not times or any(not number(t) or t < max(truth["time"], context_since)
+                                            or t > now for t in times):
                 continue
-            if not number(position.get("updated")) or position["updated"] < context_since:
+            if not number(position.get("updated")) or not context_since <= position["updated"] <= now:
                 continue
             if position.get("floor") != truth["floor"]:
                 stats["wrong_floor_fixes"] += 1
@@ -150,7 +151,8 @@ def analyse(bundle):
             truth = truth_for(bundle, reading["tracker"], now, members)
             observed = reading.get("observed")
             signature = (*key, observed, reading.get("raw_state"))
-            if not truth or reading["status"] != "current" or not number(observed) or not truth["time"] <= observed <= now or signature in seen_ranges:
+            if not truth or reading["status"] != "current" or not number(observed) \
+                    or not max(truth["time"], context_since) <= observed <= now or signature in seen_ranges:
                 continue
             floor = floors.get(reading["floor"], {})
             scale = floor.get("scale")
