@@ -16,6 +16,7 @@ BASE_NOISE_M = 0.75
 RANGE_NOISE_FRACTION = 0.05
 REFERENCE_RECEIVERS = 3.0
 MIN_WEIGHT_RADIUS_M = 0.5
+NEGLIGIBLE_BEARING_WEIGHT_FRACTION = 0.05
 
 
 def _point(value):
@@ -38,7 +39,7 @@ def _geometry(point, samples):
     eigenvalues look reasonable: range errors can all push the fix together.
     """
     xx = yy = xy = total = mean_x = mean_y = 0.0
-    angles = []
+    bearings = []
     for x, y, _radius, weight in samples:
         dx, dy = x - point[0], y - point[1]
         length = math.hypot(dx, dy)
@@ -51,16 +52,28 @@ def _geometry(point, samples):
         mean_x += weight * ux
         mean_y += weight * uy
         total += weight
-        angles.append(math.atan2(dy, dx) % (2 * math.pi))
-    if total <= 0 or len(angles) < 2:
+        bearings.append((math.atan2(dy, dx) % (2 * math.pi), weight))
+    if total <= 0 or len(bearings) < 2:
         return 8.0, 360.0
     xx, yy, xy = xx / total, yy / total, xy / total
     eigenvalue = max(0.0, (xx + yy - math.hypot(xx - yy, 2 * xy)) / 2)
     factor = min(6.0, math.sqrt(0.5 / max(0.005, eigenvalue)))
-    angles.sort()
-    gaps = [b - a for a, b in zip(angles, angles[1:])]
-    gaps.append(angles[0] + 2 * math.pi - angles[-1])
-    maximum_gap = max(gaps)
+    bearings.sort()
+    # A sector supported by at most 5% of bearing information is effectively
+    # uncovered. Aggregate that budget across the sector, so many individually
+    # weak but collectively useful receivers still count. A distant outlier
+    # cannot split a large gap merely by contributing a direction.
+    maximum_gap = 0.0
+    negligible = total * NEGLIGIBLE_BEARING_WEIGHT_FRACTION
+    for start, (angle, _weight) in enumerate(bearings):
+        skipped = 0.0
+        for offset in range(1, len(bearings) + 1):
+            index = (start + offset) % len(bearings)
+            end_angle, end_weight = bearings[index]
+            if offset == len(bearings) or skipped + end_weight > negligible:
+                maximum_gap = max(maximum_gap, end_angle + (2 * math.pi if index <= start else 0) - angle)
+                break
+            skipped += end_weight
     factor *= 1.0 + 1.5 * max(0.0, maximum_gap / math.pi - 1.0)
     # A semicircle can have a 180-degree gap and balanced eigenvalues while
     # still placing all useful receivers on one side. The resultant bearing

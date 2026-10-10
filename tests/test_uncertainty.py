@@ -113,6 +113,29 @@ def test_height_projection_uses_slant_range_for_noise_and_influence():
     assert result["estimated_uncertainty_m"] < 2
 
 
+def test_negligible_opposite_bearing_does_not_fill_one_sided_geometry_gap():
+    angles = [-60, -30, 0, 30, 60]
+    weighted = [(10 * math.cos(math.radians(a)), 10 * math.sin(math.radians(a)), 10, 1, 10)
+                for a in angles]
+    records = [{"reading_age_s": 0} for _ in weighted]
+    baseline = estimate_uncertainty((0, 0), weighted, 1, records)
+    weighted.append((-1000, 0, 1000, 0.05, 1000))
+    records.append({"reading_age_s": 0})
+    with_outlier = estimate_uncertainty((0, 0), weighted, 1, records)
+    assert baseline["largest_bearing_gap_deg"] == pytest.approx(240)
+    assert with_outlier["largest_bearing_gap_deg"] == pytest.approx(240)
+    assert with_outlier["estimated_uncertainty_m"] >= baseline["estimated_uncertainty_m"] * 0.999
+
+
+def test_collectively_useful_weak_bearings_still_supply_coverage():
+    near = [(10 * math.cos(math.radians(a)), 10 * math.sin(math.radians(a)), 10, 1, 10)
+            for a in [-60, -30, 0, 30, 60]]
+    far = [(10 * math.cos(math.radians(a)), 10 * math.sin(math.radians(a)), 10, 0.1, 10)
+           for a in range(120, 241, 10)]
+    result = estimate_uncertainty((0, 0), near + far, 1, [{"reading_age_s": 0}] * (len(near) + len(far)))
+    assert result["largest_bearing_gap_deg"] < 240
+
+
 @pytest.mark.parametrize("bad", [True, None, "40", float("inf"), float("nan"), -1, 0, 10**1000])
 def test_invalid_scale_is_finite_poor(bad):
     result = estimate_uncertainty((0, 0), [(1, 0, 1, 1)], bad, [])
