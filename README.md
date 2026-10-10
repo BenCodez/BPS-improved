@@ -286,7 +286,8 @@ controls to give a group a name and stable ID and select its Bermuda tracker
 slugs. A layout supports up to 32 groups, with up to 16 beacons per group;
 group IDs and beacon slugs use 1–64 lowercase letters, digits or underscores.
 Choose an ID whose `bps_group_<id>` does not match an existing beacon. The
-editor prevents creating or enabling a conflicting group; disable/delete a
+editor prevents creating or enabling a conflicting group, and the server checks
+current tracker IDs on every group save; disable/delete a
 conflicting saved group and recreate it with another ID. Real Bermuda beacons
 whose slugs start with `bps_group_` can still be members; generated group
 positions cannot be used as members. A temporarily missing member remains

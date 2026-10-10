@@ -675,3 +675,33 @@ def test_bounded_polygon_names_save_and_reload(hass, tmp_path, name):
     assert run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, data)) is None
     hass.data["bps"].pop("layout")
     assert run(load_bps_data(hass)) == data
+
+
+@pytest.mark.parametrize("explicit_enabled", [False, True])
+def test_save_rejects_output_collision_even_with_only_ordinary_members(hass, monkeypatch, tmp_path, explicit_enabled):
+    from io import BytesIO
+    data = layout(True)
+    group = {"id": "rover", "name": "Rover", "beacons": ["beacon_a", "beacon_b"]}
+    if explicit_enabled:
+        group["enabled"] = True
+    data["tracker_groups"] = [group]
+    inventory = ["sensor.beacon_a_distance_to_p0", "sensor.beacon_b_distance_to_p0"]
+    monkeypatch.setattr(bps, "_bermuda_distance_sensor_ids", lambda _hass: list(inventory))
+    assert run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, data)) is None
+    before = copy.deepcopy(hass._store_backing[STORAGE_KEY_LAYOUT])
+    # A real beacon may appear after the editor loaded the earlier inventory.
+    inventory.append("sensor.bps_group_rover_distance_to_p0")
+    edited = copy.deepcopy(data)
+    edited["tracker_groups"][0]["name"] = "Rover renamed"
+    upload = SimpleNamespace(filename="new.png", file=BytesIO(b"PNGDATA"))
+    response = run(bps.BPSSaveAPIText()._write_save(
+        hass, str(tmp_path), {"new_floor": "true", "file": upload}, edited))
+    assert response.status == 400 and "conflicts with a real tracker" in response.body_text
+    assert hass._store_backing[STORAGE_KEY_LAYOUT] == before
+    assert len(hass._store_saves) == 1 and not (tmp_path / "new.png").exists()
+    # Retiring the saved conflict is still possible without touching the beacon.
+    edited["tracker_groups"][0]["enabled"] = False
+    assert run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, edited)) is None
+    assert hass._store_backing[STORAGE_KEY_LAYOUT] == edited
+    edited["tracker_groups"][0]["enabled"] = True
+    assert run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, edited)).status == 400

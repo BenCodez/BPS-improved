@@ -2356,9 +2356,9 @@ class BPSSaveAPIText(HomeAssistantView):
         if error:
             return web.Response(status=400, text=error)
         # Shape validation also runs during startup, before Bermuda is ready.
-        # At the save boundary, verify prefixed members against real sensors.
+        # At every group save, verify members and output IDs against real sensors.
         groups = coords_obj.get("tracker_groups", []) if isinstance(coords_obj, dict) else []
-        if any(b.startswith("bps_group_") for g in groups for b in g["beacons"]):
+        if groups:
             known = {eid.removeprefix("sensor.").split("_distance_to_", 1)[0]
                      for eid in _bermuda_distance_sensor_ids(hass)}
             error = await hass.async_add_executor_job(validate_outdoor_layout, coords_obj, known)

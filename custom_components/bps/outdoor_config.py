@@ -83,6 +83,9 @@ def validate_outdoor_layout(layout, known_trackers=None):
             identifiers.add(identifier)
             if "enabled" in group and not isinstance(group["enabled"], bool):
                 return "Group enabled must be true or false"
+            if (known_trackers is not None and group.get("enabled", True) is True
+                    and f"bps_group_{identifier}" in known_trackers):
+                return f"Group ID '{identifier}' conflicts with a real tracker; choose another ID or disable/delete the group"
             if not isinstance(group.get("name", identifier), str):
                 return "Group names must be text"
             beacons = group.get("beacons")
