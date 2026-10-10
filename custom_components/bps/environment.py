@@ -17,6 +17,9 @@ from .environment_geometry import compile_ring, interior_path, point_relation
 _LOGGER = logging.getLogger(__name__)
 _WARNING_LOCK = Lock()
 _last_geometry_warning = -math.inf
+# Bounded lock stripes coalesce identical cold misses without retaining keys
+# or serializing path calculations. Hash collisions only delay compilation.
+_COMPILE_LOCKS = tuple(Lock() for _ in range(64))
 
 MAX_ENVIRONMENT_POLYGONS = 128
 MAX_ENVIRONMENT_VERTICES = 256
@@ -148,7 +151,7 @@ class CompiledEnvironment:
 
 
 @lru_cache(maxsize=64)
-def _compile(signature):
+def _compile_cached(signature):
     regions = []
     for identifier, name, kind, material, coordinates, walls in signature:
         ring = compile_ring(coordinates)
@@ -158,6 +161,18 @@ def _compile(signature):
         regions.append(EnvironmentRegion(identifier, name, kind, material,
                                           coordinates, walls, edges, bounds))
     return CompiledEnvironment(tuple(regions))
+
+
+def _compile(signature):
+    # lru_cache alone can run its body repeatedly for simultaneous misses.
+    # Recheck the cache while holding the signature's stripe so one worker
+    # validates a new map, and its waiting peers reuse the completed snapshot.
+    with _COMPILE_LOCKS[hash(signature) % len(_COMPILE_LOCKS)]:
+        return _compile_cached(signature)
+
+
+_compile.cache_info = _compile_cached.cache_info
+_compile.cache_clear = _compile_cached.cache_clear
 
 
 def compile_environment(floor):

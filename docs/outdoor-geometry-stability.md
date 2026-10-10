@@ -28,7 +28,10 @@ endpoint touches and boundary overlaps without inventing walls. Strict interior
 length, mixed wall materials, vegetation weights and reflection flags retain the
 existing public JSON semantics. There are no data migrations or new dependencies.
 
-Validation costs at most O(vertices²) per polygon, only on a cache miss. A path
+Validation costs at most O(vertices²) per polygon, only on a cache miss. A fixed
+64-stripe compilation lock coalesces simultaneous misses for the same signature;
+waiting workers recheck the bounded cache and reuse the completed map. These
+locks never cover path calculations or hold native objects. A path
 sweep costs O(vertices log vertices); wall identification is linear per crossing.
 The existing limits remain 128 polygons, 256 vertices each, 64 cached signatures,
 and coordinates within ±10,000,000 pixels. Configuration validation and outdoor
@@ -46,7 +49,7 @@ factors or fabricates a corrected BLE distance.
 | Work | Ownership and scheduling |
 | --- | --- |
 | Tracker refresh | One batch per HA instance; at most eight trackers active. Physical executor admission survives cancellation/reload until the private jobs finish. Failed siblings settle before groups or another cycle. Detached per-tracker layouts go to workers. |
-| Map edits / reload / unload | Layout identity and lifecycle checks reject obsolete post-executor results before election, Kalman state, history or sensors change. Tracking is invalidated, cancelled and awaited before teardown; failed unload resumes a fresh generation. Deferred startup cannot resurrect an unloaded integration. |
+| Map edits / reload / unload | Layout identity and lifecycle checks reject obsolete post-executor results before election, Kalman state, history or sensors change. Tracking is invalidated, cancelled and awaited before teardown. Platform unload failure retains the live listener/registry and resumes a fresh generation. Once the platform unloads, teardown completes even if panel removal fails. Deferred startup cannot resurrect an unloaded integration. |
 | Group zone assignment | Each executor job receives an unpublished fused fix and detached layout. Results are checked against layout/lifecycle before publication. |
 | Calibration | Numeric samples/receiver records are detached. Auto/manual sampling loops await their own solves and stop on cancellation. Concurrent manual API solves are rejected; obsolete results cannot replace newer candidates after session, map or lifecycle changes. |
 | History / diagnostic capture | Existing async locks and snapshots retain their ordering. Diagnostic packing runs off the loop. |

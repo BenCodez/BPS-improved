@@ -438,7 +438,7 @@ def test_deferred_startup_cannot_resurrect_stopped_integration(hass, monkeypatch
     run(scenario())
 
 
-@pytest.mark.parametrize("failure", ["platform_false", "platform_exception", "panel_exception"])
+@pytest.mark.parametrize("failure", ["platform_false", "platform_exception"])
 def test_failed_unload_resumes_tracking_with_fresh_generation(hass, monkeypatch, failure):
     async def scenario():
         started = asyncio.Event()
@@ -456,18 +456,22 @@ def test_failed_unload_resumes_tracking_with_fresh_generation(hass, monkeypatch,
             return failure != "platform_false"
 
         def remove_panel(*_args, **_kwargs):
-            if failure == "panel_exception":
-                raise RuntimeError("panel could not unload")
+            pytest.fail("frontend cleanup must wait for successful platform unload")
+
+        def cleanup(_hass):
+            pytest.fail("registry cleanup must wait for successful platform unload")
 
         monkeypatch.setattr(bps, "update_tracked_entities", tracking)
         monkeypatch.setattr(bps, "shutdown_diagnostics", noop)
         monkeypatch.setattr(bps, "flush_position_history", noop)
-        monkeypatch.setattr(bps, "cleanup_legacy_bps_registry_and_states", lambda _hass: None)
+        monkeypatch.setattr(bps, "cleanup_legacy_bps_registry_and_states", cleanup)
         monkeypatch.setattr(bps.er, "async_get", lambda _hass: SimpleNamespace(entities={}), raising=False)
         monkeypatch.setattr(bps, "async_remove_panel", remove_panel)
         hass.async_create_task = asyncio.create_task
         hass.config_entries = SimpleNamespace(async_unload_platforms=unload_platforms)
         hass.data["bps_initialized"] = True
+        sensors = hass.data["bps_sensors"] = {"sensor.dog_bps_zone": object()}
+        listener = hass.data["bps_state_listener_unsub"] = lambda: pytest.fail("live listener removed")
         bucket = hass.data.setdefault("bps", {})
         generation = bucket["_tracking_lifecycle"] = object()
         old = asyncio.create_task(tracking(hass))
@@ -481,8 +485,64 @@ def test_failed_unload_resumes_tracking_with_fresh_generation(hass, monkeypatch,
             assert bucket["_tracking_active"] is True
             assert bucket["_tracking_lifecycle"] is not generation
             assert hass.data["bps_initialized"] is True
+            assert hass.data["bps_sensors"] is sensors
+            assert hass.data["bps_state_listener_unsub"] is listener
             await started.wait()
         finally:
             await bps._stop_tracking(hass)
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("panel_error", [False, True])
+def test_successful_platform_unload_completes_even_if_panel_removal_fails(hass, monkeypatch, panel_error):
+    async def scenario():
+        started = asyncio.Event()
+        events = []
+
+        async def tracking(_hass):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def noop(_hass, **_kwargs):
+            pass
+
+        async def unload(_entry, _platforms):
+            assert "bps_state_listener_unsub" in hass.data
+            events.append("platform")
+            return True
+
+        def remove_panel(*_args, **_kwargs):
+            events.append("panel")
+            if panel_error:
+                raise RuntimeError("frontend cleanup failed")
+
+        async def stop_calibration(_hass):
+            events.append("calibration")
+
+        monkeypatch.setattr(bps, "update_tracked_entities", tracking)
+        monkeypatch.setattr(bps, "shutdown_diagnostics", noop)
+        monkeypatch.setattr(bps, "flush_position_history", noop)
+        monkeypatch.setattr(bps, "async_shutdown_calibration", stop_calibration)
+        monkeypatch.setattr(bps, "cleanup_legacy_bps_registry_and_states", lambda _hass: events.append("registry"))
+        monkeypatch.setattr(bps.er, "async_get", lambda _hass: SimpleNamespace(entities={}), raising=False)
+        monkeypatch.setattr(bps, "async_remove_panel", remove_panel)
+        hass.states = SimpleNamespace(async_all=lambda: [])
+        hass.async_create_task = asyncio.create_task
+        hass.config_entries = SimpleNamespace(async_unload_platforms=unload)
+        hass.data["bps_initialized"] = True
+        hass.data["bps_sensors"] = {"sensor.dog_bps_zone": object()}
+        hass.data["bps_state_listener_unsub"] = lambda: events.append("listener")
+        bucket = hass.data.setdefault("bps", {})
+        bucket["sync_group_sensors"] = object()
+        old = asyncio.create_task(tracking(hass))
+        hass.data["bps_update_task"] = old
+        await started.wait()
+        assert await bps.async_unload_entry(hass, SimpleNamespace(entry_id="entry"))
+        assert old.cancelled()
+        assert events == ["platform", "listener", "registry", "panel", "calibration"]
+        assert bucket["_tracking_active"] is False
+        assert not {"bps_update_task", "bps_initialized", "bps_sensors", "bps_state_listener_unsub"} & hass.data.keys()
+        assert "sync_group_sensors" not in bucket
 
     run(scenario())

@@ -2343,10 +2343,6 @@ async def async_unload_entry(hass: HomeAssistant, entry):
             hass.data["bps_update_task"] = hass.async_create_task(update_tracked_entities(hass))
         return False
 
-    state_listener_unsub = hass.data.pop("bps_state_listener_unsub", None)
-    if state_listener_unsub:
-        state_listener_unsub()
-
     await shutdown_diagnostics(hass)
 
     # Get whatever the tracking loop buffered since the last 60 s flush onto
@@ -2357,6 +2353,22 @@ async def async_unload_entry(hass: HomeAssistant, entry):
         await flush_position_history(hass)
     except Exception as e:
         _LOGGER.debug("BPS position history flush on unload failed: %s", e)
+
+    try: # Attempt to unload platforms before removing their listener/registry.
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
+    except Exception as e:
+        _LOGGER.error(f"Error during offloading of platforms for entry {entry.entry_id}: {e}")
+        return unload_failed()
+
+    if not unload_ok:
+        _LOGGER.error("Failed to offload platforms for entry: %s", entry.entry_id)
+        return unload_failed()
+
+    # Once the sensor platform is gone, complete teardown. A frontend cleanup
+    # error must not restart tracking against removed SensorEntity objects.
+    state_listener_unsub = hass.data.pop("bps_state_listener_unsub", None)
+    if state_listener_unsub:
+        state_listener_unsub()
 
     cleanup_legacy_bps_registry_and_states(hass)
 
@@ -2372,22 +2384,11 @@ async def async_unload_entry(hass: HomeAssistant, entry):
         _LOGGER.info(f"Removes sensor: {entity_id}")
         entity_registry.async_remove(entity_id)
 
-    try: # Attempt to unload platforms
-        unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
-    except Exception as e:
-        _LOGGER.error(f"Error during offloading of platforms for entry {entry.entry_id}: {e}")
-        return unload_failed()
-
-    if not unload_ok:
-        _LOGGER.error("Failed to offload platforms for entry: %s", entry.entry_id)
-        return unload_failed()
-
     try: #Remove the frontend panel
         async_remove_panel(hass, frontend_url_path="bps")
         _LOGGER.info("Frontend-panel removed for entry: %s", entry.entry_id)
     except Exception as e:
         _LOGGER.error(f"Error when removing frontend-panel for entry {entry.entry_id}: {e}")
-        return unload_failed()
 
     await async_shutdown_calibration(hass)
 

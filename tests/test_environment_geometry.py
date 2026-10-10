@@ -10,12 +10,62 @@ import math
 import random
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from shapely.geometry import LineString, Point, Polygon
 
 from bps import environment
+
+
+def test_concurrent_cold_map_compilation_runs_once(monkeypatch):
+    attempts = 0
+    calls = 0
+    attempts_lock = threading.Lock()
+    all_attempted = threading.Event()
+    compiling = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+
+    class ObservedLock:
+        def __enter__(self):
+            nonlocal attempts
+            with attempts_lock:
+                attempts += 1
+                if attempts == 8:
+                    all_attempted.set()
+            lock.acquire()
+
+        def __exit__(self, *_args):
+            lock.release()
+
+    original = environment.compile_ring
+
+    def compile_once(coordinates):
+        nonlocal calls
+        calls += 1
+        compiling.set()
+        assert release.wait(3)
+        return original(coordinates)
+
+    environment._compile.cache_clear()
+    monkeypatch.setattr(environment, "_COMPILE_LOCKS", (ObservedLock(),))
+    monkeypatch.setattr(environment, "compile_ring", compile_once)
+    floor = {"environment": [region()]}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(environment.compile_environment, copy.deepcopy(floor)) for _ in range(8)]
+        try:
+            assert all_attempted.wait(2)
+            assert compiling.wait(2)
+            assert calls == 1
+        finally:
+            release.set()
+        snapshots = [future.result(timeout=3) for future in futures]
+    assert all(snapshot is snapshots[0] for snapshot in snapshots)
+    assert calls == 1
+    assert environment._compile.cache_info().currsize == 1
 
 
 WALL_WEIGHTS = {"unknown": 0.8, "light": 0.9, "wood": 0.9,

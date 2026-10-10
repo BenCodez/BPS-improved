@@ -449,7 +449,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         and stalled the event loop (issue #51).
         """
         sensors_cache = hass.data.get("bps_sensors")
-        if sensors_cache is None:
+        if sensors_cache is None or hass.data.get("bps", {}).get("_tracking_active") is False:
             # Integration is unloading/reloading; ignore late state events.
             return
 
