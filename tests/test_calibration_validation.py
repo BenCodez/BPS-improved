@@ -121,3 +121,26 @@ def test_saved_ignore_policy_matches_live_outdoor_enablement(enabled, expected):
         for row in frame['readings']:
             row['ignored'] = row['receiver'] == 'r0'
     assert compare(data, floor)['baseline']['samples'] == expected
+
+
+def test_export_decoding_and_replay_both_run_off_the_home_assistant_loop(hass, monkeypatch):
+    import threading
+    import bps.calibration_validation as validation
+    data, floor = recording()
+    payload = json.dumps(data).encode()
+    loop_thread = threading.get_ident()
+    original_loads = json.loads
+    def decode(value, **kwargs):
+        assert threading.get_ident() != loop_thread
+        return original_loads(value, **kwargs)
+    monkeypatch.setattr(validation.json, 'loads', decode)
+    async def executor(fn, *args):
+        return await asyncio.to_thread(fn, *args)
+    async def export():
+        assert threading.get_ident() == loop_thread
+        return payload
+    hass.async_add_executor_job = executor
+    hass.data['bps'] = {'layout': {'floor': [floor]}, '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
+        'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS}}}}
+    result = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
+    assert result['verdict'] == 'improves'

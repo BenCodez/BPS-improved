@@ -4,6 +4,7 @@ Uses the live solver and obstruction weighting. Replay deliberately omits
 Kalman history, temporal jump weights, floor election and zone snapping.
 """
 import copy
+import json
 import math
 
 from .outdoor_tracking import solve_outdoor
@@ -171,3 +172,8 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver):
             "Group recordings test their member beacons. Includes obstruction weights and height projection; "
             "excludes temporal jump weights, Kalman smoothing, group fusion, floor election and zone snapping. "
             "At least 5 distinct observations at 2 measured locations are needed. No calibration changed."}
+
+
+def compare_tracking_export(payload, floor_name, corrections, current_floor, solver):
+    """Decode and compare a potentially 16 MiB recording in the executor."""
+    return compare_tracking(json.loads(payload), floor_name, corrections, current_floor, solver)

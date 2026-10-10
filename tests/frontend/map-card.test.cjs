@@ -263,9 +263,9 @@ test('dedicated group position entity resolves floor and both small member marke
     const c = card(), cv = canvas(); c._canvas = cv.value;
     const eid = 'sensor.bps_group_rover_bps_position';
     c._config.entities = [eid]; c._outdoorSettings.enabled = true;
-    c._hass.states[eid] = {state: 'Yard', attributes: {group: true, tracker_key: 'bps_group_rover', floor: 'Property'}};
+    c._hass.states[eid] = {state: 'tracking', attributes: {group: true, tracker_key: 'bps_group_rover', floor: 'Property'}};
     const row = {ent: 'bps_group_rover', group: true, name: 'Rover', floor: 'Property', cords: [200, 100],
-        zone: 'Yard', updated: Date.now() / 1000, beacons_reporting: 2, total_beacons: 2,
+        zone: 'unknown', updated: Date.now() / 1000, beacons_reporting: 2, total_beacons: 2,
         outdoor: {estimated_uncertainty_m: 4, confidence: 'good'}, beacon_positions: [
             {ent: 'beacon_a', floor: 'Property', cords: [100, 100], estimated_uncertainty_m: 3},
             {ent: 'beacon_b', floor: 'Property', cords: [300, 100], estimated_uncertainty_m: 3}]};

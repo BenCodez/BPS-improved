@@ -302,7 +302,9 @@ whose slugs start with `bps_group_` can still be members; generated group
 positions cannot be used as members. A temporarily missing member remains
 configured and counted in the total, including a real beacon with that prefix.
 The group produces a dedicated `sensor.bps_group_<id>_bps_position` entity, plus
-zone and floor sensors; the original
+zone and floor sensors. The position entity is `tracking` with a valid fix and
+`unknown` without one; its zone is an attribute, so a floor without zones can
+still show it on the map. The original
 beacon trackers and their sensors remain available. BPS combines their existing
 position fixes using estimated quality, and reports beacon count, disagreement,
 and fusion confidence as attributes. It does not combine raw BLE or Bermuda

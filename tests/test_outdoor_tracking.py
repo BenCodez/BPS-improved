@@ -715,3 +715,25 @@ def test_reject_invalid_wall_materials_before_layout_save(walls):
     assert validate_outdoor_layout(data)
     data['floor'][0]['environment'][0]['wall_materials'] = ['wood', None, 'metal', None]
     assert validate_outdoor_layout(data) is None
+
+
+def test_primary_position_remains_usable_without_zones_then_expires(hass, monkeypatch):
+    now = 1000.
+    monkeypatch.setattr(bps.time, 'time', lambda: now)
+    data = layout(True)
+    data['tracker_groups'] = [{'id': 'rover', 'beacons': ['beacon_a']}]
+    run(save_bps_data(hass, data))
+    bps.apitricords = [{'ent': 'beacon_a', 'floor': 'Property', 'cords': [50, 60],
+        'updated': now, 'outdoor': {'observed': now, 'estimated_uncertainty_m': 3}}]
+    primary = SimpleNamespace(_state='unknown', _attrs={}, async_write_ha_state=lambda: None)
+    hass.data['bps_sensors'] = {'sensor.bps_group_rover_bps_position': primary}
+    run(bps.update_tracker_groups(hass))
+    assert primary._state == 'tracking'
+    assert primary._attrs['zone'] == 'unknown'
+    assert primary._attrs['floor'] == 'Property'
+    assert primary._attrs['cords'] == [50, 60]
+    now += 31
+    run(bps.update_tracker_groups(hass))
+    assert primary._state == 'unknown'
+    assert primary._attrs['tracker_key'] == 'bps_group_rover'
+    assert 'cords' not in primary._attrs

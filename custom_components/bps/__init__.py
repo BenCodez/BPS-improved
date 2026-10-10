@@ -1628,7 +1628,7 @@ async def update_tracker_groups(hass):
         attrs["outdoor"] = {k: v for k, v in position["outdoor"].items() if k != "position_age_s"}
         attrs["beacon_positions"] = [{k: v for k, v in beacon.items() if k != "age_s"}
                                      for beacon in position["beacon_positions"]]
-        update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_position", position["zone"], attrs,
+        update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_position", "tracking", attrs,
                                 only_changed=True)
         update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_zone", position["zone"], attrs,
                                 only_changed=True)
@@ -2530,7 +2530,7 @@ def _diagnostic_inventory(hass):
 
 async def _calibration_tracking_check(hass, floor_name):
     """Compare detached diagnostic samples without touching live calibration."""
-    from .calibration_validation import compare_tracking
+    from .calibration_validation import compare_tracking_export
     dom = hass.data.setdefault(DOMAIN, {})
     if dom.get("calibration_validation_busy"):
         raise ValueError("A tracking comparison is already running")
@@ -2550,8 +2550,8 @@ async def _calibration_tracking_check(hass, floor_name):
     solved_at = result.get("solved_at")
     dom["calibration_validation_busy"] = True
     try:
-        payload = json.loads(await recording.export())
-        report = await hass.async_add_executor_job(compare_tracking, payload, floor["name"], corrections, floor, trilaterate)
+        payload = await recording.export()
+        report = await hass.async_add_executor_job(compare_tracking_export, payload, floor["name"], corrections, floor, trilaterate)
         report.update(candidate_solved_at=solved_at, candidate_corrections=corrections)
         return report
     finally:
