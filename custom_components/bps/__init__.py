@@ -52,7 +52,7 @@ from .storage import (
 from .const import ACCURACY_ENTITY_ID
 from . import history as history_mod
 from .zone_adjust import adjust_zones, adjust_subzones
-from .environment import outdoor_settings, finite_number
+from .environment import outdoor_settings, finite_number, reading_max_age
 from .outdoor_tracking import solve_outdoor, account_for_published_position
 from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
@@ -407,12 +407,7 @@ async def restore_position_history(hass):
 
 def _reading_max_age(data):
     """Seconds after which a distance reading is ignored (0 = never)."""
-    if isinstance(data, dict):
-        configured = data.get("reading_max_age")
-        if isinstance(configured, (int, float)) and not isinstance(configured, bool) \
-                and configured >= 0:
-            return float(configured)
-    return READING_MAX_AGE_SECS
+    return reading_max_age(data, READING_MAX_AGE_SECS)
 
 
 def _reading_age_secs(state, *, now=None):

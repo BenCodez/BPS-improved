@@ -42,6 +42,16 @@ def finite_number(value, default=None, *, minimum=None, maximum=None):
     return value
 
 
+def reading_max_age(layout, default=30.0):
+    """Shared reading gate: finite nonnegative numbers, zero disables aging."""
+    layout = layout if isinstance(layout, dict) else {}
+    default = finite_number(default, 30.0, minimum=0.0)
+    # Match the existing outdoor guard without narrowing valid legacy limits.
+    outdoor = layout.get("outdoor_tracking")
+    maximum = 1e6 if isinstance(outdoor, dict) and outdoor.get("enabled") is True else None
+    return finite_number(layout.get("reading_max_age"), default, minimum=0.0, maximum=maximum)
+
+
 def clamp_reliability(value, default=1.0):
     """Keep contributing measurements in [0.05, 1]; exclusions are explicit."""
     number = finite_number(value, finite_number(default, 1.0))

@@ -8,6 +8,7 @@ import json
 import math
 
 from .outdoor_tracking import solve_outdoor
+from .environment import reading_max_age
 from .uncertainty import estimate_uncertainty
 
 MAX_REPLAYS = 128
@@ -49,7 +50,7 @@ def metrics(values):
     return {"samples": len(values), "median_m": percentile(.5), "p95_m": percentile(.95)}
 
 
-def replay(floor, readings, corrections, scale, layout, now, solver):
+def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_s=30.0):
     candidate = copy.deepcopy(floor)
     rows = {r["receiver"]: r for r in readings}
     weighted, selected = [], []
@@ -81,7 +82,7 @@ def replay(floor, readings, corrections, scale, layout, now, solver):
     bounds = (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
     if layout.get("outdoor_tracking", {}).get("enabled") is True:
         result = solve_outdoor(candidate, weighted, bounds, scale, .5 * scale,
-            layout.get("reading_max_age", 30), None, solver)
+            max_age_s, None, solver)
         if result is None:
             return None
         fix, quality = result["fix"], result["outdoor"]
@@ -122,7 +123,7 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver):
             truth = truth_for(annotations, target, members, frame["time"])
             if not truth or truth.get("floor") != floor_name:
                 continue
-            gate = layout.get("reading_max_age", context.get("defaults", {}).get("reading_max_age_s", 30))
+            gate = reading_max_age(layout, context.get("defaults", {}).get("reading_max_age_s", 30))
             rows = [r for r in frame.get("readings", []) if r.get("tracker") == target
                 and r.get("floor") == floor_name and r.get("status") == "current"
                 and not (layout.get("outdoor_tracking", {}).get("enabled") is True and r.get("ignored"))
@@ -134,15 +135,15 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver):
             if len(rows) < 3 or signature in seen or not any(r["receiver"] in corrections for r in rows):
                 continue
             seen.add(signature)
-            samples.append((target, truth, frame["time"], floor, rows, layout, scale))
+            samples.append((target, truth, frame["time"], floor, rows, layout, scale, gate))
     # Spread the bounded work over the recording instead of testing only its
     # first location. Report truncation; additional polls do not add samples.
     eligible = len(samples)
     if eligible > MAX_REPLAYS:
         samples = [samples[round(i * (eligible - 1) / (MAX_REPLAYS - 1))] for i in range(MAX_REPLAYS)]
-    for target, truth, now, floor, rows, layout, scale in samples:
-        baseline = replay(floor, rows, {}, scale, layout, now, solver)
-        proposed = replay(floor, rows, corrections, scale, layout, now, solver)
+    for target, truth, now, floor, rows, layout, scale, gate in samples:
+        baseline = replay(floor, rows, {}, scale, layout, now, solver, max_age_s=gate)
+        proposed = replay(floor, rows, corrections, scale, layout, now, solver, max_age_s=gate)
         stats = reports.setdefault(target, {"baseline": [], "candidate": [], "candidate_failures": 0})
         if baseline is None:
             continue

@@ -144,3 +144,26 @@ def test_export_decoding_and_replay_both_run_off_the_home_assistant_loop(hass, m
         'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS}}}}
     result = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
     assert result['verdict'] == 'improves'
+
+
+@pytest.mark.parametrize('value', ['30', -5, True, None, float('nan'), float('inf'), 1e20])
+def test_invalid_reading_age_uses_live_fallback_in_filter_and_solver(value):
+    data, floor = recording()
+    data['contexts']['c']['layout']['reading_max_age'] = value
+    assert bps._reading_max_age(data['contexts']['c']['layout']) == 30
+    result = compare(data, floor)
+    assert result['baseline']['samples'] == 20
+    assert result['verdict'] == 'improves'
+
+
+@pytest.mark.parametrize('value,expected', [(30., 0), (0, 20)])
+def test_replay_age_gate_matches_filtering_and_preserves_zero_opt_out(value, expected):
+    data, floor = recording()
+    data['contexts']['c']['layout']['reading_max_age'] = value
+    # Readings are genuinely after truth/context but old when polled. Status
+    # deliberately remains current to verify the comparison's own clock guard.
+    data['annotations'] = data['annotations'][:1]
+    for frame in data['frames'][1:]:
+        frame['time'] += 40
+    assert bps._reading_max_age(data['contexts']['c']['layout']) == value
+    assert compare(data, floor)['baseline']['samples'] == expected
