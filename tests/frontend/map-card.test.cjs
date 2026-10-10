@@ -62,6 +62,29 @@ test('card rendering preserves old markers and adds correctly scaled optional un
     assert.equal(cv.calls.filter(Array.isArray).length, 1);
 });
 
+test('card shows quiet member icons without diagnostics and retains one main group icon', () => {
+    const c = card(), cv = canvas(); c._canvas = cv.value;
+    c._config.entities = ['sensor.bps_group_rover_bps_zone'];
+    c._entityByTrackerKey.set('bps_group_rover', c._config.entities[0]);
+    c._hass.states['sensor.bps_group_rover_bps_floor'] = {state: 'Property'};
+    c._outdoorSettings = {enabled: true, show_uncertainty: false};
+    c._trackerGroups = [{id: 'rover', beacons: ['beacon_a', 'beacon_b']}];
+    c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+    const beaconA = {ent: 'beacon_a', floor: 'Property', cords: [100, 100]};
+    const beaconB = {ent: 'beacon_b', floor: 'Property', cords: [300, 100]};
+    const row = {group: true, beacon_positions: [beaconA, beaconB,
+        {ent: 'other_floor', floor: 'Barn', cords: [400, 300]}, {ent: 'invalid', cords: [null, 100]}, null]};
+    c._positions.set('bps_group_rover', {x: 200, y: 100, label: 'Rover', payload: row});
+    c._drawMarkers();
+    assert.deepEqual(cv.calls.filter(Array.isArray).map(v => v.slice(0, 3)), [[100, 100, 6], [300, 100, 6], [200, 100, 20]],
+        'two tiny markers drawn underneath one full-size marker; no diagnostic circles');
+    assert.deepEqual(cv.calls.filter(v => typeof v === 'string'), ['1', '2', 'Rover'], 'no member name labels');
+    row.beacon_positions = [beaconB]; cv.calls.length = 0; c._drawMarkers();
+    assert.deepEqual(cv.calls.filter(v => typeof v === 'string'), ['2', 'Rover']);
+    c._outdoorSettings.enabled = false; cv.calls.length = 0; c._drawMarkers();
+    assert.equal(cv.calls.filter(Array.isArray).length, 1, 'disabled outdoor mode retains only the old main marker');
+});
+
 test('group zone sensor resolves fused map key/name and shows constituent beacon diagnostics', async () => {
     const c = card(); const cv = canvas(); c._canvas = cv.value;
     c._config.entities = ['sensor.bps_group_rover_bps_zone']; c._config.show_outdoor_diagnostics = true;

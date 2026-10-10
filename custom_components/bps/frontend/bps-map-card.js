@@ -705,6 +705,7 @@ class BpsMapCard extends HTMLElement {
     const coords = JSON.parse(data.coordinates);
     this._knownBeaconKeys = new Set(Array.isArray(data.entities) ? data.entities : []);
     this._outdoorSettings = BPSOutdoor.settings(coords);
+    this._trackerGroups = BPSOutdoor.groups(coords);
     this._trackerIcons = coords.tracker_icons && typeof coords.tracker_icons === "object"
       ? coords.tracker_icons
       : {};
@@ -831,11 +832,15 @@ class BpsMapCard extends HTMLElement {
       if (!this._entityOnThisFloor(trackerKey)) continue;
       BPSOutdoor.drawUncertainty(ctx, pos, this._floorScale,
         {...this._outdoorSettings, show_uncertainty: this._outdoorSettings.show_uncertainty && this._config.show_uncertainty}, '#2196f3');
-      if (this._outdoorSettings.enabled && this._config.show_outdoor_diagnostics && pos.payload?.group) {
+      if (this._outdoorSettings.enabled && pos.payload?.group) {
+        const group = this._trackerGroups?.find(g => `bps_group_${g.id}` === trackerKey);
         for (const beacon of pos.payload.beacon_positions || []) {
-          if (!Array.isArray(beacon.cords) || beacon.cords.length < 2 || !beacon.cords.every(Number.isFinite)
+          if (!beacon || !Array.isArray(beacon.cords) || beacon.cords.length < 2 || !beacon.cords.every(Number.isFinite)
             || beacon.floor && this._normalize(beacon.floor) !== this._normalize(this._config.floor)) continue;
           const [x, y] = beacon.cords;
+          BPSOutdoor.drawMiniBeacon(ctx, beacon, iconSize, '#2196f3', BPSOutdoor.beaconNumber(beacon, group),
+            pos.outdoor?.stale_after_s);
+          if (!this._config.show_outdoor_diagnostics) continue;
           BPSOutdoor.drawUncertainty(ctx, {x, y, receivedAt: BPSOutdoor.fixTime(beacon), outdoor: {
             estimated_uncertainty_m: beacon.estimated_uncertainty_m, position_age_s: beacon.age_s,
             stale_after_s: pos.outdoor?.stale_after_s}},

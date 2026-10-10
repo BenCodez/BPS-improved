@@ -72,6 +72,34 @@
         ctx.restore();
         return true;
     }
+    function beaconNumber(beacon, group) {
+        const index = group?.beacons?.indexOf(beacon.ent) ?? -1;
+        return index >= 0 ? String(index + 1) : '•';
+    }
+    // Small, quiet member icons, drawn before the full-size fused marker.
+    // Keep numbering tied to membership, even when a beacon has no fix.
+    function drawMiniBeacon(ctx, beacon, mainSize, color, label, staleAfter, zoom = 1, now = Date.now()) {
+        if (!Array.isArray(beacon?.cords) || beacon.cords.length < 2
+            || !beacon.cords.every(number)) return false;
+        const size = Math.min(mainSize * 0.3, 24 / zoom);
+        if (!number(size) || size <= 0) return false;
+        const [x, y] = beacon.cords;
+        const muted = beacon.used === false || isStale({position_age_s: beacon.age_s,
+            stale_after_s: staleAfter}, fixTime(beacon, now), now);
+        ctx.save();
+        ctx.globalAlpha = muted ? 0.45 : 0.75;
+        ctx.fillStyle = muted ? '#888' : color;
+        ctx.strokeStyle = muted ? '#666' : color;
+        ctx.lineWidth = 1 / zoom;
+        ctx.setLineDash(muted ? [2 / zoom, 2 / zoom] : []);
+        ctx.beginPath(); ctx.arc(x, y, size / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#fff';
+        ctx.font = `600 ${size * 0.6}px system-ui, sans-serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(label, x, y);
+        ctx.restore();
+        return true;
+    }
     function validPolygon(points) {
         if (!Array.isArray(points) || points.length < 3 || points.length > 256
             || points.some(p => !p || !number(p.x) || !number(p.y))) return false;
@@ -143,5 +171,5 @@
     }
     root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, MAX_UNCERTAINTY_THRESHOLD_M, MAX_ENVIRONMENT_POLYGONS,
         groups, environment, settings, positionSnapshot, uncertaintyRadius,
-        drawUncertainty, isStale, fixTime, validPolygon, upsertEnvironment, upsertGroup, diagnosticsText});
+        drawUncertainty, beaconNumber, drawMiniBeacon, isStale, fixTime, validPolygon, upsertEnvironment, upsertGroup, diagnosticsText});
 })(globalThis);

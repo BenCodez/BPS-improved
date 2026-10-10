@@ -228,6 +228,15 @@ beacons do not produce a fix, and disagreement lowers confidence instead of
 being hidden by an unconditional average. Select the group in the existing
 Tracking picker to display it on the map.
 
+The panel and Lovelace card keep one main group icon and show small, subdued
+numbered icons at each member beacon's estimated position on that floor.
+Numbers follow the saved group's beacon order, so beacon 2 stays 2 when beacon
+1 is unavailable. Member icons are 30% of the main icon size, capped at 24 canvas
+pixels (also capped under panel zoom), without extra name labels or animation.
+Stale or excluded member fixes appear grey and faded. Enable diagnostics for
+member names, uncertainty circles, and connecting lines; those extras stay hidden
+during normal tracking. Overlapping member icons sit underneath the main icon.
+
 With `reading_max_age: 0`, the receiver reading-age gate is disabled for groups
 too. Group expiry then follows the last source position solve and
 `position_timeout` (300 seconds by default). Re-fusing a retained position does

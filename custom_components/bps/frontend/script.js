@@ -825,8 +825,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!t.offFloor) {
                 outdoor.drawUncertainty(ctx, t, (currentFloor() || {}).scale,
                     outdoor.settings(finalcords), deviceColor(entKey), view.zoom || 1);
-                if (document.getElementById('outdoorDiagnostics').checked && outdoor.settings(finalcords).enabled) {
-                    drawGroupBeaconPositions(t, deviceColor(entKey));
+                if (t.group && outdoor.settings(finalcords).enabled) {
+                    drawGroupBeaconPositions(t, deviceColor(entKey), entKey, iconSize);
                 }
             }
             const src = trackerIconFor(entKey);
@@ -6023,11 +6023,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         el.hidden = !outdoor.settings(finalcords).enabled || !document.getElementById('outdoorDiagnostics').checked;
         el.textContent = el.hidden ? '' : outdoor.diagnosticsText(row) || 'Start tracking and select a device to see diagnostics.';
     }
-    function drawGroupBeaconPositions(position, color) {
+    function drawGroupBeaconPositions(position, color, trackerKey, iconSize) {
+        const group = outdoor.groups(finalcords).find(g => `bps_group_${g.id}` === trackerKey);
         for (const p of position.beacon_positions || []) {
-            if (!Array.isArray(p.cords) || p.cords.length < 2 || !p.cords.every(Number.isFinite)
+            if (!p || !Array.isArray(p.cords) || p.cords.length < 2 || !p.cords.every(Number.isFinite)
                 || p.floor && !sameFloorName(p.floor, SelMapName)) continue;
             const x = p.cords[0], y = p.cords[1];
+            outdoor.drawMiniBeacon(ctx, p, iconSize, color, outdoor.beaconNumber(p, group),
+                position.outdoor?.stale_after_s, view.zoom || 1);
+            if (!document.getElementById('outdoorDiagnostics').checked) continue;
             outdoor.drawUncertainty(ctx, {x, y, receivedAt: outdoor.fixTime(p), outdoor: {
                 estimated_uncertainty_m: p.estimated_uncertainty_m, position_age_s: p.age_s,
                 stale_after_s: position.outdoor?.stale_after_s}},

@@ -10,6 +10,39 @@ const out = context.BPSOutdoor;
 const plain = value => JSON.parse(JSON.stringify(value));
 const polygon = [{x: 0, y: 0}, {x: 100, y: 0}, {x: 100, y: 100}, {x: 0, y: 100}];
 
+test('mini beacon numbering remains stable when earlier members lose their fixes', () => {
+    const group = {beacons: ['beacon_a', 'beacon_b']};
+    assert.equal(out.beaconNumber({ent: 'beacon_b'}, group), '2');
+    assert.equal(out.beaconNumber({ent: 'beacon_a'}, group), '1');
+    assert.equal(out.beaconNumber({ent: 'unlisted'}, group), '•');
+});
+
+test('mini beacon icons stay small under zoom and mute excluded or aging cached fixes', () => {
+    const calls = [];
+    const ctx = {save() {}, restore() {}, beginPath() {}, fill() {}, stroke() {},
+        arc(...args) {calls.push(args);}, setLineDash() {}, fillText(text) {calls.push(text);}};
+    const beacon = {cords: [200, 100], updated: 50, age_s: 0, used: true};
+    out.drawMiniBeacon(ctx, beacon, 80, 'blue', '2', 90, 1, 60000);
+    assert.equal(calls[0][2], 12, 'diameter capped at 24');
+    assert.equal(calls[1], '2');
+    assert.equal(ctx.globalAlpha, 0.75);
+    assert.equal(ctx.fillStyle, '#fff');
+    calls.length = 0;
+    out.drawMiniBeacon(ctx, beacon, 80, 'blue', '2', 90, 4, 60000);
+    assert.equal(calls[0][2] * 4, 12, 'screen diameter stays capped under zoom');
+    out.drawMiniBeacon(ctx, beacon, 40, 'blue', '2', 90, 1, 141000);
+    assert.equal(ctx.globalAlpha, 0.45, 'cached source timestamp expires despite its cached age');
+    assert.equal(ctx.strokeStyle, '#666');
+    beacon.used = false;
+    out.drawMiniBeacon(ctx, beacon, 40, 'blue', '2', 90, 1, 60000);
+    assert.equal(ctx.globalAlpha, 0.45, 'excluded but fresh fixes are subdued');
+    for (const cords of [null, [200], [NaN, 100], ['200', 100]]) {
+        const before = calls.length;
+        assert.equal(out.drawMiniBeacon(ctx, {...beacon, cords}, 40, 'blue', '2', 90), false);
+        assert.equal(calls.length, before);
+    }
+});
+
 test('old layouts do not enable or mutate optional tracking', () => {
     const layout = {floor: [{name: 'Property', scale: 20, zones: [], receivers: []}]};
     const before = JSON.stringify(layout);

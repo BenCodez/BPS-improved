@@ -6,13 +6,15 @@ const vm = require('node:vm');
 const directory = join(__dirname, '../../custom_components/bps/frontend');
 const plain = x => JSON.parse(JSON.stringify(x));
 
-async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
+async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false) {
     const ids = new Map(), listeners = new Map(), requests = [], intervals = [], canvasCalls = [];
     const network = {cords: [], cordsStatus: 200, failCords: false};
     let clock = Date.now();
     class ClockDate extends Date {static now() {return clock;}}
     const context = new Proxy({}, {get: (obj, key) => key === 'setLineDash' ? dash => canvasCalls.push(['dash', ...dash])
         : key === 'arc' ? (...args) => canvasCalls.push(['arc', ...args])
+        : key === 'fillText' ? (...args) => canvasCalls.push(['text', ...args])
+        : key === 'drawImage' ? (img, ...args) => canvasCalls.push(['image', img.src, ...args])
         : key === 'measureText' ? () => ({width: 30}) : key === 'createLinearGradient'
         ? () => ({addColorStop() {}}) : obj[key] || (() => {}), set: (obj, key, value) => {obj[key] = value; return true;}});
     function element(tag = 'div') {
@@ -40,7 +42,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b']) {
     const window = {location: {origin: 'https://home.test'}, scrollX: 0, scrollY: 0, innerHeight: 1000,
         addEventListener: (name, cb) => listeners.set(`window:${name}`, cb)}; window.parent = window;
     const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date: ClockDate, URL, FormData, Response,
-        Image: class {constructor() {this.naturalWidth = 0;}}, setTimeout: () => 1, clearTimeout() {}, setInterval: (cb, ms) => {intervals.push({cb, ms}); return intervals.length;}, clearInterval() {},
+        Image: class {constructor() {this.naturalWidth = iconsLoaded ? 24 : 0; this.complete = iconsLoaded;}}, setTimeout: () => 1, clearTimeout() {}, setInterval: (cb, ms) => {intervals.push({cb, ms}); return intervals.length;}, clearInterval() {},
         requestAnimationFrame: () => 1, localStorage: {getItem: () => null, setItem() {}},
         fetch: async (url, options) => {
             requests.push({url, options});
@@ -366,6 +368,32 @@ for (const kind of ['partial', 'empty', 'no-data']) {
         assert.equal(p.el('zonediv').style.display, kind === 'partial' ? '' : 'none');
     });
 }
+
+test('panel displays tiny numbered beacons under the main icon with diagnostics off', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true, show_uncertainty: false};
+    source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a', 'beacon_b']}];
+    const p = await panel(source, ['beacon_a', 'beacon_b'], true); p.hooks.select('Property'); p.setClock(1000000);
+    const beaconA = {ent: 'beacon_a', cords: [60, 100], floor: 'Property', updated: 1000};
+    const beaconB = {ent: 'beacon_b', cords: [140, 100], floor: 'Property', updated: 1000};
+    p.network.cords = [{ent: 'bps_group_rover', group: true, name: 'Rover', cords: [100, 100], floor: 'Property',
+        updated: 1000, outdoor: {observed: 1000}, beacon_positions: [beaconA, beaconB,
+            {ent: 'other', cords: [500, 500], floor: 'Barn'}, {ent: 'invalid', cords: [NaN, 100]}, null]}];
+    p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click');
+    const poll = p.intervals.findLast(i => i.ms === 500);
+    p.canvasCalls.length = 0; await poll.cb();
+    assert.equal(p.el('outdoorDiagnostics').checked, false);
+    assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'arc').map(c => c.slice(1, 4)), [[60, 100, 12], [140, 100, 12]],
+        'only tiny member circles, no extra diagnostic overlays');
+    const main = p.canvasCalls.findIndex(c => c[0] === 'image' && c[1] === '/bps/person.svg');
+    assert.ok(main > p.canvasCalls.findLastIndex(c => c[0] === 'arc'), 'main icon is painted on top');
+    assert.deepEqual(p.canvasCalls[main].slice(-2), [80, 80], 'main icon stays full size');
+    assert.ok(p.canvasCalls.some(c => c[0] === 'text' && c[1] === 'Rover'));
+    assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'text' && ['1', '2'].includes(c[1])).map(c => c[1]), ['1', '2']);
+    p.network.cords[0].beacon_positions = [beaconB];
+    p.canvasCalls.length = 0; await poll.cb();
+    assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'text' && ['1', '2'].includes(c[1])).map(c => c[1]), ['2']);
+});
 
 test('panel constituent circles inherit group freshness and expire during failed polling', async () => {
     const source = layout(); source.outdoor_tracking = {enabled: true};
