@@ -368,6 +368,10 @@ def test_repeated_reload_retains_physical_worker_limit(hass, monkeypatch, fail_a
             await recovery
             assert started == 2 * bps.MAX_CONCURRENT_TRACKERS
             assert maximum == bps.MAX_CONCURRENT_TRACKERS
+            # New jobs may finish before the last abandoned old job: they
+            # only need an available slot, not the whole prior batch. Drain
+            # those owned jobs before asserting final physical quiescence.
+            await asyncio.gather(*tuple(bucket["_tracking_executor_jobs"]))
             assert active == 0
             assert bucket["_tracking_executor_jobs"] == set()
             assert abandoned_errors == []
@@ -434,6 +438,91 @@ def test_deferred_startup_cannot_resurrect_stopped_integration(hass, monkeypatch
         await callbacks["homeassistant_started"](None)
         assert "bps_update_task" not in hass.data
         assert hass.data["bps"]["_tracking_active"] is False
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("platform_raises", [False, True])
+@pytest.mark.parametrize("startup_phase", ["waiting", "event_during_unload", "initializing"])
+def test_failed_unload_preserves_real_deferred_initialization(hass, monkeypatch, tmp_path,
+                                                              platform_raises, startup_phase):
+    async def scenario():
+        callbacks = {}
+        initialized = []
+        started = asyncio.Event()
+        migration_started, finish_migration = asyncio.Event(), asyncio.Event()
+        initial_task = None
+
+        async def noop(*_args, **_kwargs):
+            pass
+
+        async def migrate(_hass):
+            initialized.append(True)
+            if startup_phase == "initializing":
+                migration_started.set()
+                await finish_migration.wait()
+
+        async def tracking(_hass):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def unload(_entry, _platforms):
+            assert "_tracking_setup" not in hass.data["bps"]
+            if startup_phase == "event_during_unload":
+                hass.is_running = True
+                await callbacks["homeassistant_started"](None)
+                assert "bps_update_task" not in hass.data
+            finish_migration.set()
+            if platform_raises:
+                raise RuntimeError("platform could not unload")
+            return False
+
+        hass.is_running = False
+        hass.async_create_task = asyncio.create_task
+        hass.bus = SimpleNamespace(async_listen_once=lambda event, callback: callbacks.update({event: callback}))
+        hass.config = SimpleNamespace(path=lambda: str(tmp_path))
+        hass.config_entries = SimpleNamespace(async_unload_platforms=unload)
+        hass.data["bps_views_registered"] = True
+        entry = SimpleNamespace(entry_id="entry", options={bps.OPTION_SHOW_SIDEBAR_PANEL: False})
+        monkeypatch.setattr(bps.aiofiles.os, "makedirs", noop)
+        monkeypatch.setattr(bps, "migrate_legacy", migrate)
+        monkeypatch.setattr(bps, "load_bps_data", noop)
+        monkeypatch.setattr(bps, "restore_position_history", noop)
+        monkeypatch.setattr(bps, "async_restore_calibration_state", noop)
+        monkeypatch.setattr(bps, "async_start_auto_if_enabled", noop)
+        monkeypatch.setattr(bps, "shutdown_diagnostics", noop)
+        monkeypatch.setattr(bps, "flush_position_history", noop)
+        monkeypatch.setattr(bps, "activate_diagnostics", lambda _hass: None)
+        monkeypatch.setattr(bps, "update_tracked_entities", tracking)
+        monkeypatch.setattr(bps, "cleanup_legacy_bps_registry_and_states",
+                            lambda _hass: pytest.fail("cleanup after failed platform unload"))
+        assert await bps.async_setup(hass, entry)
+        token = hass.data["bps"]["_tracking_setup"]
+        initializer = hass.data["bps"]["_tracking_initialize"]
+        try:
+            if startup_phase == "initializing":
+                hass.is_running = True
+                initial_task = asyncio.create_task(callbacks["homeassistant_started"](None))
+                await migration_started.wait()
+            assert not await bps.async_unload_entry(hass, entry)
+            assert hass.data["bps"]["_tracking_setup"] is token
+            assert hass.data["bps"]["_tracking_initialize"] is initializer
+            if startup_phase == "waiting":
+                assert "bps_update_task" not in hass.data
+                hass.is_running = True
+                await callbacks["homeassistant_started"](None)
+            await started.wait()
+            task = hass.data["bps_update_task"]
+            assert hass.data["bps"]["_tracking_active"] is True
+            # A retry or late event must not duplicate initialization/loops.
+            await callbacks["homeassistant_started"](None)
+            assert hass.data["bps_update_task"] is task
+            assert initialized == [True]
+        finally:
+            finish_migration.set()
+            if initial_task is not None:
+                await initial_task
+            await bps._stop_tracking(hass)
 
     run(scenario())
 

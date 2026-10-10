@@ -158,6 +158,7 @@ async def _stop_tracking(hass):
     bucket["_tracking_active"] = False
     bucket["_tracking_lifecycle"] = object()
     bucket.pop("_tracking_setup", None)
+    bucket.pop("_tracking_initialize", None)
     task = hass.data.pop("bps_update_task", None)
     if task is not None:
         task.cancel()
@@ -2200,8 +2201,9 @@ async def async_setup(hass, config):
     await _stop_tracking(hass)
     setup_token = object()
     hass.data.setdefault(DOMAIN, {})["_tracking_setup"] = setup_token
+    initialization_lock = asyncio.Lock()
 
-    async def initialize_bps():
+    async def initialize_once():
         """Initialize the BPS component"""
         if (hass.data.get(DOMAIN, {}).get("_tracking_setup") is not setup_token
                 or not hass.data.get("bps_initialized")):
@@ -2317,6 +2319,16 @@ async def async_setup(hass, config):
 
         _LOGGER.info("The BPS integration is fully initialized")
 
+    async def initialize_bps():
+        # A failed unload may retry an initialization whose started event
+        # arrived during teardown. Serialize both attempts and never spawn a
+        # second tracking loop if the first valid attempt already completed.
+        async with initialization_lock:
+            if hass.data.get("bps_update_task") is None:
+                await initialize_once()
+
+    hass.data.setdefault(DOMAIN, {})["_tracking_initialize"] = initialize_bps
+
     async def handle_homeassistant_started(event):
         """Handles the 'homeassistant_started' event"""
         await initialize_bps()
@@ -2332,9 +2344,12 @@ async def async_unload_entry(hass: HomeAssistant, entry):
     """Remove a configuration entry"""
     _LOGGER.info("Attempting to offload platforms for entry: %s", entry.entry_id)
     restart_on_failure = hass.data.get("bps_update_task") is not None
+    bucket = hass.data.get(DOMAIN, {})
+    pending_setup = bucket.get("_tracking_setup")
+    pending_initialize = bucket.get("_tracking_initialize")
     await _stop_tracking(hass)
 
-    def unload_failed():
+    async def unload_failed():
         # HA retains the entry after a failed unload. Keep its existing
         # tracking behavior, but restart with a fresh generation so cancelled
         # old jobs can never publish into the resumed installation.
@@ -2347,6 +2362,15 @@ async def async_unload_entry(hass: HomeAssistant, entry):
                 resume_discovery()
             activate_diagnostics(hass)
             hass.data["bps_update_task"] = hass.async_create_task(update_tracked_entities(hass))
+        elif pending_setup is not None and pending_initialize is not None:
+            # Before HA starts there is no tracking task to restart. Restore
+            # the deferred callback's token. If its one-shot started event was
+            # consumed during teardown, retry initialization now instead.
+            bucket = hass.data.setdefault(DOMAIN, {})
+            bucket["_tracking_setup"] = pending_setup
+            bucket["_tracking_initialize"] = pending_initialize
+            if getattr(hass, "is_running", False):
+                await pending_initialize()
         return False
 
     await shutdown_diagnostics(hass)
@@ -2364,11 +2388,11 @@ async def async_unload_entry(hass: HomeAssistant, entry):
         unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
     except Exception as e:
         _LOGGER.error(f"Error during offloading of platforms for entry {entry.entry_id}: {e}")
-        return unload_failed()
+        return await unload_failed()
 
     if not unload_ok:
         _LOGGER.error("Failed to offload platforms for entry: %s", entry.entry_id)
-        return unload_failed()
+        return await unload_failed()
 
     # Once the sensor platform is gone, complete teardown. A frontend cleanup
     # error must not restart tracking against removed SensorEntity objects.
