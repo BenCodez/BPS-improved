@@ -232,6 +232,13 @@ test('diagnostics explain measurement trust and fused beacon disagreement', () =
     assert.match(text, /2 beacons combined · beacon uncertainty 2.5 m · position spread 1.0 m/);
 });
 
+test('tracking diagnostics disclose neutral obstruction fallback', () => {
+    const text = out.diagnosticsText({outdoor: {estimated_uncertainty_m: 2,
+        confidence: 'poor', environment_fallback: true}});
+    assert.match(text, /neutral obstruction weights used; confidence reduced/);
+    assert.doesNotMatch(out.diagnosticsText({outdoor: {estimated_uncertainty_m: 2}}), /unavailable/);
+});
+
 test('unknown prefixed beacon members survive missing inventory but configured groups cannot nest', () => {
     const layout = {tracker_groups: [{id: 'other', name: 'Other', enabled: false, beacons: ['beacon_a']}]};
     const group = {id: 'rover', name: 'Rover', beacons: ['bps_group_beacon']};

@@ -170,6 +170,7 @@
         const out = row && row.outdoor;
         if (!out) return '';
         const lines = [`Estimated uncertainty: ${display(out.estimated_uncertainty_m, ' m')} · ${out.confidence || 'unknown'} · ${out.receivers_used || 0} receivers`];
+        if (out.environment_fallback) lines.push('Environmental geometry unavailable: neutral obstruction weights used; confidence reduced.');
         if (number(out.noise_floor_m)) lines.push(`Radius inputs: weighted residual ${display(out.residual_m, ' m')} · noise floor ${display(out.noise_floor_m, ' m')} · geometry ×${display(out.geometry_factor)} · effective receivers ${display(out.effective_receivers)}`);
         if (row.group && number(out.combined_beacon_uncertainty_m)) lines.push(`Group radius inputs: ${out.beacons_used || 0} beacons combined · beacon uncertainty ${display(out.combined_beacon_uncertainty_m, ' m')} · position spread ${display(out.beacon_scatter_m, ' m')}`);
         if (number(out.position_age_s)) lines.push(`Position age: ${display(out.position_age_s, ' s')}${isStale(out) ? ' · stale / last known' : ''}`);

@@ -96,6 +96,16 @@ def test_agreeing_beacons_improve_uncertainty_modestly():
     assert all(p["used"] for p in result["beacon_positions"])
 
 
+def test_group_retains_environment_fallback_warning_and_poor_confidence():
+    a, b = position(), position("beacon_b", x=115)
+    a["outdoor"].update(environment_fallback=True, confidence="poor")
+    result = fuse(a, b)
+    assert result["outdoor"]["environment_fallback"] is True
+    assert result["outdoor"]["confidence"] == "poor"
+    assert result["beacon_positions"][0]["environment_fallback"] is True
+    assert 100 < result["cords"][0] < 115
+
+
 def test_one_group_radius_combines_both_beacons_with_the_published_position_weights():
     a = position(uncertainty=3, updated=NOW)
     b = position("beacon_b", x=110, uncertainty=10, updated=NOW - 100)

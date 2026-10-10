@@ -28,6 +28,7 @@ hard way: zones all went "unknown" the moment the first corrections landed).
 import asyncio
 import json
 import logging
+import copy
 import math
 import re
 import time
@@ -424,7 +425,7 @@ def solve_snapshot(cal: dict) -> dict:
     """
     return {
         "samples": {k: list(v) for k, v in (cal.get("samples") or {}).items()},
-        "receivers": dict(cal.get("receivers") or {}),
+        "receivers": copy.deepcopy(cal.get("receivers") or {}),
     }
 
 
@@ -827,6 +828,9 @@ async def start_calibration(hass, floor_name: str, duration: int) -> dict:
 
 
 async def _stop_task(cal: dict) -> None:
+    # HTTP solves have their own awaiters. Changing sessions must invalidate
+    # those results even when no sampling/auto task is currently running.
+    cal["_manual_solve_generation"] = object()
     task = cal.get("task")
     cal["task"] = None
     if task and not task.done():
@@ -1045,11 +1049,62 @@ class BPSCalibrationAPI(HomeAssistantView):
             elif action == "solve":
                 # Re-solve from the samples already collected (e.g. after an
                 # early cancel, or to inspect before the window ends).
-                floor_name = data.get("floor") or cal.get("floor")
-                result = await async_solve(hass, cal, floor_name)
-                cal["results"][result["floor"]] = result
-                cal["last_solved_at"] = result["solved_at"]
-                cal["error"] = None
+                lock = cal.setdefault("_manual_solve_lock", asyncio.Lock())
+                pending = cal.get("_manual_solve_pending")
+                if lock.locked() or (pending is not None and not pending.done()):
+                    return web.json_response({**_status_payload(cal),
+                        "error": "A calibration solve is already running"}, status=409)
+                async with lock:
+                    bucket = hass.data[DOMAIN]
+                    if bucket.get("_tracking_active") is False:
+                        return web.json_response({**_status_payload(cal),
+                            "error": "BPS is stopped; calibration solve is unavailable"}, status=409)
+                    generation = cal.setdefault("_manual_solve_generation", object())
+                    layout = bucket.get("layout")
+                    lifecycle = bucket.get("_tracking_lifecycle")
+                    session = (cal.get("mode"), cal.get("task"), cal.get("floor"),
+                               cal.get("started_at"), cal.get("last_solved_at"))
+                    floor_name = data.get("floor") or cal.get("floor")
+                    # Request cancellation cannot stop a native executor
+                    # thread. Retain admission until its private solve finishes;
+                    # only this awaiting handler is allowed to publish a result.
+                    async def solve_privately():
+                        try:
+                            return await async_solve(hass, cal, floor_name), None
+                        except Exception as error:
+                            # Python 3.14 reports an abandoned shielded future's
+                            # exception even when the source task consumes it.
+                            # Carry failures as values until a live handler can
+                            # raise them through its existing HTTP error path.
+                            return None, error
+
+                    pending = asyncio.create_task(solve_privately())
+                    cal["_manual_solve_pending"] = pending
+
+                    def solve_finished(done):
+                        if cal.get("_manual_solve_pending") is done:
+                            cal.pop("_manual_solve_pending", None)
+                        if not done.cancelled():
+                            done.exception()  # also consume abandoned failures
+
+                    pending.add_done_callback(solve_finished)
+                    result, error = await asyncio.shield(pending)
+                    if error is not None:
+                        raise error
+                    bucket = hass.data.get(DOMAIN, {})
+                    current_session = (cal.get("mode"), cal.get("task"), cal.get("floor"),
+                                       cal.get("started_at"), cal.get("last_solved_at"))
+                    if (bucket.get("calibration") is not cal
+                            or cal.get("_manual_solve_generation") is not generation
+                            or current_session != session
+                            or bucket.get("layout") is not layout
+                            or bucket.get("_tracking_lifecycle") is not lifecycle
+                            or bucket.get("_tracking_active") is False):
+                        return web.json_response({**_status_payload(cal),
+                            "error": "Calibration changed while solving; retry with current data"}, status=409)
+                    cal["results"][result["floor"]] = result
+                    cal["last_solved_at"] = result["solved_at"]
+                    cal["error"] = None
             elif action == "validate_tracking":
                 if self.validate_tracking is None:
                     raise ValueError("Tracking validation is unavailable")

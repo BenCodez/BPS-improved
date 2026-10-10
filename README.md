@@ -18,6 +18,9 @@ Quick list of changes in this fork:
 - Dedicated selectable group position entities and a stability check against brief BLE quality reversals.
 - Diagnostic recordings and known-position tests, with an offline accuracy
   report and a read-only comparison of tracking with proposed calibration corrections.
+- Outdoor obstruction geometry uses immutable pure Python data rather than
+  shared GEOS objects, with bounded tracking batches and protection from late
+  results after map edits or reloads. See [stability details](docs/outdoor-geometry-stability.md).
 - Existing BPS storage, individual beacon sensors, calibration, and history are
   preserved; outdoor changes are opt-in and do not automatically retune calibration.
 

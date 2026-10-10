@@ -1,4 +1,4 @@
-"""Real Shapely path geometry, input safety, cache behavior, and RF trust."""
+"""Numeric path geometry, input safety, cache behavior, and RF trust."""
 import copy
 import math
 
@@ -197,3 +197,24 @@ def test_mixed_walls_corner_crossing_counted_once_with_strongest_material():
     assert result['building_crossings'] == 2
     assert result['reflection_risk']
     assert result['intersections'][0]['wall_crossings'][1]['walls'] == [2, 3]
+
+
+def test_unexpected_geometry_error_uses_neutral_trust_and_logs_at_most_once(monkeypatch, caplog):
+    from bps import environment as E
+    geometry = compiled(rectangle(material="metal"))
+    def fail(*args):
+        raise ArithmeticError("test failure")
+    monkeypatch.setattr(E, "interior_path", fail)
+    monkeypatch.setattr(E, "_last_geometry_warning", -math.inf)
+    for _ in range(10):
+        result = measurement_reliability(geometry, (-5, 5), (15, 5),
+                                         age_s=0, base_weight=0.4)
+        assert result["environmental_weight"] == 1
+        assert result["reliability_weight"] == 0.4
+        assert result["environment_error"] == "ArithmeticError"
+        assert result["classification"] == "unknown"
+        assert result["intersections"] == []
+    assert len([r for r in caplog.records if "Outdoor geometry failed" in r.message]) == 1
+    # Obstruction fallback never bypasses receiver exclusions or stale gates.
+    assert measurement_reliability(geometry, (-5, 5), (15, 5), policy="ignore")["used"] is False
+    assert measurement_reliability(geometry, (-5, 5), (15, 5), age_s=30)["used"] is False
