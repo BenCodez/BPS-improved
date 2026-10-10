@@ -1,9 +1,29 @@
 ![BPS Logo](img/icon.png)
 
-# BLE Positioning System (BPS) — enhanced fork
+# BLE Positioning System (BPS) — BenCodez fork
 
-This is a fork of [**Hogster/BPS**](https://github.com/Hogster/BPS) that adds a
-large set of features and fixes on top of the original.
+I'm forking [**maxi1134/BPS-improved**](https://github.com/maxi1134/BPS-improved)
+as [**BenCodez/BPS-improved**](https://github.com/BenCodez/BPS-improved) to improve
+outdoor dog tracking while keeping the existing BPS setup working. It builds on
+maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hogster/BPS).
+
+Quick list of changes in this fork:
+
+- Optional outdoor tracking with buildings, trees, and a **Metal / reflective**
+  material for shops; these areas adjust measurement trust.
+- Multiple beacons for one dog: one fused main icon plus small, subdued numbered
+  icons showing each beacon's estimated position in the panel and Lovelace card.
+- Estimated uncertainty, stale-fix styling, receiver trust controls, and
+  diagnostics explaining beacon disagreement and possible reflection risk.
+- Diagnostic recordings and known-position tests, with an offline accuracy
+  report to help identify improvements using measurements from your property.
+- Existing BPS storage, individual beacon sensors, calibration, and history are
+  preserved; outdoor changes are opt-in and do not automatically retune calibration.
+
+The feature work is currently in [PR #1](https://github.com/BenCodez/BPS-improved/pull/1).
+Until it is included in a release, installing the default branch will not include
+these new features. The sections below also document features inherited from
+maxi1134's fork.
 
 **New here?** Read the upstream project first — this fork does not repeat it:
 
@@ -17,6 +37,7 @@ Everything in the upstream docs still applies. This README documents **only what
 this fork changes or adds**.
 
 Full credit for the original integration goes to [@Hogster](https://github.com/Hogster),
+to [@maxi1134](https://github.com/maxi1134) for the improved BPS fork,
 and to [@agittins](https://github.com/agittins) for [Bermuda](https://github.com/agittins/bermuda),
 which BPS builds on.
 
@@ -58,15 +79,46 @@ The Lovelace card
 
 ## Installation
 
-Install this fork through HACS as a custom repository:
+This repository is configured for HACS release downloads using a `bps.zip`
+asset. A release containing the feature branch must be published before these
+changes are available through HACS; a prerelease can do that without merging
+the PR. At the time of this PR, this fork has no published releases.
+
+Once a release is available, install this fork through HACS as a custom repository:
+
+For a **new installation**:
 
 1. HACS → **Integrations** → ⋮ → **Custom repositories**.
-2. Repository: `maxi1134/BPS-improved`, Category: `Integration`. Click **Add**.
+2. Repository: `BenCodez/BPS-improved`, Category: `Integration`. Click **Add**.
 3. Install **BLE Positioning System**, restart Home Assistant, then add the
    integration under **Settings → Devices & Services → Add Integration → BPS**.
 
 Configure which Bluetooth devices to track through Bermuda, exactly as in the
 upstream docs.
+
+### Replacing an existing BPS installation
+
+**This fork replaces the existing BPS code; it is not a second integration.**
+It uses the same `bps` domain and configuration entry, layout/calibration storage
+keys, and history location. An existing BPS setup should be reused after restart.
+Older flat-file layouts and calibration data use the existing migration path.
+
+1. Take a full Home Assistant backup before switching.
+2. Remove the older BPS download/repository from **HACS**, then install this
+   fork's release. Keep the existing **BPS integration entry in Settings →
+   Devices & Services**; do not delete it or add another BPS entry.
+3. Install the replacement into the same `custom_components/bps` directory
+   before restarting Home Assistant. Keep `.storage` and `www/bps_maps` intact.
+   For a manual installation, replace the old component directory with this
+   fork's `custom_components/bps` directory.
+4. Restart Home Assistant and refresh the BPS panel/dashboard browser cache.
+   Verify your existing entities, maps, receivers, calibration, and history.
+   Leave Outdoor Tracking off initially, then enable it when ready.
+
+Use `BenCodez/BPS-improved` as the HACS update source afterward; reinstalling or
+updating the older repository would replace this fork's code. Compatibility is
+covered by automated tests, but replacement on a live Home Assistant installation
+still needs verification.
 
 ### SciPy dependency
 
