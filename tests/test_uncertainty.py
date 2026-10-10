@@ -3,6 +3,7 @@ import math
 
 import pytest
 
+from bps import trilaterate
 from bps.uncertainty import MAX_UNCERTAINTY_M, estimate_uncertainty, uncertainty_radius_px
 from bps.environment import measurement_reliability
 
@@ -75,7 +76,7 @@ def test_diagnostics_and_excluded_readings():
     assert result["building_paths"] == 0
     assert result["reading_age_s"] == 3
     assert result["downweighted_receivers"] == 1
-    assert result["uncertainty_method"] == "solver_weighted_heuristic"
+    assert result["uncertainty_method"] == "robust_solver_weighted_heuristic"
 
 
 def test_path_and_age_diagnostics_do_not_count_reliability_twice():
@@ -134,6 +135,51 @@ def test_collectively_useful_weak_bearings_still_supply_coverage():
            for a in range(120, 241, 10)]
     result = estimate_uncertainty((0, 0), near + far, 1, [{"reading_age_s": 0}] * (len(near) + len(far)))
     assert result["largest_bearing_gap_deg"] < 240
+
+
+@pytest.mark.parametrize("scale", [1, 40])
+@pytest.mark.parametrize("surrounding", [False, True])
+def test_robust_fix_and_radius_agree_when_distant_ble_ranges_conflict(scale, surrounding):
+    # Synthetic coordinates, not a replay of any user's property. The truth
+    # is (0, 0); nearby ranges agree and twelve distant readings overestimate
+    # by 100 m. The real solver still lands near truth, but a plain squared
+    # residual produced a 31 m radius with only the two nearby receivers.
+    readings = [(4, 0, 4, 1, 4), (0, 5, 5, 1, 5)]
+    if surrounding:
+        readings += [(-6, 0, 6, 1, 6), (0, -7, 7, 1, 7)]
+    for i in range(12):
+        angle, distance = 2 * math.pi * i / 12, 20 + i * 5
+        readings.append((distance * math.cos(angle), distance * math.sin(angle),
+                         distance + 100, 0.8, distance + 100))
+    weighted = [(x * scale, y * scale, r * scale, w, slant * scale)
+                for x, y, r, w, slant in readings]
+    fix = trilaterate(weighted, min_weight_radius=0.5 * scale)
+    assert fix is not None
+    assert math.hypot(*fix) / scale < 0.2
+    result = estimate_uncertainty(fix, weighted, scale,
+                                  [{"reading_age_s": 0}] * len(readings))
+    assert result["robust_downweighted_receivers"] == 12
+    assert result["residual_m"] < 0.75 * result["unadjusted_residual_m"]
+    if surrounding:
+        assert result["estimated_uncertainty_m"] < 6
+    else:
+        # Weak geometry still deserves a conservative circle; robust loss
+        # must not make this indistinguishable from surrounding coverage.
+        assert 15 < result["estimated_uncertainty_m"] < 22
+        assert result["geometry_factor"] > 3
+
+
+def test_uniformly_conflicting_ranges_do_not_become_precise_after_robust_weighting():
+    points = SURROUNDING[:4]
+    good = estimate(receivers=points)
+    bad = estimate(receivers=points, residual=30)
+    assert bad["robust_downweighted_receivers"] == 4
+    assert bad["residual_m"] == pytest.approx(30)
+    assert bad["unadjusted_residual_m"] == pytest.approx(30)
+    assert bad["geometry_factor"] == good["geometry_factor"]
+    assert bad["effective_receivers"] == good["effective_receivers"]
+    assert bad["estimated_uncertainty_m"] > 30
+    assert bad["confidence"] == "poor"
 
 
 @pytest.mark.parametrize("bad", [True, None, "40", float("inf"), float("nan"), -1, 0, 10**1000])

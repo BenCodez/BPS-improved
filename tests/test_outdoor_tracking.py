@@ -27,6 +27,7 @@ def test_published_displacement_can_only_reduce_confidence(initial, displacement
     quality = {"estimated_uncertainty_m": 2.0, "confidence": initial}
     account_for_published_position(quality, (0, 0), (displacement * 10, 0), 10)
     assert quality["publication_displacement_m"] == displacement
+    assert quality["pre_publication_uncertainty_m"] == 2
     assert quality["estimated_uncertainty_m"] == pytest.approx(math.hypot(2, displacement))
     assert quality["confidence"] == expected
 

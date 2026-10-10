@@ -97,6 +97,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
 def account_for_published_position(quality, raw, published, scale):
     """Include Kalman lag and map/zone clamping in the displayed heuristic."""
     displacement = math.dist(raw, published) / scale
+    quality["pre_publication_uncertainty_m"] = quality["estimated_uncertainty_m"]
     quality["publication_displacement_m"] = displacement
     quality["estimated_uncertainty_m"] = math.hypot(
         quality["estimated_uncertainty_m"], displacement,
