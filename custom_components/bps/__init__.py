@@ -1610,7 +1610,7 @@ async def update_tracker_groups(hass):
                                       minimum=0.0) or STALE_POSITION_SECS
     fusion_time = time.time()
     fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
-                        use_observation_age=use_observation_age)
+                        use_observation_age=use_observation_age, known_trackers=known)
     lookup = [{"entity": p["ent"], "data": layout} for p in fused]
     previous = {p["ent"]: p for p in apitricords if p.get("group")}
     for position in fused:
@@ -2355,6 +2355,15 @@ class BPSSaveAPIText(HomeAssistantView):
         error = await hass.async_add_executor_job(validate_outdoor_layout, coords_obj)
         if error:
             return web.Response(status=400, text=error)
+        # Shape validation also runs during startup, before Bermuda is ready.
+        # At the save boundary, verify prefixed members against real sensors.
+        groups = coords_obj.get("tracker_groups", []) if isinstance(coords_obj, dict) else []
+        if any(b.startswith("bps_group_") for g in groups for b in g["beacons"]):
+            known = {eid.removeprefix("sensor.").split("_distance_to_", 1)[0]
+                     for eid in _bermuda_distance_sensor_ids(hass)}
+            error = await hass.async_add_executor_job(validate_outdoor_layout, coords_obj, known)
+            if error:
+                return web.Response(status=400, text=error)
         # --- Validate the optional new-floor map upload ---
         map_target = None
         map_bytes = None

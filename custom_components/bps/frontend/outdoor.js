@@ -141,7 +141,7 @@
         if (!group || !slug(group.id)
             || typeof group.name !== 'string' || !group.name.trim()
             || !Array.isArray(group.beacons) || !group.beacons.length
-            || group.beacons.some(b => !slug(b) || b.startsWith('bps_group_')))
+            || group.beacons.some(b => !slug(b) || b.startsWith('bps_group_') && !knownTrackers.includes(b)))
             throw new Error('Choose a name, a stable lowercase ID of 1–64 letters, digits or underscores, and valid individual beacon slugs.');
         if (group.beacons.length > GROUP_LIMITS.beacons)
             throw new Error('A group supports at most 16 beacons.');

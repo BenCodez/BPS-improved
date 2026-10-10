@@ -621,3 +621,25 @@ def test_api_polling_does_not_refresh_old_fix_freshness(hass, monkeypatch):
     assert response.json_body[0]["outdoor"]["stale"] is True
     assert response.json_body[0]["outdoor"]["position_age_s"] == 40
     assert "stale" not in position["outdoor"]  # projection leaves stored fix intact
+
+
+def test_save_and_runtime_accept_genuine_prefixed_beacon_only(hass, monkeypatch, tmp_path):
+    data = layout(True)
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["bps_group_beacon", "beacon_b"]}]
+    monkeypatch.setattr(bps, "_bermuda_distance_sensor_ids", lambda _hass: [
+        "sensor.bps_group_beacon_distance_to_p0", "sensor.beacon_b_distance_to_p0"])
+    response = run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, data))
+    assert response is None
+    now = bps.time.time()
+    original = {"ent": "bps_group_beacon", "floor": "Property", "zone": "unknown",
+                "cords": [50, 50], "updated": now, "rms_m": 1}
+    bps.apitricords = [copy.deepcopy(original)]
+    bps.tracked_entities = ["sensor.bps_group_beacon_distance_to_p0"]
+    run(bps.update_tracker_groups(hass))
+    assert bps.apitricords[0] == original
+    assert bps.apitricords[1]["beacon_positions"][0]["ent"] == "bps_group_beacon"
+    bad = copy.deepcopy(data)
+    bad["tracker_groups"][0]["beacons"] = ["bps_group_rover"]
+    response = run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, bad))
+    assert response.status == 400
+    assert hass._store_backing[STORAGE_KEY_LAYOUT] == data

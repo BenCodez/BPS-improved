@@ -278,3 +278,25 @@ def test_finite_json_payload_even_for_extreme_valid_inputs():
     assert math.isfinite(result["outdoor"]["estimated_uncertainty_m"])
     assert result["outdoor"]["estimated_uncertainty_m"] >= 0
     json.dumps(result, allow_nan=False)
+
+
+def test_genuine_group_prefixed_beacon_fuses_without_allowing_nested_groups():
+    group = {**GROUP, "beacons": ["bps_group_beacon", "beacon_b"]}
+    data = layout([group])
+    assert G.normalize_groups(data, ["bps_group_beacon"]) == [group]
+    original = position("bps_group_beacon")
+    result = G.fuse_groups(data, [original], SCALES, NOW)[0]
+    assert result["beacon_positions"][0]["ent"] == "bps_group_beacon"
+    assert result["beacons_reporting"] == 1 and result["total_beacons"] == 2
+    generated = {**original, "group": True}
+    for positions in ([generated], {"bps_group_beacon": generated}):
+        assert G.fuse_groups(data, positions, SCALES, NOW) == []
+        assert G.fuse_group(group, positions, SCALES, NOW) is None
+
+
+def test_inventory_retains_missing_prefixed_member_in_group_reporting():
+    group = {**GROUP, "beacons": ["bps_group_beacon", "beacon_b"]}
+    result = G.fuse_groups(layout([group]), [position("beacon_b")], SCALES, NOW,
+                           known_trackers=["bps_group_beacon"])[0]
+    assert result["total_beacons"] == 2 and result["beacons_reporting"] == 1
+    assert G.normalize_groups(layout([group]), []) == []

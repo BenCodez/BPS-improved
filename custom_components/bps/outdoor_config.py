@@ -14,8 +14,12 @@ from .tracker_groups import MAX_GROUPS, MAX_BEACONS_PER_GROUP
 SLUG = re.compile(r"[a-z0-9_]{1,64}\Z", re.ASCII)
 
 
-def validate_outdoor_layout(layout):
-    """Return an actionable error for new fields, or None for a valid old layout."""
+def validate_outdoor_layout(layout, known_trackers=None):
+    """Validate shape; when inventory is supplied, reject synthetic group members.
+
+    Loading persisted data has no Bermuda inventory yet. Save callers supply
+    actual tracker keys; runtime normalization independently checks provenance.
+    """
     if not isinstance(layout, dict):
         return None
     if "outdoor_tracking" in layout:
@@ -79,6 +83,8 @@ def validate_outdoor_layout(layout):
             beacons = group.get("beacons")
             if not isinstance(beacons, list) or not 1 <= len(beacons) <= MAX_BEACONS_PER_GROUP:
                 return f"Groups need 1–{MAX_BEACONS_PER_GROUP} beacon slugs"
-            if any(not isinstance(b, str) or not SLUG.fullmatch(b) or b.startswith("bps_group_") for b in beacons):
+            if any(not isinstance(b, str) or not SLUG.fullmatch(b) or (
+                    known_trackers is not None and b.startswith("bps_group_")
+                    and b not in known_trackers) for b in beacons):
                 return "Groups must reference individual BPS tracker slugs"
     return None

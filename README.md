@@ -287,7 +287,9 @@ slugs. A layout supports up to 32 groups, with up to 16 beacons per group;
 group IDs and beacon slugs use 1–64 lowercase letters, digits or underscores.
 Choose an ID whose `bps_group_<id>` does not match an existing beacon. The
 editor prevents creating or enabling a conflicting group; disable/delete a
-conflicting saved group and recreate it with another ID.
+conflicting saved group and recreate it with another ID. Real Bermuda beacons
+whose slugs start with `bps_group_` can still be members; generated group
+positions cannot be used as members.
 The group produces additional zone and floor sensors; the original
 beacon trackers and their sensors remain available. BPS combines their existing
 position fixes using estimated quality, and reports beacon count, disagreement,

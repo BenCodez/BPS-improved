@@ -43,7 +43,8 @@ def normalize_groups(layout, known_trackers=None):
 
     All groups require Outdoor Tracking. Missing beacon references are retained
     for truthful ``reporting/total`` diagnostics and recovery when they return.
-    ``known_trackers`` prevents generated IDs colliding with real trackers.
+    ``known_trackers`` prevents generated IDs colliding with real trackers and
+    identifies genuine beacons whose names happen to use the group prefix.
     Duplicate IDs and malformed entries are skipped; enabled defaults to true.
     """
     if not isinstance(layout, Mapping):
@@ -70,7 +71,7 @@ def normalize_groups(layout, known_trackers=None):
             continue
         beacons = list(dict.fromkeys(b for b in members if _slug(b)))
         # Groups cannot refer to other group outputs (including themselves).
-        if not beacons or any(b.startswith("bps_group_") for b in beacons):
+        if not beacons or any(b.startswith("bps_group_") and b not in known for b in beacons):
             continue
         name = entry.get("name", group_id)
         if not isinstance(name, str) or not name.strip():
@@ -85,7 +86,7 @@ def _position_index(positions):
     if isinstance(positions, Mapping):
         values = positions.values()
         result = {key: value for key, value in positions.items()
-                  if isinstance(key, str) and isinstance(value, Mapping)}
+                  if isinstance(key, str) and isinstance(value, Mapping) and not value.get("group")}
     elif isinstance(positions, (list, tuple)):
         values = positions
         result = {}
@@ -196,7 +197,7 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
     members = group.get("beacons")
     if not isinstance(members, list) or not 1 <= len(members) <= MAX_BEACONS_PER_GROUP:
         return None
-    if any(not _slug(b) or b.startswith("bps_group_") for b in members):
+    if any(not _slug(b) for b in members):
         return None
     now, max_age_s = _number(now), _number(max_age_s)
     if now is None or max_age_s is None or max_age_s <= 0:
@@ -276,13 +277,15 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
 
 
 def fuse_groups(layout, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
-                use_observation_age=True):
+                use_observation_age=True, known_trackers=None):
     """Normalize and fuse configured groups; disabled layouts do no work."""
-    if not normalize_groups(layout):
+    outdoor = layout.get("outdoor_tracking") if isinstance(layout, Mapping) else None
+    if not isinstance(outdoor, Mapping) or outdoor.get("enabled") is not True:
         return []
     index = _position_index(positions)
-    groups = normalize_groups(layout, known_trackers=(
-        ent for ent, p in index.items() if not p.get("group")))
+    known = set(known_trackers or ())
+    known.update(ent for ent, p in index.items() if not p.get("group"))
+    groups = normalize_groups(layout, known_trackers=known)
     return [payload for group in groups
             if (payload := fuse_group(group, index, scales, now, max_age_s,
                                       use_observation_age=use_observation_age)) is not None]

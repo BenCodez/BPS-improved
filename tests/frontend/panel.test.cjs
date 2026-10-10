@@ -440,3 +440,17 @@ test('panel retains group fixes through HTTP failures and malformed responses', 
     await poll.cb();
     assert.equal(p.hooks.tracks().get('bps_group_rover'), cached);
 });
+
+test('panel applies and saves groups containing genuine group-prefixed beacons', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const p = await panel(source, ['bps_group_beacon', 'beacon_b']);
+    p.el('groupId').value = 'rover'; p.el('groupName').value = 'Rover'; p.el('groupEnabled').checked = true;
+    p.el('groupBeacons').options.forEach(o => {o.selected = true;});
+    await p.el('saveGroup').fire('click');
+    assert.deepEqual(plain(p.hooks.layout().tracker_groups[0].beacons), ['bps_group_beacon', 'beacon_b']);
+    assert.deepEqual(p.el('entSelector').options.map(o => o.value).filter(Boolean),
+        ['bps_group_beacon', 'beacon_b', 'bps_group_rover']);
+    p.hooks.select('Property'); await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.deepEqual(saved.tracker_groups[0].beacons, ['bps_group_beacon', 'beacon_b']);
+});
