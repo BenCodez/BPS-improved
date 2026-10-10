@@ -289,7 +289,8 @@ Choose an ID whose `bps_group_<id>` does not match an existing beacon. The
 editor prevents creating or enabling a conflicting group; disable/delete a
 conflicting saved group and recreate it with another ID. Real Bermuda beacons
 whose slugs start with `bps_group_` can still be members; generated group
-positions cannot be used as members.
+positions cannot be used as members. A temporarily missing member remains
+configured and counted in the total, including a real beacon with that prefix.
 The group produces additional zone and floor sensors; the original
 beacon trackers and their sensors remain available. BPS combines their existing
 position fixes using estimated quality, and reports beacon count, disagreement,

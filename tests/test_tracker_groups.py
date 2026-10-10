@@ -55,7 +55,7 @@ def test_duplicate_ids_disabled_groups_and_tracker_id_collisions():
     {**GROUP, "id": "Rover"}, {**GROUP, "id": "dög"},
     {**GROUP, "id": "a/b"}, {**GROUP, "id": "x" * 65},
     {**GROUP, "beacons": []}, {**GROUP, "beacons": "beacon_a"},
-    {**GROUP, "beacons": ["bps_group_other"]},
+    {**GROUP, "beacons": ["bps_group_rover"]},
     {**GROUP, "enabled": "true"}])
 def test_malformed_group_definition_fails_safely(bad):
     assert G.normalize_groups(layout([bad])) == []
@@ -299,4 +299,13 @@ def test_inventory_retains_missing_prefixed_member_in_group_reporting():
     result = G.fuse_groups(layout([group]), [position("beacon_b")], SCALES, NOW,
                            known_trackers=["bps_group_beacon"])[0]
     assert result["total_beacons"] == 2 and result["beacons_reporting"] == 1
-    assert G.normalize_groups(layout([group]), []) == []
+    assert G.normalize_groups(layout([group]), []) == [group]
+
+
+def test_configured_group_outputs_are_rejected_even_when_disabled():
+    other = {**GROUP, "id": "other", "enabled": False}
+    nested = {**GROUP, "beacons": ["bps_group_other"]}
+    assert G.normalize_groups(layout([nested, other])) == []
+    # A genuine beacon with the same name takes precedence; the conflicting
+    # generated output is retired instead of preventing the beacon's use.
+    assert G.normalize_groups(layout([nested, other]), ["bps_group_other"]) == [nested]

@@ -159,7 +159,7 @@ test('group editing preserves original beacons, updates in place, and rejects en
     assert.equal(layout.tracker_groups.length, 1);
     assert.equal(layout.tracker_groups[0].enabled, false);
     assert.equal(layout.tracker_icons.beacon_a, 'person.svg');
-    for (const beacon of ['sensor.beacon_a', 'bps_group_other']) assert.throws(() => out.upsertGroup(layout, {id: 'rover', name: 'Dog', enabled: true, beacons: [beacon]}));
+    for (const beacon of ['sensor.beacon_a', 'bps_group_rover']) assert.throws(() => out.upsertGroup(layout, {id: 'rover', name: 'Dog', enabled: true, beacons: [beacon]}));
 });
 
 test('group readers and writers use backend optional defaults without mutating input', () => {
@@ -186,7 +186,7 @@ test('group validation accepts exact backend limits and rejects overflow before 
     const before = JSON.stringify(layout);
     for (const invalid of [{...group, id: 'r'.repeat(65)},
         {...group, beacons: [...beacons, 'beacon_16']}, {...group, id: 'dog_32'},
-        ...['A', 'bad slug', 'beacon\n', 'b'.repeat(65), 'bps_group_other'].map(b => ({...group, beacons: [b]}))]) {
+        ...['A', 'bad slug', 'beacon\n', 'b'.repeat(65), 'bps_group_dog_0'].map(b => ({...group, beacons: [b]}))]) {
         assert.throws(() => out.upsertGroup(layout, invalid));
         assert.equal(JSON.stringify(layout), before);
     }
@@ -225,4 +225,28 @@ test('diagnostics explain measurement trust and fused beacon disagreement', () =
     assert.match(text, /disagreement 4.5 m/);
     assert.match(text, /measured 15.0 m, corrected 13.0 m/);
     assert.match(text, /reflection \/ multipath risk/);
+});
+
+test('unknown prefixed beacon members survive missing inventory but configured groups cannot nest', () => {
+    const layout = {tracker_groups: [{id: 'other', name: 'Other', enabled: false, beacons: ['beacon_a']}]};
+    const group = {id: 'rover', name: 'Rover', beacons: ['bps_group_beacon']};
+    out.upsertGroup(layout, group, ['bps_group_beacon']);
+    out.upsertGroup(layout, {...group, name: 'Rover renamed'}, []);
+    assert.deepEqual(plain(layout.tracker_groups[1].beacons), ['bps_group_beacon']);
+    const before = JSON.stringify(layout);
+    assert.throws(() => out.upsertGroup(layout, {...group, beacons: ['bps_group_other']}));
+    assert.equal(JSON.stringify(layout), before);
+    out.upsertGroup(layout, {...group, beacons: ['bps_group_other']}, ['bps_group_other']);
+    assert.deepEqual(plain(layout.tracker_groups[1].beacons), ['bps_group_other']);
+});
+
+test('polygon names require nonempty bounded text before layout mutation', () => {
+    const floor = {};
+    const item = {id: 'shop', name: 'Metal shop', type: 'building', material: 'metal', points: polygon};
+    for (const name of [undefined, null, false, 3, {}, [], '', ' \t', 'x'.repeat(257)]) {
+        assert.throws(() => out.upsertEnvironment(floor, {...item, name}));
+        assert.deepEqual(plain(floor), {});
+    }
+    out.upsertEnvironment(floor, {...item, name: 'x'.repeat(256)});
+    assert.equal(floor.environment[0].name.length, 256);
 });

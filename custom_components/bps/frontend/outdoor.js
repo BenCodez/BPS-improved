@@ -125,7 +125,7 @@
     }
     function upsertEnvironment(floor, item) {
         if (!floor || !item || typeof item.id !== 'string' || !item.id
-            || typeof item.name !== 'string' || !item.name.trim()
+            || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 256
             || !TYPES.includes(item.type) || !MATERIALS.includes(item.material)
             || !validPolygon(item.points)) throw new Error('Use a named polygon with at least three distinct corners and no crossing edges.');
         const entries = Array.isArray(floor.environment) ? floor.environment : [];
@@ -138,14 +138,15 @@
         return copy;
     }
     function upsertGroup(layout, group, knownTrackers = []) {
+        const entries = Array.isArray(layout.tracker_groups) ? layout.tracker_groups : [];
         if (!group || !slug(group.id)
             || typeof group.name !== 'string' || !group.name.trim()
             || !Array.isArray(group.beacons) || !group.beacons.length
-            || group.beacons.some(b => !slug(b) || b.startsWith('bps_group_') && !knownTrackers.includes(b)))
+            || group.beacons.some(b => !slug(b) || !knownTrackers.includes(b)
+                && (b === `bps_group_${group.id}` || entries.some(g => g && b === `bps_group_${g.id}`))))
             throw new Error('Choose a name, a stable lowercase ID of 1–64 letters, digits or underscores, and valid individual beacon slugs.');
         if (group.beacons.length > GROUP_LIMITS.beacons)
             throw new Error('A group supports at most 16 beacons.');
-        const entries = Array.isArray(layout.tracker_groups) ? layout.tracker_groups : [];
         const index = entries.findIndex(g => g.id === group.id);
         const enabled = group.enabled === undefined || group.enabled === true;
         const key = `bps_group_${group.id}`;

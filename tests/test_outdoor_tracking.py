@@ -643,3 +643,35 @@ def test_save_and_runtime_accept_genuine_prefixed_beacon_only(hass, monkeypatch,
     response = run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, bad))
     assert response.status == 400
     assert hass._store_backing[STORAGE_KEY_LAYOUT] == data
+
+
+@pytest.mark.parametrize("missing,name", [(True, None), (False, None), (False, False),
+    (False, 3), (False, []), (False, {}), (False, ""), (False, " \t"), (False, "x" * 257)])
+def test_malformed_polygon_names_rejected_before_any_store_or_map_write(hass, tmp_path, missing, name):
+    from io import BytesIO
+    old = layout()
+    run(save_bps_data(hass, old))
+    data = layout(True)
+    region = {"id": "shop", "type": "building", "material": "metal", "name": name,
+              "points": [{"x": 0, "y": 0}, {"x": 100, "y": 0}, {"x": 0, "y": 100}]}
+    if missing:
+        region.pop("name")
+    data["floor"][0]["environment"] = [region]
+    upload = SimpleNamespace(filename="new.png", file=BytesIO(b"PNGDATA"))
+    response = run(bps.BPSSaveAPIText()._write_save(
+        hass, str(tmp_path), {"new_floor": "true", "file": upload}, data))
+    assert response.status == 400
+    assert validate_outdoor_layout(data) == "Environment polygon names must be nonempty text of at most 256 characters"
+    assert hass._store_backing[STORAGE_KEY_LAYOUT] == old
+    assert len(hass._store_saves) == 1 and not (tmp_path / "new.png").exists()
+
+
+@pytest.mark.parametrize("name", ["S", "S" * 256])
+def test_bounded_polygon_names_save_and_reload(hass, tmp_path, name):
+    data = layout(True)
+    data["floor"][0]["environment"] = [{"id": "shop", "name": name,
+        "type": "building", "material": "metal", "points": [
+            {"x": 0, "y": 0}, {"x": 100, "y": 0}, {"x": 0, "y": 100}]}]
+    assert run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, data)) is None
+    hass.data["bps"].pop("layout")
+    assert run(load_bps_data(hass)) == data

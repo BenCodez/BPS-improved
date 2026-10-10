@@ -48,6 +48,9 @@ def validate_outdoor_layout(layout, known_trackers=None):
                 if not isinstance(identifier, str) or not identifier or len(identifier) > 128 or identifier in identifiers:
                     return "Environment polygon IDs must be nonempty and unique on their floor"
                 identifiers.add(identifier)
+                name = region.get("name")
+                if not isinstance(name, str) or not name.strip() or len(name) > 256:
+                    return "Environment polygon names must be nonempty text of at most 256 characters"
                 kind, material = region.get("type"), region.get("material", "unknown")
                 if not isinstance(kind, str) or kind not in ENVIRONMENT_TYPES:
                     return "Unknown environment polygon type"
@@ -68,6 +71,8 @@ def validate_outdoor_layout(layout, known_trackers=None):
         groups = layout["tracker_groups"]
         if not isinstance(groups, list) or len(groups) > MAX_GROUPS:
             return f"tracker_groups must be a list of at most {MAX_GROUPS} groups"
+        outputs = {f"bps_group_{g['id']}" for g in groups
+                   if isinstance(g, dict) and isinstance(g.get("id"), str) and SLUG.fullmatch(g["id"])}
         identifiers = set()
         for group in groups:
             if not isinstance(group, dict):
@@ -84,7 +89,6 @@ def validate_outdoor_layout(layout, known_trackers=None):
             if not isinstance(beacons, list) or not 1 <= len(beacons) <= MAX_BEACONS_PER_GROUP:
                 return f"Groups need 1–{MAX_BEACONS_PER_GROUP} beacon slugs"
             if any(not isinstance(b, str) or not SLUG.fullmatch(b) or (
-                    known_trackers is not None and b.startswith("bps_group_")
-                    and b not in known_trackers) for b in beacons):
+                    known_trackers is not None and b in outputs and b not in known_trackers) for b in beacons):
                 return "Groups must reference individual BPS tracker slugs"
     return None

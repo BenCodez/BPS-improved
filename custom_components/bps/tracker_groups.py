@@ -44,7 +44,8 @@ def normalize_groups(layout, known_trackers=None):
     All groups require Outdoor Tracking. Missing beacon references are retained
     for truthful ``reporting/total`` diagnostics and recovery when they return.
     ``known_trackers`` prevents generated IDs colliding with real trackers and
-    identifies genuine beacons whose names happen to use the group prefix.
+    identifies genuine beacons that conflict with a configured group output.
+    Unknown members remain valid unless they reference a configured group.
     Duplicate IDs and malformed entries are skipped; enabled defaults to true.
     """
     if not isinstance(layout, Mapping):
@@ -56,6 +57,8 @@ def normalize_groups(layout, known_trackers=None):
     if not isinstance(entries, list):
         return []
     known = set(known_trackers or ())
+    outputs = {f"bps_group_{e['id']}" for e in entries[:MAX_GROUPS]
+               if isinstance(e, Mapping) and _slug(e.get("id"))} - known
     seen = set()
     result = []
     for entry in entries[:MAX_GROUPS]:
@@ -71,7 +74,7 @@ def normalize_groups(layout, known_trackers=None):
             continue
         beacons = list(dict.fromkeys(b for b in members if _slug(b)))
         # Groups cannot refer to other group outputs (including themselves).
-        if not beacons or any(b.startswith("bps_group_") and b not in known for b in beacons):
+        if not beacons or any(b in outputs for b in beacons):
             continue
         name = entry.get("name", group_id)
         if not isinstance(name, str) or not name.strip():

@@ -326,3 +326,24 @@ def test_disabled_ha_group_entity_can_be_deleted_without_live_hass(platform):
     asyncio.run(sync([]))
     assert eid not in registry.entities
     assert eid not in hass.data["bps_sensors"]
+
+
+def test_missing_prefixed_beacon_keeps_group_registry_identity(platform, monkeypatch):
+    import bps
+    hass, registry, module, add, added = platform
+    monkeypatch.setattr(bps, "apitricords", [])
+    monkeypatch.setattr(bps, "tracked_entities", [])
+    hass.data.setdefault("bps", {})["layout"] = {"floor": [], "outdoor_tracking": {"enabled": True},
+        "tracker_groups": [{"id": "rover", "name": "Rover", "beacons": ["bps_group_beacon"]}]}
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    entities = {key: value for key, value in registry.entities.items() if key.startswith("sensor.bps_group_")}
+    initial_additions = len(added)
+    assert len(entities) == 2
+    entities["sensor.bps_group_rover_bps_zone"].name = "My dog's zone"
+    for sensors in (["sensor.bps_group_beacon_distance_to_p0"], [],
+                    ["sensor.bps_group_beacon_distance_to_p0"]):
+        monkeypatch.setattr(bps, "tracked_entities", sensors)
+        asyncio.run(bps.update_tracker_groups(hass))
+        assert all(registry.entities[key] is entity for key, entity in entities.items())
+    assert registry.entities["sensor.bps_group_rover_bps_zone"].name == "My dog's zone"
+    assert registry.removed == [] and len(added) == initial_additions
