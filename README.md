@@ -1,9 +1,29 @@
 ![BPS Logo](img/icon.png)
 
-# BLE Positioning System (BPS) — enhanced fork
+# BLE Positioning System (BPS) — BenCodez fork
 
-This is a fork of [**Hogster/BPS**](https://github.com/Hogster/BPS) that adds a
-large set of features and fixes on top of the original.
+I'm forking [**maxi1134/BPS-improved**](https://github.com/maxi1134/BPS-improved)
+as [**BenCodez/BPS-improved**](https://github.com/BenCodez/BPS-improved) to improve
+outdoor dog tracking while keeping the existing BPS setup working. It builds on
+maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hogster/BPS).
+
+Quick list of changes in this fork:
+
+- Optional outdoor tracking with buildings, trees, and a **Metal / reflective**
+  material for shops; these areas adjust measurement trust.
+- Multiple beacons for one dog: one fused main icon plus small, subdued numbered
+  icons showing each beacon's estimated position in the panel and Lovelace card.
+- Estimated uncertainty, stale-fix styling, receiver trust controls, and
+  diagnostics explaining beacon disagreement and possible reflection risk.
+- Diagnostic recordings and known-position tests, with an offline accuracy
+  report to help identify improvements using measurements from your property.
+- Existing BPS storage, individual beacon sensors, calibration, and history are
+  preserved; outdoor changes are opt-in and do not automatically retune calibration.
+
+The feature work is currently in [PR #1](https://github.com/BenCodez/BPS-improved/pull/1).
+Until it is included in a release, installing the default branch will not include
+these new features. The sections below also document features inherited from
+maxi1134's fork.
 
 **New here?** Read the upstream project first — this fork does not repeat it:
 
@@ -17,6 +37,7 @@ Everything in the upstream docs still applies. This README documents **only what
 this fork changes or adds**.
 
 Full credit for the original integration goes to [@Hogster](https://github.com/Hogster),
+to [@maxi1134](https://github.com/maxi1134) for the improved BPS fork,
 and to [@agittins](https://github.com/agittins) for [Bermuda](https://github.com/agittins/bermuda),
 which BPS builds on.
 
@@ -40,9 +61,11 @@ The setup panel
 - [Pre-populated receiver picker](#pre-populated-receiver-picker) — pick receivers from a searchable list instead of typing names.
 - [Offline receivers](#offline-receivers) — dead proxies are flagged red in the panel, updating live.
 - [Debugging tab](#debugging-tab) — a live view of how every receiver and beacon links to Bermuda, to untangle naming mismatches and quiet nodes.
+- [Diagnostic recordings](#diagnostic-recordings) — export receiver readings and known-position tests for accuracy analysis.
 
 Accuracy
 - [Receiver auto-calibration](#receiver-auto-calibration) — the probes calibrate each other, continuously.
+- [Outdoor dog tracking](#outdoor-dog-tracking) — optional obstruction-aware weighting, estimated uncertainty, and multi-beacon tracker groups.
 - [Kalman position smoothing](#kalman-position-smoothing) — a motion-aware filter replaces the fixed moving average: less lag when walking, steadier when still.
 - [Trilateration visualization](#trilateration-visualization) — see the distance circles that place each device.
 - [Trace path](#trace-path) — replay the route a tracked device took during the session, faded by age.
@@ -56,15 +79,63 @@ The Lovelace card
 
 ## Installation
 
-Install this fork through HACS as a custom repository:
+This repository is configured for HACS release downloads using a `bps.zip`
+asset. A release containing the feature branch must be published before these
+changes are available through HACS; a prerelease can do that without merging
+the PR. At the time of this PR, this fork has no published releases.
+
+Once a release is available, install this fork through HACS as a custom repository:
+
+For a **new installation**:
 
 1. HACS → **Integrations** → ⋮ → **Custom repositories**.
-2. Repository: `maxi1134/BPS-improved`, Category: `Integration`. Click **Add**.
+2. Repository: `BenCodez/BPS-improved`, Category: `Integration`. Click **Add**.
 3. Install **BLE Positioning System**, restart Home Assistant, then add the
    integration under **Settings → Devices & Services → Add Integration → BPS**.
 
 Configure which Bluetooth devices to track through Bermuda, exactly as in the
 upstream docs.
+
+### Replacing an existing BPS installation
+
+**This fork replaces the existing BPS code; it is not a second integration.**
+It uses the same `bps` domain and configuration entry, layout/calibration storage
+keys, and history location. An existing BPS setup should be reused after restart.
+Older flat-file layouts and calibration data use the existing migration path.
+
+Take a full Home Assistant backup and obtain the replacement files before
+switching. **Keep the existing BPS entry in Settings → Devices & Services**;
+do not delete it or add another BPS entry. Keep `.storage` and `www/bps_maps`
+intact as well.
+
+**HACS replacement:** HACS can display **Integration is configured** and tell
+you to delete its configuration first. That would work against retaining your
+existing setup. In current HACS, the dialog offers **Ignore** as well as
+navigation to Integrations. If your version has **Ignore**, choose it, then
+confirm removal of the older HACS download and install this fork's release
+before restarting Home Assistant. HACS removes the downloaded component files;
+this path keeps the Home Assistant BPS configuration entry. If your HACS UI
+requires deleting that entry and provides no **Ignore** option, use the manual
+replacement below instead.
+
+**Manual replacement:** Leave HACS and the BPS configuration entry in place.
+Replace only the code directory at `config/custom_components/bps` with this
+fork's `custom_components/bps` directory. The feature branch can be downloaded
+as a source ZIP while the PR is unmerged. A release's `bps.zip` contains the
+component files directly; extract those into `config/custom_components/bps`,
+without an extra nested `bps` directory. Complete the replacement before
+restarting Home Assistant.
+
+After either path, restart Home Assistant, refresh the BPS panel/dashboard
+browser cache, and verify existing entities, maps, receivers, calibration, and
+history. Leave Outdoor Tracking off initially, then enable it when ready.
+
+After the HACS replacement, use `BenCodez/BPS-improved` for updates. A manual
+replacement does **not** change the repository HACS manages: do not update BPS
+from the older HACS repository, or it will overwrite this fork. Manage subsequent
+updates manually until you can switch the HACS source while retaining the BPS
+entry. Compatibility is covered by automated tests, but replacement on a live
+Home Assistant installation still needs verification.
 
 ### SciPy dependency
 
@@ -152,6 +223,127 @@ BPS used to stop producing data after a full restart until you manually
 reloaded the integration. The sensors are now recreated correctly on boot even
 when their registry entries survived an unclean shutdown, and BPS cancels its
 background tasks promptly at shutdown so restarts stay clean.
+
+## Outdoor dog tracking
+
+Outdoor Tracking is an optional extension for outdoor maps and multi-beacon
+trackers. It defaults to **off**; existing layouts without its settings keep
+using the normal BPS solve and Bermuda `sensor.<tracker>_distance_to_<receiver>`
+inputs. Bermuda remains required and no Sextant migration or Bermuda changes are
+needed. Enabling it does not change the existing beacon trackers or their
+entities.
+
+Open **Map & Setup → Outdoor tracking: trees, buildings & dog groups** and
+enable the feature. Select a saved floor and click **Add building** or **Add
+trees**. Click at least three corners on the map, name the shape, press **✓
+Save**, then **Save Floor Plan**. Use **Environment type → Light vegetation**
+or **Custom** with **Draw environment polygon** for other areas. Click a saved
+shape's name to edit it, or **×** to delete it. Building polygons also have
+a material classification: **Unknown**, **Light**, **Heavy**, or **Metal / reflective (shop)**.
+These are conservative starting weights, not universal dB values. BPS examines
+the receiver-to-fix path: for example, an indoor receiver reaching outdoors can
+cross one building boundary, while a path through a building can cross two.
+Indoor receivers remain usable; set a receiver override to **Auto**, **Normal**,
+**Prefer**, **Deprioritize**, or **Ignore for positioning** only when useful.
+Auto is the default. Vegetation reduces trust modestly and never invalidates a
+reading by itself.
+
+Environment data is stored with the floor as `environment` polygons, each with
+an `id`, `name`, `type`, `material`, and `points` array of `{x, y}` map
+coordinates. Each floor supports up to 128 environment polygons; the editor
+rejects another polygon at capacity while allowing existing ones to be edited.
+Outdoor settings are stored under `outdoor_tracking`:
+
+```json
+{
+  "outdoor_tracking": {
+    "enabled": false,
+    "show_uncertainty": true,
+    "hide_uncertainty_below_m": 0
+  }
+}
+```
+
+The environmental model changes how much BPS trusts a measurement; it does not
+rewrite Bermuda's measured distance or the receiver's calibration correction.
+The optional diagnostics show measured and corrected distances separately,
+reading age, path classification, boundary crossings, and reliability. For a
+metal building path, `reflection_risk` flags possible multipath. It does not
+predict reflected rays, and a nearby clear path around a metal building is not
+marked as a reflection risk.
+
+When enabled, BPS can draw an **estimated uncertainty** circle around a fix.
+Its radius is a conservative heuristic using factors such as receiver geometry,
+residual, reading freshness, and path reliability. It is useful as a relative
+quality cue, but it is not a guaranteed confidence interval or GPS-like accuracy
+radius. The circle can be hidden globally or below a configured metre threshold
+from 0 to 10,000 metres.
+Stale last-known fixes have a distinct dashed grey circle. Distances are in
+metres; circle radii use the floor's pixels-per-metre scale before zooming.
+
+To represent one dog with multiple beacons, use the **Dog / tracker group**
+controls to give a group a name and stable ID and select its Bermuda tracker
+slugs. A layout supports up to 32 groups, with up to 16 beacons per group;
+group IDs and beacon slugs use 1–64 lowercase letters, digits or underscores.
+Choose an ID whose `bps_group_<id>` does not match an existing beacon. The
+editor prevents creating or enabling a conflicting group, and the server checks
+current tracker IDs on every group save; disable/delete a
+conflicting saved group and recreate it with another ID. Real Bermuda beacons
+whose slugs start with `bps_group_` can still be members; generated group
+positions cannot be used as members. A temporarily missing member remains
+configured and counted in the total, including a real beacon with that prefix.
+The group produces additional zone and floor sensors; the original
+beacon trackers and their sensors remain available. BPS combines their existing
+position fixes using estimated quality, and reports beacon count, disagreement,
+and fusion confidence as attributes. It does not combine raw BLE or Bermuda
+measurements. A group only combines fixes on the same floor; stale or unavailable
+beacons do not produce a fix, and disagreement lowers confidence instead of
+being hidden by an unconditional average. Select the group in the existing
+Tracking picker to display it on the map.
+
+The panel and Lovelace card keep one main group icon and show small, subdued
+numbered icons at each member beacon's estimated position on that floor.
+Numbers follow the saved group's beacon order, so beacon 2 stays 2 when beacon
+1 is unavailable. Member icons are 30% of the main icon size, capped at 24 canvas
+pixels (also capped under panel zoom), without extra name labels or animation.
+Stale or excluded member fixes appear grey and faded. Enable diagnostics for
+member names, uncertainty circles, and connecting lines; those extras stay hidden
+during normal tracking. Overlapping member icons sit underneath the main icon.
+
+With `reading_max_age: 0`, the receiver reading-age gate is disabled for ordinary
+outdoor fixes and groups. Map freshness then follows the last position solve and
+`position_timeout` (300 seconds by default). Re-fusing a retained position does
+not refresh its timestamp. Original measurement observation timestamps remain
+available for diagnostics. Positive reading-age cutoffs continue using the source
+measurement observation time.
+
+Group history dates the published fused result, so a position or zone change
+caused by an expiring member reaches the time scrubber without waiting for a
+new observation. The usual history movement, interval, and heartbeat gates
+still apply; API observation timestamps retain the source age.
+
+Group sensors are `sensor.bps_group_<id>_bps_zone` and
+`sensor.bps_group_<id>_bps_floor`, with the fused pixel position, uncertainty,
+receiver count, beacon count, disagreement and observation time in attributes.
+Unchanged group results do not write sensor states on every poll. Sensor
+attributes retain source timestamps; live ages are derived in the API/UI.
+The sensor unique IDs follow the stable group ID, so keep that ID when renaming
+the dog. Disable or delete a group to remove its additional sensors.
+The panel and card clear a group's marker and diagnostics when a successful
+position snapshot no longer contains it, including when all member fixes
+expire. Network failures retain the last-known fix with stale styling.
+
+Constants in `environment.py`, `uncertainty.py` and `tracker_groups.py` are
+centralized starting heuristics for later tuning from property recordings.
+Geometry is cached until the polygon definitions change. Outdoor tracking runs
+in HA's executor and performs at most two solves per candidate floor; a clear,
+fresh path needs only the original solve. No battery/solar entities are required,
+and the existing reading-age cutoff still excludes stale receiver measurements.
+
+Zone boundaries still follow the existing BPS position pipeline. Make zones
+cover the traversable land you want the published position to occupy: positions
+outside configured zones may be snapped to the nearest zone, just as in normal
+BPS tracking.
 
 ---
 
@@ -378,6 +570,70 @@ not reporting right now; the Debugging tab is where the full per-entity detail
 lives.)
 
 ---
+
+## Diagnostic recordings
+
+Open **BPS → Debugging → Diagnostic recording**, click **Load trackers / refresh**,
+choose an original Bermuda tracker or an enabled dog group, and start a 5, 10,
+or 30 minute recording. A group records its constituent beacons as well as the
+fused result. Membership is fixed at recording start: editing a group's beacon
+list does not switch the session's subjects. Start a new recording to capture
+the updated membership. Its original tags continue recording if the group or Outdoor
+Tracking is disabled during the session, allowing comparisons. Recording works
+with Outdoor Tracking enabled or disabled.
+It never applies corrections or changes tracking, layout, or calibration.
+
+For useful accuracy evidence:
+
+1. Save the receiver positions, map scale, and environment polygons first.
+2. Keep the actual collar still at a measured location. Enter its floor and
+   **X/Y in metres from the map's top-left corner** (right/down), and click
+   **Mark known position**. Leave it there for 30–60 seconds.
+3. Click **Clear known position before moving**. Repeat at several locations:
+   open yard, near the metal shop, behind a building, and among trees. Add notes
+   for collar orientation, doors, weather, or an observed jump. Walking without
+   a known-position marker still records useful availability and route data.
+4. Stop and **Download recording**. Attach `bps-diagnostics.json` when asking
+   for a diagnosis or improvements. Include what looked wrong and when.
+
+The authenticated export includes raw Bermuda distance states and units,
+normalised/corrected ranges, reading timestamps/ages, missing/stale/invalid
+readings, receiver heights and corrections, tracker power trims, original and
+group fixes, pre-filter coordinates, exact published solver radii, outdoor
+weights/classifications/reflection flags, calibration results/state/pair counts,
+offline receivers, notes, and known-position intervals. Configuration versions
+are retained when geometry or calibration changes during recording. Map images,
+icons, HA tokens, and unrelated entity states are not included. Sensor snapshots
+and previously published fixes keep separate timestamps: a poll does not claim
+to be an atomic solve or a BLE/RSSI packet capture.
+
+Capture is **off by default** and adds no sampling task until started. Samples
+are taken about every two seconds, with limits of 30 minutes, 16 MiB of encoded
+data, 128 receiver placements, and 16 constituent beacons (API: up to eight
+selected tracker keys). Limits or failures stop recording while preserving
+previous frames. Data stays in memory, survives a BPS reload, and is lost on an
+HA restart. Download before starting another recording, which replaces the old
+one. **Clear recording** removes the buffered data. The file contains property
+geometry, tracker identifiers, and location history; share it deliberately.
+
+For an offline report, run on any machine with Python 3:
+
+```sh
+python3 tools/bps_diagnose.py bps-diagnostics.json --out diagnosis.json
+```
+
+The report shows receiver availability, known-position range bias, wrong-floor
+fixes, raw versus filtered median/p95 error, and empirical uncertainty coverage.
+Unchanged fixes/readings are deduplicated for error measurements. Cached/future
+observations and fixes from before a known-position marker are excluded. A
+group's timestamps are checked against its recorded original fixes. After a
+layout/calibration context change, contributing measurements and receiver samples
+must be observed at or after the first frame with that context, even if an older
+reading was reused in a newly published solve. Without valid known-position
+samples, accuracy metrics are `null`; availability still helps diagnose failures.
+This evidence can guide receiver placement, height/scale corrections, path
+weighting, or calibration work. Bias can also reflect wrong map geometry or
+collar height, so the analyser does not automatically change calibration.
 
 ## Receiver auto-calibration
 

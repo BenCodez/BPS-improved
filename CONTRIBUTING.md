@@ -52,14 +52,21 @@ From the repository root:
 
 ```console
 $ pip install -r requirements_test.txt
-$ pytest tests/ -q
+$ python -m pytest tests/ -q
 ```
 
-CI runs the same suite plus a byte-compile of the integration and a
+In the prepared cloud environment, use `/workspace/bps-venv/bin/python`.
+Run frontend tests with Node's built-in runner as well:
+
+```console
+$ node --test tests/frontend/*.test.cjs
+```
+
+CI runs both suites plus a byte-compile of the integration and a
 `node --check` of the frontend on every push and pull request
 (`.github/workflows/test.yaml`), alongside Hassfest/HACS validation
 (`.github/workflows/validate.yaml`). Please keep the suite green and add tests
-for new positioning, calibration, or election logic.
+for new positioning, calibration, election, or environment-aware tracking logic.
 
 For end-to-end testing in a running Home Assistant, the
 [integration_blueprint template](https://github.com/custom-components/integration_blueprint)

@@ -6,6 +6,8 @@ from homeassistant.helpers.entity import DeviceInfo
 import logging
 
 from .const import ACCURACY_ENTITY_ID  # single source of truth (shared with __init__)
+from .storage import get_bps_data
+from .tracker_groups import normalize_groups
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -181,6 +183,16 @@ class BPSAccuracySensor(SensorEntity):
         return self._attrs
 
 
+class BPSGroupSensor(CustomDistanceSensor):
+    """Buffer group updates until HA has finished scheduling registration."""
+
+    _bps_group_pending = True
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        self._bps_group_pending = False
+
+
 def cleanup_legacy_bps_entities(hass):
     """Remove old duplicated-name BPS entities from entity registry."""
     entity_registry = er.async_get(hass)
@@ -295,6 +307,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             for entry in entity_registry.entities.values()
             if entry.platform == "bps" and entry.entity_id not in expected_entity_ids
             and entry.entity_id != ACCURACY_ENTITY_ID  # keep the global diagnostic
+            and not str(entry.unique_id).startswith("bps_group_")
         ]
         for entity_id in stale_bps_ids:
             _LOGGER.info("Removing stale BPS registry entity: %s", entity_id)
@@ -312,6 +325,104 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     if new_sensors:
         async_add_entities(new_sensors, update_before_add=True)
         normalize_bps_registry_entity_ids_from_cache(hass)
+
+    group_signature = None
+
+    async def sync_group_sensors(groups):
+        """Own only group entities; preserve the original per-beacon registry."""
+        nonlocal group_signature
+        signature = tuple((g["id"], g["name"]) for g in groups)
+        if signature == group_signature:
+            return
+        cache = hass.data.get("bps_sensors")
+        if cache is None:
+            return
+        expected = {f"bps_group_{kind}_{g['id']}" for g in groups for kind in ("zone", "floor")}
+        registry = er.async_get(hass)
+        stale = [e for e in registry.entities.values()
+                 if e.platform == "bps" and str(e.unique_id).startswith(("bps_group_zone_", "bps_group_floor_"))
+                 and e.unique_id not in expected]
+        retired_devices = {entry.device_id for entry in stale if entry.device_id}
+        retired_identifiers = {("bps", "bps_group_" + str(entry.unique_id)[len(prefix):])
+                               for entry in stale for prefix in ("bps_group_zone_", "bps_group_floor_")
+                               if str(entry.unique_id).startswith(prefix)}
+        for entry in stale:
+            owned = [(key, sensor) for key, sensor in cache.items()
+                     if sensor.unique_id == entry.unique_id]
+            for key, sensor in owned:
+                cache.pop(key, None)
+                # HA aborts addition for disabled registry entries and clears
+                # entity.hass. Such cached objects have no live entity to remove.
+                if getattr(sensor, "hass", None) is not None:
+                    await sensor.async_remove()
+            registry.async_remove(entry.entity_id)
+        additions = []
+        if stale:
+            # A newly discovered real beacon may have been blocked by the
+            # group's zone/floor cache IDs. Reclaim those sensors after their
+            # former owner is removed; ordinary value updates do not discover
+            # sensors again. This scan only runs when groups are retired.
+            positions = {p["ent"]: p for p in hass.data.get("bps", {}).get("apitricords", [])
+                         if not p.get("group")}
+            for entity in get_filtered_entities(hass):
+                ensure_sensors_for_entity(hass, entity, cache, additions)
+                position = positions.get(entity)
+                if position is not None:
+                    # The real beacon may already have solved before this
+                    # ownership handoff. Buffer its fix for the initial HA
+                    # write instead of waiting for another successful solve.
+                    for kind in ("zone", "floor"):
+                        sensor = cache.get(f"sensor.{entity}_bps_{kind}")
+                        if sensor in additions:
+                            sensor._state = position.get(kind, "unknown")
+        for group in groups:
+            ent = "bps_group_" + group["id"]
+            device_name = f"{group['name']} (BPS group)"
+            for kind in ("zone", "floor"):
+                eid = f"sensor.{ent}_bps_{kind}"
+                label = f"{group['name']} BPS {kind.title()}"
+                if eid in cache:
+                    sensor = cache[eid]
+                    renamed = sensor._attr_name != label
+                    sensor._name = sensor._attr_name = label
+                    sensor._attr_device_info["name"] = device_name
+                    if renamed and getattr(sensor, "hass", None) is not None and not getattr(sensor, "_bps_group_pending", False):
+                        # A no-fix group stays unknown with empty attributes;
+                        # the value-change gate will not publish its new name.
+                        sensor.async_write_ha_state()
+                    continue
+                sensor = BPSGroupSensor(label, f"bps_group_{kind}_{group['id']}", eid, ent)
+                sensor._attr_device_info["name"] = device_name
+                cache[eid] = sensor
+                additions.append(sensor)
+            device_registry = dr.async_get(hass)
+            device = device_registry.async_get_device(identifiers={("bps", ent)})
+            if device is not None and device.name != device_name:
+                # Preserve the device ID and any user-assigned name override.
+                device_registry.async_update_device(device.id, name=device_name)
+        if additions:
+            async_add_entities(additions, update_before_add=True)
+            normalize_bps_registry_entity_ids_from_cache(hass)
+        device_registry = dr.async_get(hass)
+        for device_id in retired_devices:
+            device = device_registry.async_get(device_id)
+            if device is None or not device.identifiers & retired_identifiers:
+                continue
+            if any(entry.device_id == device_id for entry in registry.entities.values()):
+                continue
+            # AddEntitiesCallback may still be registering reclaimed beacon
+            # entities. Their cached DeviceInfo also owns this device already.
+            if any(set(getattr(sensor, "_attr_device_info", {}).get("identifiers", ())) & device.identifiers
+                   for sensor in cache.values()):
+                continue
+            device_registry.async_remove_device(device_id)
+        group_signature = signature
+
+    hass.data.setdefault("bps", {})["sync_group_sensors"] = sync_group_sensors
+    # Backend setup loads the Store after forwarding the sensor platform.
+    # Defer reconciliation until that load: an empty cache is not deletion.
+    if "layout" in hass.data.get("bps", {}):
+        await sync_group_sensors(normalize_groups(get_bps_data(hass), known_trackers=entities))
 
     @callback
     def state_changed_listener(event):

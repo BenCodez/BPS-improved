@@ -21,6 +21,7 @@ from pathlib import Path
 import aiofiles
 import aiofiles.os
 from homeassistant.helpers.storage import Store
+from .outdoor_config import validate_outdoor_layout
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -97,6 +98,13 @@ async def load_bps_data(hass):
         _LOGGER.error("Could not load layout from storage; starting empty: %s", e)
         data = None
     _bucket(hass)["layout"] = data if data is not None else []
+    floors = data.get("floor", []) if isinstance(data, dict) else []
+    floors = floors if isinstance(floors, list) else []
+    if isinstance(data, dict) and ("outdoor_tracking" in data or "tracker_groups" in data
+                                  or any(isinstance(f, dict) and "environment" in f for f in floors)):
+        error = await hass.async_add_executor_job(validate_outdoor_layout, data)
+        if error:
+            _LOGGER.warning("Invalid optional outdoor configuration: %s; malformed fields are ignored", error)
     return _bucket(hass)["layout"]
 
 

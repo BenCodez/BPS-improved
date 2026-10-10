@@ -23,3 +23,7 @@ jobs:
         uses: "hacs/action@main"
         with:
           category: "integration"
+          # This development fork has no Issues/topics publication metadata.
+          # The integration token cannot administer repository settings. Keep
+          # every integration check; upstream still validates all metadata.
+          ignore: ${{ github.repository == 'BenCodez/BPS-improved' && 'issues topics' || '' }}

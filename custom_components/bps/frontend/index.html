@@ -321,6 +321,39 @@
                     <!-- Naming-mismatch warnings (issue #64): placed receivers with no
                          Bermuda sensor, and scanners reporting a distance but unplaced. -->
                     <div id="scannerissues"></div>
+                    <details id="outdoorEditor" class="bps-outdoor-editor">
+                        <summary>Outdoor tracking: trees, buildings &amp; dog groups</summary>
+                        <p class="bps-hint">Optional. Changes are persisted with Save Floor Plan. Environment shapes change measurement trust, not distance.</p>
+                        <label class="bps-switch"><input type="checkbox" id="outdoorEnabled"><span>Enable Outdoor Tracking</span></label>
+                        <div id="outdoorControls" hidden>
+                            <label class="bps-switch"><input type="checkbox" id="outdoorUncertainty"><span>Show estimated uncertainty</span></label>
+                            <label class="bps-label" for="outdoorThreshold">Hide circle below (metres)</label>
+                            <input id="outdoorThreshold" type="number" min="0" max="10000" step="0.1" class="bps-input" value="0">
+                            <label class="bps-switch"><input type="checkbox" id="outdoorDiagnostics"><span>Show tracking diagnostics</span></label>
+                            <p class="bps-hint">Estimated uncertainty is a heuristic radius, not a guaranteed confidence interval. Grey dotted circles mark stale fixes.</p>
+                            <p class="bps-hint">Select a saved floor, add a building or tree area, click at least three corners on the map and name the shape. Press ✓ Save, then Save Floor Plan.</p>
+                            <button type="button" id="addBuilding" class="bps-btn bps-btn-outline">Add building</button>
+                            <button type="button" id="addTrees" class="bps-btn bps-btn-outline">Add trees</button>
+                            <label class="bps-label" for="environmentType">Environment type</label>
+                            <select id="environmentType" class="bps-input"><option value="building">Building</option><option value="dense_trees">Dense trees</option><option value="light_vegetation">Light vegetation</option><option value="custom">Custom</option></select>
+                            <label class="bps-label" for="environmentMaterial">Building material</label>
+                            <select id="environmentMaterial" class="bps-input" title="Obstruction / multipath risk; changes trust, not distance."><option value="unknown">Unknown</option><option value="light">Light</option><option value="heavy">Heavy</option><option value="metal">Metal / reflective (shop)</option></select>
+                            <button type="button" id="drawEnvironment" class="bps-btn bps-btn-outline">Draw environment polygon</button>
+                            <div id="environmentList"></div>
+                            <label class="bps-label" for="outdoorReceiver">Receiver override</label>
+                            <select id="outdoorReceiver" class="bps-input"></select>
+                            <select id="outdoorPolicy" class="bps-input" aria-label="Outdoor receiver policy"><option value="auto">Auto</option><option value="normal">Normal</option><option value="prefer">Prefer</option><option value="deprioritize">Deprioritize</option><option value="ignore">Ignore for positioning</option></select>
+                            <pre id="outdoorDiagnosticText" class="bps-outdoor-diagnostics" hidden></pre>
+                        </div>
+                        <label class="bps-label" for="groupSelector">Dog / tracker group</label>
+                        <select id="groupSelector" class="bps-input"><option value="">New group</option></select>
+                        <label class="bps-label" for="groupName">Name</label><input id="groupName" class="bps-input" placeholder="Rover">
+                        <label class="bps-label" for="groupId">Stable ID</label><input id="groupId" class="bps-input" placeholder="rover" maxlength="64" pattern="[a-z0-9_]{1,64}">
+                        <label class="bps-label" for="groupBeacons">Beacons (select multiple)</label><select id="groupBeacons" class="bps-input" multiple size="4"></select>
+                        <label class="bps-switch"><input id="groupEnabled" type="checkbox" checked><span>Enable group</span></label>
+                        <div class="bps-btnrow"><button type="button" id="saveGroup" class="bps-btn bps-btn-outline">Apply group</button><button type="button" id="deleteGroup" class="bps-btn bps-btn-outline">Delete group</button></div>
+                        <p class="bps-hint">Up to 32 groups, 16 beacons per group, and 64 characters per ID. Original beacon trackers remain available. Apply group, Save Floor Plan, then add the group from the Tracking picker.</p>
+                    </details>
                     <!-- Compact "not reporting" heads-up (issue #64): placed receivers on
                          this floor that are linked but have no distance right now (names
                          only). Full per-entity linking detail lives in the Debugging tab. -->
@@ -377,6 +410,32 @@
         <!-- ============================ DEBUGGING ============================ -->
         <section class="bps-tabpanel" data-tabpanel="debugging">
             <div class="bps-card">
+                <h3>Diagnostic recording</h3>
+                <p>Record a tracker or dog group to investigate poor accuracy. Includes receiver readings, positions, map geometry, and calibration settings. Tracking and calibration continue as usual.</p>
+                <p>Recordings stay in memory until restart. Download before starting another recording. The file contains your property layout and location history.</p>
+                <div class="bps-field"><label for="diagnosticTarget">Tracker</label><select id="diagnosticTarget"></select></div>
+                <div class="bps-field"><label for="diagnosticDuration">Duration</label><select id="diagnosticDuration"><option value="600">10 minutes</option><option value="300">5 minutes</option><option value="1800">30 minutes</option></select></div>
+                <div class="bps-btn-row">
+                    <button type="button" id="diagnosticRefresh" class="bps-btn bps-btn-outline">Load trackers / refresh</button>
+                    <button type="button" id="diagnosticStart" class="bps-btn bps-btn-primary">Start recording</button>
+                    <button type="button" id="diagnosticStop" class="bps-btn bps-btn-outline" disabled>Stop</button>
+                    <button type="button" id="diagnosticDownload" class="bps-btn bps-btn-outline" disabled>Download recording</button>
+                    <button type="button" id="diagnosticClear" class="bps-btn bps-btn-outline" disabled>Clear recording</button>
+                </div>
+                <p id="diagnosticStatus" role="status">Load trackers to begin. Capture is off.</p>
+                <h4>Known-position markers</h4>
+                <p>For an accuracy measurement, keep the collar still at a measured location. Enter metres from the map's top-left corner: X to the right, Y downward. Mark the position, then clear it <strong>before moving</strong>. Keep each test location for 30–60 seconds.</p>
+                <div class="bps-field"><label for="diagnosticFloor">Known floor</label><select id="diagnosticFloor"></select></div>
+                <div class="bps-field"><label for="diagnosticX">Known X (m)</label><input id="diagnosticX" type="number" step="any"></div>
+                <div class="bps-field"><label for="diagnosticY">Known Y (m)</label><input id="diagnosticY" type="number" step="any"></div>
+                <div class="bps-field"><label for="diagnosticLabel">Marker / note</label><input id="diagnosticLabel" type="text" maxlength="240" placeholder="Near metal shop; collar facing north"></div>
+                <div class="bps-btn-row">
+                    <button type="button" id="diagnosticMark" class="bps-btn bps-btn-outline" disabled>Mark known position</button>
+                    <button type="button" id="diagnosticRelease" class="bps-btn bps-btn-outline" disabled>Clear known position</button>
+                    <button type="button" id="diagnosticNote" class="bps-btn bps-btn-outline" disabled>Add note</button>
+                </div>
+            </div>
+            <div class="bps-card">
                 <div class="bps-section-head">
                     <h3>Receiver linking</h3>
                     <span class="tooltip">❓
@@ -388,6 +447,8 @@
         </section>
     </div>
 
+    <script src="outdoor.js"></script>
+    <script src="diagnostics.js"></script>
     <script src="script.js"></script>
 </body>
 </html>
