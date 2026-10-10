@@ -87,6 +87,29 @@ def test_one_beacon_available_keeps_source_position_and_timestamp():
     assert result["outdoor"]["estimated_uncertainty_m"] == pytest.approx(3)
 
 
+def test_group_exposes_bounded_member_radius_breakdowns_without_changing_sources():
+    a, b = position(), position("beacon_b", x=115)
+    details = {"residual_m": 2, "unadjusted_residual_m": 5,
+               "noise_floor_m": 1.1, "geometry_factor": 3.6,
+               "effective_receivers": 2.4, "receiver_count_factor": 1.12,
+               "robust_downweighted_receivers": 8,
+               "pre_publication_uncertainty_m": 2.5, "publication_displacement_m": 1}
+    a["outdoor"].update(details)
+    a["outdoor"]["receiver_diagnostics"] = [{"receiver": "kitchen", "used": True}]
+    b["outdoor"].update({"residual_m": True, "noise_floor_m": float("nan"),
+                         "geometry_factor": -1, "effective_receivers": float("inf")})
+    before = copy.deepcopy(a)
+    result = fuse(a, b)
+    member_a, member_b = result["beacon_positions"]
+    assert member_a["uncertainty_details"] == details
+    assert "receiver_diagnostics" not in member_a
+    assert member_b["uncertainty_details"] == {}
+    # Payload remains JSON-safe even when a source's diagnostics are not.
+    json.dumps(result, allow_nan=False)
+    member_a["uncertainty_details"]["residual_m"] = 100
+    assert a == before
+
+
 def test_agreeing_beacons_improve_uncertainty_modestly():
     result = fuse(position(), position("beacon_b", x=115, uncertainty=4))
     assert 100 < result["cords"][0] < 115

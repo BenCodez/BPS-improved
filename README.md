@@ -15,6 +15,8 @@ Quick list of changes in this fork:
   icons showing each beacon's estimated position in the panel and Lovelace card.
 - Estimated uncertainty, stale-fix styling, receiver trust controls, and
   diagnostics explaining beacon disagreement and possible reflection risk.
+- Robust residual weighting for uncertainty circles, with each group member's
+  radius inputs and smoothing/clamping displacement visible in diagnostics.
 - Dedicated selectable group position entities and a stability check against brief BLE quality reversals.
 - Diagnostic recordings and known-position tests, with an offline accuracy
   report and a read-only comparison of tracking with proposed calibration corrections.
@@ -25,9 +27,11 @@ The initial outdoor features landed in [PR #1](https://github.com/BenCodez/BPS-i
 and release [1.0](https://github.com/BenCodez/BPS-improved/releases/tag/1.0).
 The group entity, visible map tools, per-wall materials and calibration comparison
 landed in [PR #2](https://github.com/BenCodez/BPS-improved/pull/2) and release
-[1.1](https://github.com/BenCodez/BPS-improved/releases/tag/1.1). The revised
-uncertainty calculation and one-circle-per-tracker behavior require a newer
-release containing those changes. The sections below also document features inherited from
+[1.1](https://github.com/BenCodez/BPS-improved/releases/tag/1.1). Release
+[1.1.1](https://github.com/BenCodez/BPS-improved/releases/tag/1.1.1) includes the
+range-weighted uncertainty calculation and one-circle-per-tracker behavior.
+The robust residual weighting and expanded member diagnostics described here
+require a subsequent release containing those changes. The sections below also document features inherited from
 maxi1134's fork.
 
 **New here?** Read the upstream project first — this fork does not repeat it:
@@ -85,10 +89,11 @@ The Lovelace card
 ## Installation
 
 This repository is configured for HACS release downloads using a `bps.zip`
-asset. Release 1.1 includes the group entity, map tools, per-wall materials and
-calibration comparison. The revised uncertainty calculation and single-circle
-behavior require a newer release; publishing a prerelease can make those
-changes available through HACS before merging the PR.
+asset. Release 1.1.1 includes the group entities, map tools, per-wall materials,
+calibration comparison and one-circle-per-tracker behavior. Robust residual
+weighting and expanded member diagnostics require a subsequent release;
+publishing a prerelease can make those changes available through HACS before
+merging the PR.
 
 Once a release is available, install this fork through HACS as a custom repository:
 
@@ -286,8 +291,10 @@ predict reflected rays, and a nearby clear path around a metal building is not
 marked as a reflection risk.
 
 When enabled, BPS can draw an **estimated uncertainty** circle around a fix.
-Its radius uses the solver's reliability / measured-range² weights for both
-residual and receiver geometry, with a range-dependent noise floor. Freshness
+Its radius uses the solver's reliability / measured-range² weights and soft-L1
+robust influence for both residual and receiver geometry, with a range-dependent
+noise floor. Conflicting readings lose influence consistently with the position
+fit rather than dominating an ordinary squared residual. Freshness
 and obstruction already affect reliability and are not multiplied in again;
 normal movement does not inflate the radius. Kalman lag and map clamping still
 add the measured raw-to-published displacement. It is useful as a relative
@@ -296,6 +303,13 @@ radius. The circle can be hidden globally or below a configured metre threshold
 from 0 to 10,000 metres.
 Stale last-known fixes have a distinct dashed grey circle. Distances are in
 metres; circle radii use the floor's pixels-per-metre scale before zooming.
+**Show tracking diagnostics** reports the residual before and after robust
+weighting, the number of readings downweighted by the robust loss, and the
+raw-to-published shift. For a group, the same breakdown appears for each beacon.
+This changes uncertainty estimates and consequently the quality weights used
+by group fusion; it does not change the individual position solver or calibrate
+the radius to a known physical error. Use a known-position diagnostic recording
+to measure actual accuracy and circle coverage on your property.
 
 To represent one dog with multiple beacons, use the **Dog / tracker group**
 controls to give a group a name and stable ID and select its Bermuda tracker

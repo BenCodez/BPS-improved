@@ -232,6 +232,23 @@ test('diagnostics explain measurement trust and fused beacon disagreement', () =
     assert.match(text, /2 beacons combined · beacon uncertainty 2.5 m · position spread 1.0 m/);
 });
 
+test('group diagnostics include robust residuals and publication shifts for each beacon', () => {
+    const details = {residual_m: 3, unadjusted_residual_m: 5, noise_floor_m: 1.1,
+        geometry_factor: 3.6, effective_receivers: 2.4, robust_downweighted_receivers: 8,
+        pre_publication_uncertainty_m: 12, publication_displacement_m: 2};
+    const text = out.diagnosticsText({group: true, beacon_positions: [null,
+        {ent: 'beacon_a', uncertainty_details: details},
+        {ent: 'beacon_b', uncertainty_details: {...details, residual_m: 4}},
+        {ent: 'legacy_beacon'}], outdoor: {estimated_uncertainty_m: 10}});
+    assert.match(text, /beacon_a: Radius inputs: weighted residual 3.0 m · noise floor 1.1 m · geometry ×3.6 · effective receivers 2.4/);
+    assert.match(text, /beacon_b: Robust weighting: residual before 5.0 m → after 4.0 m · 8 readings downweighted/);
+    assert.match(text, /beacon_a: Publication adjustment: radius before 12.0 m · raw-to-published shift 2.0 m/);
+    assert.doesNotMatch(text, /legacy_beacon: Radius inputs/);
+    const individual = out.diagnosticsText({outdoor: details});
+    assert.match(individual, /Robust weighting: residual before 5.0 m → after 3.0 m/);
+    assert.match(individual, /Publication adjustment: radius before 12.0 m/);
+});
+
 test('unknown prefixed beacon members survive missing inventory but configured groups cannot nest', () => {
     const layout = {tracker_groups: [{id: 'other', name: 'Other', enabled: false, beacons: ['beacon_a']}]};
     const group = {id: 'rover', name: 'Rover', beacons: ['bps_group_beacon']};

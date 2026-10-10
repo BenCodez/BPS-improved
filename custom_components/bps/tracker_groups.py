@@ -172,6 +172,12 @@ def _fix(beacon, position, scales, now, max_age_s, use_observation_age):
     return {"ent": beacon, "cords": [x, y], "floor": floor,
             "updated": updated, "observed": outdoor.get("observed", updated),
             "estimated_uncertainty_m": uncertainty,
+            "uncertainty_details": {key: value for key in (
+                "residual_m", "unadjusted_residual_m", "noise_floor_m",
+                "geometry_factor", "effective_receivers", "receiver_count_factor",
+                "robust_downweighted_receivers", "pre_publication_uncertainty_m",
+                "publication_displacement_m")
+                if (value := _number(outdoor.get(key))) is not None and value >= 0},
             "receivers_used": count, "age_s": age,
             "weight": reliability / uncertainty ** 2, "scale": scale,
             "receiver_ids": receiver_ids}

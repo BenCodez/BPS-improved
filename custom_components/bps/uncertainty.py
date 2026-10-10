@@ -10,12 +10,12 @@ Constants are centralized here so real property recordings can tune them.
 import math
 
 from .environment import MAX_COORDINATE_PX, finite_number
+from .solver_settings import MIN_WEIGHT_RADIUS_M, SOLVER_ROBUST_F_SCALE
 
 MAX_UNCERTAINTY_M = 10_000.0
 BASE_NOISE_M = 0.75
 RANGE_NOISE_FRACTION = 0.05
 REFERENCE_RECEIVERS = 3.0
-MIN_WEIGHT_RADIUS_M = 0.5
 NEGLIGIBLE_BEARING_WEIGHT_FRACTION = 0.05
 
 
@@ -103,7 +103,7 @@ def estimate_uncertainty(fix, weighted, scale, diagnostics, bounds=None, previou
               "geometry_factor": 8.0, "largest_bearing_gap_deg": 360.0,
               "near_bounds": False, "motion_m": 0.0,
               "reflection_risk_paths": 0,
-              "uncertainty_method": "solver_weighted_heuristic"}
+              "uncertainty_method": "robust_solver_weighted_heuristic"}
     samples = []
     if isinstance(weighted, (list, tuple)):
         for sample in weighted:
@@ -128,11 +128,21 @@ def estimate_uncertainty(fix, weighted, scale, diagnostics, bounds=None, previou
     minimum_range = min(ranges)
     weights = [s[3] / maximum_weight * (minimum_range / r) ** 2
                for s, r in zip(samples, ranges)]
+    residuals = [(math.hypot(s[0] - point[0], s[1] - point[1]) - s[2]) / pixels_per_metre
+                 for s in samples]
+    raw_rms = math.sqrt(sum(w * e * e for w, e in zip(weights, residuals)) / sum(weights))
+    # soft_l1's influence is rho'(z) = 1 / sqrt(1 + z), where
+    # z = (sqrt(reliability) * residual / weight_range / f_scale)^2.
+    # This is the equivalent reweighted least-squares influence at the fix,
+    # not SciPy's modified Hessian. Normalize after robust weighting, so a
+    # uniformly inconsistent set cannot become certain simply by losing mass.
+    robust = [1.0 / math.hypot(1.0, math.sqrt(s[3]) * e / r / SOLVER_ROBUST_F_SCALE)
+              for s, e, r in zip(samples, residuals, ranges)]
+    weights = [w * factor for w, factor in zip(weights, robust)]
     maximum_influence = max(weights)
     weights = [w / maximum_influence for w in weights]
     total_weight = sum(weights)
-    rms = math.sqrt(sum(w * (math.hypot(s[0] - point[0], s[1] - point[1]) - s[2]) ** 2
-                        for s, w in zip(samples, weights)) / total_weight) / pixels_per_metre
+    rms = math.sqrt(sum(w * e * e for w, e in zip(weights, residuals)) / total_weight)
     geometry_factor, gap = _geometry(point, [(*s[:3], w) for s, w in zip(samples, weights)])
     effective_count = total_weight ** 2 / sum(w * w for w in weights)
     # Three usable range constraints are the solver's minimum. Extra receivers
@@ -195,6 +205,9 @@ def estimate_uncertainty(fix, weighted, scale, diagnostics, bounds=None, previou
                   reading_age_s=mean_age, motion_m=motion, near_bounds=near_bounds,
                   noise_floor_m=noise_floor, reliability_factor=weight_factor,
                   receiver_count_factor=count_factor)
+    result.update(unadjusted_residual_m=raw_rms,
+                  robust_downweighted_receivers=sum(factor < 0.9 for factor in robust),
+                  solver_robust_f_scale=SOLVER_ROBUST_F_SCALE)
     return result
 
 
