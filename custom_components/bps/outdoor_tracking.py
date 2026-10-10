@@ -6,7 +6,8 @@ once. At most two solves are performed; a failed refinement retains the first.
 """
 import math
 
-from .environment import compile_environment, measurement_reliability, finite_number
+from .environment import (CompiledEnvironment, compile_environment,
+                          measurement_reliability, finite_number, report_geometry_failure)
 from .uncertainty import estimate_uncertainty
 
 
@@ -28,16 +29,29 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
     matching = receivers if len(weighted) == len(receivers) else usable
     if len(weighted) != len(matching):
         return None
+    max_age_s = finite_number(max_age_s, 30.0, minimum=0.0, maximum=1e6)
+
+    def excluded(rec):
+        age = finite_number(rec.get("_outdoor_reading", {}).get("reading_age_s"), minimum=0.0)
+        return rec.get("outdoor_policy") == "ignore" or (max_age_s > 0 and age is not None and age >= max_age_s)
+
     selected = [(pt, rec) for pt, rec in zip(weighted, matching)
-                if rec.get("outdoor_policy") != "ignore"]
+                if not excluded(rec)]
     if len(selected) < 3:
         return None
-    max_age_s = finite_number(max_age_s, 30.0, minimum=0.0, maximum=1e6)
     base = [pt for pt, _rec in selected]
     fix = solver(base, bounds=bounds, min_weight_radius=min_weight_radius)
     if fix is None:
         return None
-    environment = compile_environment(floor)
+    compilation_error = None
+    try:
+        environment = compile_environment(floor)
+    except Exception as error:
+        # Pure Python exceptions are recoverable. A failed environment must
+        # not prevent the existing range solver or freshness/policy handling.
+        report_geometry_failure(error)
+        compilation_error = type(error).__name__
+        environment = CompiledEnvironment(())
     diagnostics = []
     adjusted = []
     for pt, rec in selected:
@@ -47,6 +61,8 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
             age_s=reading.get("reading_age_s"), max_age_s=max_age_s,
             base_weight=pt[3],
         )
+        if compilation_error:
+            diagnostic.update(environment_error=compilation_error, classification="unknown")
         diagnostic.update({
             "receiver": rec.get("entity_id", ""),
             "measured_distance_m": reading.get("measured_distance_m"),
@@ -70,6 +86,10 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
         fix, base, scale, diagnostics, bounds=bounds, previous=previous,
     )
     quality["receiver_diagnostics"] = diagnostics
+    failures = sum("environment_error" in d for d in diagnostics)
+    if failures:
+        quality.update(environment_fallback=True, environment_error_receivers=failures,
+                       confidence="poor")
     quality["stale_after_s"] = max_age_s or finite_number(
         position_timeout_s, 300.0, minimum=0.0) or 300.0
     quality["use_observation_age"] = max_age_s > 0
@@ -82,11 +102,12 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
     # Preserve explicit exclusions in diagnostics, but never feed zero weights
     # into the normal solver or claim excluded receivers corroborate the fix.
     for rec in receivers:
-        if rec.get("outdoor_policy") == "ignore":
+        if excluded(rec):
             quality["receiver_diagnostics"].append({
                 "receiver": rec.get("entity_id", ""), "status": "excluded",
                 "used": False, "excluded": True,
-                "classification": "manual_ignore", "reliability_weight": 0.0,
+                "classification": "manual_ignore" if rec.get("outdoor_policy") == "ignore" else "stale",
+                "reliability_weight": 0.0,
                 "environmental_weight": 1.0, "building_crossings": 0,
                 **rec.get("_outdoor_reading", {}),
                 "corrected_distance_m": rec["distance"],

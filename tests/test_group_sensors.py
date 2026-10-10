@@ -182,6 +182,29 @@ def test_discovered_colliding_beacon_reclaims_group_zone_and_floor_sensors(platf
     assert hass.data["bps_sensors"][zone.entity_id] is zone
 
 
+def test_retained_discovery_listener_pauses_during_unload_and_resumes(platform, monkeypatch):
+    hass, registry, module, add, added = platform
+    listeners = {}
+    hass.bus.async_listen = lambda name, callback: listeners.update({name: callback}) or (lambda: None)
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    distance_id = "sensor.dog_distance_to_proxy"
+    registry.entities[distance_id] = types.SimpleNamespace(
+        entity_id=distance_id, unique_id="bermuda_distance", platform="bermuda", device_id=None)
+    hass.states.async_all = lambda: [types.SimpleNamespace(entity_id=distance_id)]
+    event = types.SimpleNamespace(data={"entity_id": distance_id, "old_state": None})
+    hass.data["bps"]["_tracking_active"] = False
+    before = len(added)
+    with monkeypatch.context() as paused:
+        paused.setattr(module, "get_filtered_entities", lambda _hass: pytest.fail("discovery during unload"))
+        listeners["state_changed"](event)
+    assert len(added) == before
+    hass.data["bps"]["_tracking_active"] = True
+    # The creation event will never recur; ordinary updates have old_state.
+    # Lifecycle recovery must explicitly reconcile the retained platform.
+    hass.data["bps"]["resume_sensor_discovery"]()
+    assert "sensor.dog_bps_zone" in hass.data["bps_sensors"]
+
+
 def test_renamed_registry_entity_removed_by_unique_id(platform):
     hass, registry, module, add, added = platform
     asyncio.run(module.async_setup_entry(hass, None, add))

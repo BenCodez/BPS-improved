@@ -170,6 +170,7 @@
         const out = row && row.outdoor;
         if (!out) return '';
         const lines = [`Estimated uncertainty: ${display(out.estimated_uncertainty_m, ' m')} · ${out.confidence || 'unknown'} · ${out.receivers_used || 0} receivers`];
+        if (out.environment_fallback) lines.push('Environmental geometry unavailable: neutral obstruction weights used; confidence reduced.');
         const radiusInputs = (details, prefix = '') => {
             if (!details || typeof details !== 'object') return;
             if (number(details.noise_floor_m)) lines.push(`${prefix}Radius inputs: weighted residual ${display(details.residual_m, ' m')} · noise floor ${display(details.noise_floor_m, ' m')} · geometry ×${display(details.geometry_factor)} · effective receivers ${display(details.effective_receivers)}`);

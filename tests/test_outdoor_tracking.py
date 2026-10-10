@@ -234,6 +234,36 @@ def test_no_environment_keeps_weak_jump_weight_and_single_solve():
     assert result["weighted"] == weighted
 
 
+@pytest.mark.parametrize("failure", ["compilation", "path"])
+def test_geometry_failure_keeps_range_fix_policies_and_measurements(hass, monkeypatch, failure):
+    from bps import environment as E, outdoor_tracking as O
+    floor = layout(True)["floor"][0]
+    weighted = points(floor)
+    before = copy.deepcopy(floor)
+    def fail(*args):
+        raise ArithmeticError("injected geometry failure")
+    if failure == "compilation":
+        monkeypatch.setattr(O, "compile_environment", fail)
+    else:
+        monkeypatch.setattr(E, "interior_path", fail)
+        floor["environment"] = [{"id": "shop", "type": "building", "points": [
+            {"x": 20, "y": 20}, {"x": 80, "y": 20}, {"x": 80, "y": 80}, {"x": 20, "y": 80}]}]
+        before = copy.deepcopy(floor)
+    result = solve_outdoor(floor, weighted, (-10, -10, 110, 110), 10, 5, 30, None, bps.trilaterate)
+    assert result["fix"] == pytest.approx((50, 50))
+    assert result["weighted"] == weighted
+    assert result["outdoor"]["confidence"] == "poor"
+    assert result["outdoor"]["environment_fallback"] is True
+    assert result["outdoor"]["environment_error_receivers"] == 4
+    assert all(d["environmental_weight"] == 1 for d in result["outdoor"]["receiver_diagnostics"])
+    assert floor == before
+    assert math.isfinite(result["outdoor"]["estimated_uncertainty_m"])
+    # Failed geometry does not revive explicit stale observations.
+    for rec in floor["receivers"]:
+        rec["_outdoor_reading"]["reading_age_s"] = 31
+    assert solve_outdoor(floor, weighted, (-10, -10, 110, 110), 10, 5, 30, None, bps.trilaterate) is None
+
+
 def test_obstructed_lying_receiver_has_less_influence():
     floor = layout(True)["floor"][0]
     weighted = points(floor, liar=True)

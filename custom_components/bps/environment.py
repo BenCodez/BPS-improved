@@ -6,11 +6,20 @@ input receiver, radius, or calibration factor is ever changed by this module.
 """
 from dataclasses import dataclass
 from functools import lru_cache
+import logging
 import math
 from numbers import Real
+from threading import Lock
+import time
 
-from shapely.geometry import LineString, Point, Polygon
-from shapely.prepared import prep
+from .environment_geometry import compile_ring, interior_path, point_relation
+
+_LOGGER = logging.getLogger(__name__)
+_WARNING_LOCK = Lock()
+_last_geometry_warning = -math.inf
+# Bounded lock stripes coalesce identical cold misses without retaining keys
+# or serializing path calculations. Hash collisions only delay compilation.
+_COMPILE_LOCKS = tuple(Lock() for _ in range(64))
 
 MAX_ENVIRONMENT_POLYGONS = 128
 MAX_ENVIRONMENT_VERTICES = 256
@@ -132,8 +141,8 @@ class EnvironmentRegion:
     material: str
     coordinates: tuple
     wall_materials: tuple | None
-    polygon: object
-    prepared: object
+    edges: tuple
+    bounds: tuple
 
 
 @dataclass(frozen=True)
@@ -142,22 +151,32 @@ class CompiledEnvironment:
 
 
 @lru_cache(maxsize=64)
-def _compile(signature):
+def _compile_cached(signature):
     regions = []
     for identifier, name, kind, material, coordinates, walls in signature:
-        try:
-            polygon = Polygon(coordinates)
-            if not polygon.is_valid or polygon.is_empty or polygon.area <= 1e-9:
-                continue
-            regions.append(EnvironmentRegion(identifier, name, kind, material,
-                                              coordinates, walls, polygon, prep(polygon)))
-        except (ValueError, TypeError):
+        ring = compile_ring(coordinates)
+        if ring is None:
             continue
+        edges, bounds = ring
+        regions.append(EnvironmentRegion(identifier, name, kind, material,
+                                          coordinates, walls, edges, bounds))
     return CompiledEnvironment(tuple(regions))
 
 
+def _compile(signature):
+    # lru_cache alone can run its body repeatedly for simultaneous misses.
+    # Recheck the cache while holding the signature's stripe so one worker
+    # validates a new map, and its waiting peers reuse the completed snapshot.
+    with _COMPILE_LOCKS[hash(signature) % len(_COMPILE_LOCKS)]:
+        return _compile_cached(signature)
+
+
+_compile.cache_info = _compile_cached.cache_info
+_compile.cache_clear = _compile_cached.cache_clear
+
+
 def compile_environment(floor):
-    """Return cached immutable geometry; call only for enabled outdoor mode."""
+    """Return cached immutable numeric geometry, safe to share across workers."""
     records = floor.get("environment", []) if isinstance(floor, dict) else []
     return _compile(_environment_signature(records))
 
@@ -184,44 +203,6 @@ def _xy(value):
     return result if all(v is not None for v in result) else None
 
 
-def _boundary_positions(geometry, line):
-    if geometry.is_empty:
-        return []
-    if hasattr(geometry, "geoms"):
-        return [position for g in geometry.geoms for position in _boundary_positions(g, line)]
-    if geometry.geom_type == "Point":
-        return [line.project(geometry)]
-    if geometry.geom_type in {"LineString", "LinearRing"}:
-        return [line.project(Point(geometry.coords[0])),
-                line.project(Point(geometry.coords[-1]))]
-    return []
-
-
-def _interior_transitions(region, line):
-    """Count true wall transitions, excluding tangent touches and endpoints.
-
-    Sampling the open intervals between boundary intersections distinguishes
-    entry/exit from tangency. Boundary-only intervals do not invent a crossing.
-    Endpoint points on a wall have no implied state beyond the measured path.
-    """
-    positions = sorted(set([0.0, line.length, *_boundary_positions(
-        line.intersection(region.polygon.boundary), line)]))
-    states = []
-    length_inside = 0.0
-    for start, end in zip(positions, positions[1:]):
-        if end - start <= 1e-9:
-            continue
-        point = line.interpolate((start + end) / 2)
-        if region.prepared.contains(point):
-            states.append((True, start, end))
-            length_inside += end - start
-        elif not region.polygon.boundary.covers(point):
-            states.append((False, start, end))
-    crossings = [line.interpolate(b[1] if b[0] else a[2])
-                 for a, b in zip(states, states[1:]) if a[0] != b[0]]
-    return crossings, length_inside
-
-
 def _crossed_wall(region, point):
     """At a corner, count one crossing using the less trusted adjacent wall."""
     matches = []
@@ -232,22 +213,48 @@ def _crossed_wall(region, point):
         length2 = dx * dx + dy * dy
         if length2 <= 1e-18:
             continue
-        t = max(0.0, min(1.0, ((point.x - ax) * dx + (point.y - ay) * dy) / length2))
-        if math.hypot(point.x - ax - t * dx, point.y - ay - t * dy) <= 1e-6:
+        t = max(0.0, min(1.0, ((point[0] - ax) * dx + (point[1] - ay) * dy) / length2))
+        if math.hypot(point[0] - ax - t * dx, point[1] - ay - t * dy) <= 1e-6:
             material = (region.wall_materials[i] if region.wall_materials else None) or region.material
             matches.append((i + 1, material))
     material = min((m for _, m in matches), key=BUILDING_BOUNDARY_WEIGHTS.get) if matches else region.material
     return {"walls": [i for i, _ in matches], "material": material,
-            "point": [point.x, point.y]}
+            "point": list(point)}
 
 
-def path_reliability(compiled, receiver_xy, fix_xy):
-    """Analyze receiver-to-fix path without ever changing measured distances."""
-    result = {"environmental_weight": 1.0, "classification": "clear",
+def _path_result():
+    return {"environmental_weight": 1.0, "classification": "clear",
               "building_crossings": 0, "building_paths": 0,
               "vegetation_paths": 0, "custom_paths": 0,
               "receiver_inside_building": False, "reflection_risk": False,
               "intersections": []}
+
+
+def report_geometry_failure(error):
+    """Bound unexpected-error logging across workers; never log observations."""
+    global _last_geometry_warning
+    with _WARNING_LOCK:
+        now = time.monotonic()
+        if now - _last_geometry_warning < 60:
+            return
+        _last_geometry_warning = now
+    _LOGGER.warning("Outdoor geometry failed; using neutral environmental trust (%s)",
+                    type(error).__name__, exc_info=True)
+
+
+def path_reliability(compiled, receiver_xy, fix_xy):
+    """Analyze paths; an unexpected geometry failure removes only obstruction trust."""
+    try:
+        return _path_reliability(compiled, receiver_xy, fix_xy)
+    except Exception as error:
+        report_geometry_failure(error)
+        result = _path_result()
+        result.update(classification="unknown", environment_error=type(error).__name__)
+        return result
+
+
+def _path_reliability(compiled, receiver_xy, fix_xy):
+    result = _path_result()
     start, end = _xy(receiver_xy), _xy(fix_xy)
     if start is None or end is None:
         result.update(environmental_weight=MIN_ENVIRONMENT_WEIGHT,
@@ -255,15 +262,11 @@ def path_reliability(compiled, receiver_xy, fix_xy):
         return result
     if not isinstance(compiled, CompiledEnvironment) or not compiled.regions:
         return result
-    line = LineString([start, end])
-    point = Point(start)
     kinds = set()
     for region in compiled.regions:
-        inside = region.kind == "building" and region.prepared.contains(point)
+        inside = region.kind == "building" and point_relation(start, region.edges, region.bounds) == 1
         result["receiver_inside_building"] |= inside
-        if line.length <= 1e-9 or not region.prepared.intersects(line):
-            continue
-        crossing_points, interior_length = _interior_transitions(region, line)
+        crossing_points, interior_length = interior_path(start, end, region.edges, region.bounds)
         crossings = len(crossing_points)
         if interior_length <= 1e-9:
             continue

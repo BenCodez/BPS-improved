@@ -25,6 +25,7 @@ import re
 import copy
 import difflib
 from functools import partial
+from contextvars import ContextVar
 from shapely.geometry import Point, Polygon
 from shapely.ops import nearest_points, unary_union
 try:
@@ -83,6 +84,91 @@ apitricords = []
 # map and its zone/floor sensors go to unknown. Override with a top-level
 # "position_timeout" (seconds) in bpsdata.txt.
 STALE_POSITION_SECS = 300
+
+# One awaited batch per installation, with bounded parallel tracker work. The
+# context follows child tasks so every post-executor publication uses the same
+# layout and lifecycle that supplied the cycle's measurements.
+MAX_CONCURRENT_TRACKERS = 8
+_tracking_context = ContextVar("bps_tracking_context", default=None)
+
+
+def _capture_tracking_context(hass):
+    inherited = _tracking_context.get()
+    if inherited is not None and inherited[0] is hass:
+        return inherited
+    bucket = hass.data.get(DOMAIN, {})
+    return hass, bucket.get("layout"), bucket.get("_tracking_lifecycle")
+
+
+def _tracking_context_current(context):
+    hass, layout, lifecycle = context
+    bucket = hass.data.get(DOMAIN, {})
+    return (bucket.get("_tracking_active") is not False
+            and bucket.get("layout") is layout
+            and bucket.get("_tracking_lifecycle") is lifecycle)
+
+
+async def _tracking_executor_job(hass, function, *args):
+    """Keep physical worker admission until completion, including after reload.
+
+    Cancelling an awaiter cannot stop its executor thread. The semaphore and
+    owned tasks survive lifecycle changes in the per-HA bucket, so new batches
+    cannot queue more native jobs while abandoned private calculations run.
+    """
+    bucket = hass.data.setdefault(DOMAIN, {})
+    slots = bucket.setdefault("_tracking_executor_slots", asyncio.Semaphore(MAX_CONCURRENT_TRACKERS))
+    jobs = bucket.setdefault("_tracking_executor_jobs", set())
+    await slots.acquire()
+
+    async def owned():
+        try:
+            return await hass.async_add_executor_job(function, *args), None
+        except Exception as error:
+            # Python 3.14 reports exceptions in abandoned shielded tasks even
+            # if a callback retrieves them. Transfer errors as outcome values.
+            return None, error
+
+    try:
+        task = asyncio.create_task(owned())
+    except BaseException:
+        slots.release()
+        raise
+    jobs.add(task)
+
+    def finished(done):
+        jobs.discard(done)
+        slots.release()
+        if not done.cancelled():
+            done.exception()
+
+    task.add_done_callback(finished)
+    result, error = await asyncio.shield(task)
+    if error is not None:
+        raise error
+    return result
+
+
+async def _stop_tracking(hass):
+    """Invalidate publications before cancelling and draining background work.
+
+    Cancelling an executor future cannot stop its thread. Workers own private
+    snapshots; invalidation also rejects results from any independently awaited
+    batch that finishes during integration teardown or a later reload.
+    """
+    bucket = hass.data.setdefault(DOMAIN, {})
+    bucket["_tracking_active"] = False
+    bucket["_tracking_lifecycle"] = object()
+    bucket.pop("_tracking_setup", None)
+    bucket.pop("_tracking_initialize", None)
+    task = hass.data.pop("bps_update_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            _LOGGER.warning("BPS tracking task stopped after failure: %.240s", error)
 
 # --- Stale distance readings (per receiver, per tracker) ----------------------
 # A distance_to sensor keeps its last value when its scanner stops hearing the
@@ -565,6 +651,9 @@ async def update_tracked_entities(hass):
     """Update tracked_entities with the result of the Jinja code once per second."""
     global tracked_entities, tracked_listeners, new_global_data
     global secToUpdate
+    # Reloads may be requested by callbacks originating inside a tracker task;
+    # the new background loop must not inherit that old batch's ContextVar.
+    _tracking_context.set(None)
     while True:
         # Receiver liveness and the self-localization accuracy sensor are
         # receiver-side diagnostics, independent of how many beacons are being
@@ -1190,6 +1279,10 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
     """
     global apitricords
 
+    context = _capture_tracking_context(hass)
+    if not _tracking_context_current(context):
+        return
+
     # Store last r-values per sensor and entity (for soft radius-jump weighting).
     if not hasattr(update_trilateration_and_zone, "last_r_values"):
         update_trilateration_and_zone.last_r_values = {}
@@ -1275,11 +1368,15 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
             prior = next((p.get("raw") for p in apitricords
                           if p["ent"] == entity and p["floor"] == floor_name), None)
             # Additional geometry and bounded re-solving belong off HA's loop.
-            outdoor_result = await hass.async_add_executor_job(partial(
+            outdoor_result = await _tracking_executor_job(hass, partial(
                 solve_outdoor, floor, weighted, floor_bounds, scale, min_wr,
                 _reading_max_age(entity_layout), prior, trilaterate,
                 position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS),
             ))
+            # Map saves replace the cached layout. Do not feed an obsolete
+            # snapshot into election, smoothing, history or sensor state.
+            if not _tracking_context_current(context):
+                return
             if outdoor_result is None:
                 continue
             fix, weighted = outdoor_result["fix"], outdoor_result["weighted"]
@@ -1561,6 +1658,9 @@ async def update_tracker_groups(hass):
     disappears promptly on disable/delete or when all beacon fixes become stale.
     """
     global apitricords
+    context = _capture_tracking_context(hass)
+    if not _tracking_context_current(context):
+        return
     layout = get_bps_data(hass)
     dom = hass.data.setdefault(DOMAIN, {})
     if not outdoor_settings(layout)["enabled"] and not dom.get("groups_active"):
@@ -1577,6 +1677,8 @@ async def update_tracker_groups(hass):
     sync = hass.data.get(DOMAIN, {}).get("sync_group_sensors")
     if sync is not None:
         await sync(groups)
+        if not _tracking_context_current(context):
+            return
     dom["groups_active"] = bool(groups) or len(originals) != len(apitricords)
     if not groups and len(originals) == len(apitricords):
         dom.pop("group_stability", None)
@@ -1596,9 +1698,14 @@ async def update_tracker_groups(hass):
     fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
                         use_observation_age=use_observation_age, known_trackers=known,
                         previous=previous, stability=dom.setdefault("group_stability", {}))
-    lookup = [{"entity": p["ent"], "data": layout} for p in fused]
+    # Geometry workers mutate only their unpublished fix and read detached
+    # Python layout data, never the live position/cache objects.
+    group_layout = copy.deepcopy(layout)
+    lookup = [{"entity": p["ent"], "data": group_layout} for p in fused]
     for position in fused:
-        await hass.async_add_executor_job(_assign_group_zone, position, lookup, scales[position["floor"]])
+        await _tracking_executor_job(hass, _assign_group_zone, position, lookup, scales[position["floor"]])
+        if not _tracking_context_current(context):
+            return
         position["last_update_age_s"] = max(0.0, time.time() - position["updated"])
         position["outdoor"].update(stale_after_s=group_max_age,
                                    position_age_s=position["last_update_age_s"],
@@ -1683,10 +1790,42 @@ async def process_single_entity(hass, new_global_data, eids):
     await update_trilateration_and_zone(hass, new_global_data, eids["entity"])  # When it is complete → perform trilateration
 
 async def process_entities(hass, new_global_data):
-    """Process multiple entities in parallel, but ensure the correct order for each individual entity"""
-    tasks = [process_single_entity(hass, new_global_data, eids) for eids in new_global_data]
-    await asyncio.gather(*tasks)  # Run all entities in parallel, but maintain the correct internal order
-    await update_tracker_groups(hass)
+    """Finish every tracker before another refresh or group publication starts."""
+    bucket = hass.data.setdefault(DOMAIN, {})
+    lock = bucket.setdefault("_tracking_batch_lock", asyncio.Lock())
+    context = _capture_tracking_context(hass)
+    async with lock:
+        if not _tracking_context_current(context):
+            return
+        token = _tracking_context.set(context)
+        slots = asyncio.Semaphore(MAX_CONCURRENT_TRACKERS)
+
+        async def process(eids):
+            async with slots:
+                if _tracking_context_current(context):
+                    await process_single_entity(hass, new_global_data, eids)
+
+        try:
+            # gather's default raises before surviving siblings finish, letting
+            # the next cycle overlap their same-entity solves and publications.
+            results = await asyncio.gather(*(process(eids) for eids in new_global_data),
+                                           return_exceptions=True)
+            failures = [(eids["entity"], result) for eids, result in zip(new_global_data, results)
+                        if isinstance(result, Exception)]
+            if failures:
+                entity, error = failures[0]
+                summary = (len(failures), str(entity)[:128], str(error)[:240])
+                now = time.monotonic()
+                previous = bucket.get("_tracking_last_failure")
+                if previous is None or previous[1] != summary or now - previous[0] >= 60:
+                    _LOGGER.warning("BPS tracking failed for %d tracker(s); first %s: %s", *summary)
+                    bucket["_tracking_last_failure"] = (now, summary)
+            else:
+                bucket.pop("_tracking_last_failure", None)
+            if _tracking_context_current(context):
+                await update_tracker_groups(hass)
+        finally:
+            _tracking_context.reset(token)
 
 def extract_candidate_floors(new_global_data, tmpentity):
     """Every floor hearing the tracker, ranked by its nearest receiver.
@@ -2046,9 +2185,16 @@ async def async_setup(hass, config):
         return True  # Abort if already running
 
     hass.data["bps_initialized"] = True  # Set flag
+    await _stop_tracking(hass)
+    setup_token = object()
+    hass.data.setdefault(DOMAIN, {})["_tracking_setup"] = setup_token
+    initialization_lock = asyncio.Lock()
 
-    async def initialize_bps():
+    async def initialize_once():
         """Initialize the BPS component"""
+        if (hass.data.get(DOMAIN, {}).get("_tracking_setup") is not setup_token
+                or not hass.data.get("bps_initialized")):
+            return
         _LOGGER.info("Initializing BPS...")
 
         if "bps_views_registered" not in hass.data:
@@ -2131,18 +2277,21 @@ async def async_setup(hass, config):
         # retained window back before the tracking loop starts appending.
         await restore_position_history(hass)
 
-        old_task = hass.data.get("bps_update_task")
-        if old_task:
-            old_task.cancel()
+        bucket = hass.data.setdefault(DOMAIN, {})
+        if bucket.get("_tracking_setup") is not setup_token or not hass.data.get("bps_initialized"):
+            return
+        bucket["_tracking_lifecycle"] = object()
+        bucket["_tracking_active"] = True
+        resume_discovery = bucket.get("resume_sensor_discovery")
+        if resume_discovery is not None:
+            resume_discovery()
         activate_diagnostics(hass)
         hass.data["bps_update_task"] = hass.async_create_task(update_tracked_entities(hass))
 
         async def handle_homeassistant_stop(event):
             """Stop background work promptly so shutdown cannot drag or leave
             the unload half-done (which strands stale registry entries)."""
-            update_task = hass.data.pop("bps_update_task", None)
-            if update_task:
-                update_task.cancel()
+            await _stop_tracking(hass)
             await shutdown_diagnostics(hass)
             try:
                 await flush_position_history(hass)
@@ -2156,6 +2305,16 @@ async def async_setup(hass, config):
         await async_start_auto_if_enabled(hass)
 
         _LOGGER.info("The BPS integration is fully initialized")
+
+    async def initialize_bps():
+        # A failed unload may retry an initialization whose started event
+        # arrived during teardown. Serialize both attempts and never spawn a
+        # second tracking loop if the first valid attempt already completed.
+        async with initialization_lock:
+            if hass.data.get("bps_update_task") is None:
+                await initialize_once()
+
+    hass.data.setdefault(DOMAIN, {})["_tracking_initialize"] = initialize_bps
 
     async def handle_homeassistant_started(event):
         """Handles the 'homeassistant_started' event"""
@@ -2171,10 +2330,35 @@ async def async_setup(hass, config):
 async def async_unload_entry(hass: HomeAssistant, entry):
     """Remove a configuration entry"""
     _LOGGER.info("Attempting to offload platforms for entry: %s", entry.entry_id)
+    restart_on_failure = hass.data.get("bps_update_task") is not None
+    bucket = hass.data.get(DOMAIN, {})
+    pending_setup = bucket.get("_tracking_setup")
+    pending_initialize = bucket.get("_tracking_initialize")
+    await _stop_tracking(hass)
 
-    state_listener_unsub = hass.data.pop("bps_state_listener_unsub", None)
-    if state_listener_unsub:
-        state_listener_unsub()
+    async def unload_failed():
+        # HA retains the entry after a failed unload. Keep its existing
+        # tracking behavior, but restart with a fresh generation so cancelled
+        # old jobs can never publish into the resumed installation.
+        if restart_on_failure:
+            bucket = hass.data.setdefault(DOMAIN, {})
+            bucket["_tracking_lifecycle"] = object()
+            bucket["_tracking_active"] = True
+            resume_discovery = bucket.get("resume_sensor_discovery")
+            if resume_discovery is not None:
+                resume_discovery()
+            activate_diagnostics(hass)
+            hass.data["bps_update_task"] = hass.async_create_task(update_tracked_entities(hass))
+        elif pending_setup is not None and pending_initialize is not None:
+            # Before HA starts there is no tracking task to restart. Restore
+            # the deferred callback's token. If its one-shot started event was
+            # consumed during teardown, retry initialization now instead.
+            bucket = hass.data.setdefault(DOMAIN, {})
+            bucket["_tracking_setup"] = pending_setup
+            bucket["_tracking_initialize"] = pending_initialize
+            if getattr(hass, "is_running", False):
+                await pending_initialize()
+        return False
 
     await shutdown_diagnostics(hass)
 
@@ -2186,6 +2370,22 @@ async def async_unload_entry(hass: HomeAssistant, entry):
         await flush_position_history(hass)
     except Exception as e:
         _LOGGER.debug("BPS position history flush on unload failed: %s", e)
+
+    try: # Attempt to unload platforms before removing their listener/registry.
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
+    except Exception as e:
+        _LOGGER.error(f"Error during offloading of platforms for entry {entry.entry_id}: {e}")
+        return await unload_failed()
+
+    if not unload_ok:
+        _LOGGER.error("Failed to offload platforms for entry: %s", entry.entry_id)
+        return await unload_failed()
+
+    # Once the sensor platform is gone, complete teardown. A frontend cleanup
+    # error must not restart tracking against removed SensorEntity objects.
+    state_listener_unsub = hass.data.pop("bps_state_listener_unsub", None)
+    if state_listener_unsub:
+        state_listener_unsub()
 
     cleanup_legacy_bps_registry_and_states(hass)
 
@@ -2201,26 +2401,11 @@ async def async_unload_entry(hass: HomeAssistant, entry):
         _LOGGER.info(f"Removes sensor: {entity_id}")
         entity_registry.async_remove(entity_id)
 
-    try: # Attempt to unload platforms
-        unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
-    except Exception as e:
-        _LOGGER.error(f"Error during offloading of platforms for entry {entry.entry_id}: {e}")
-        return False
-
-    if not unload_ok:
-        _LOGGER.error("Failed to offload platforms for entry: %s", entry.entry_id)
-        return False
-
     try: #Remove the frontend panel
         async_remove_panel(hass, frontend_url_path="bps")
         _LOGGER.info("Frontend-panel removed for entry: %s", entry.entry_id)
     except Exception as e:
         _LOGGER.error(f"Error when removing frontend-panel for entry {entry.entry_id}: {e}")
-        return False
-
-    update_task = hass.data.pop("bps_update_task", None)
-    if update_task:
-        update_task.cancel()
 
     await async_shutdown_calibration(hass)
 
@@ -2238,6 +2423,7 @@ async def async_unload_entry(hass: HomeAssistant, entry):
     hass.data.pop("bps_initialized", None)
     hass.data.pop("bps_sensors", None)
     hass.data.get(DOMAIN, {}).pop("sync_group_sensors", None)
+    hass.data.get(DOMAIN, {}).pop("resume_sensor_discovery", None)
 
     return True
 

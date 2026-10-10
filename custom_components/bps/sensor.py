@@ -436,6 +436,21 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         await sync_group_sensors(normalize_groups(get_bps_data(hass), known_trackers=entities))
 
     @callback
+    def discover_sensors():
+        """Reconcile a paused discovery window once tracking becomes active."""
+        sensors_cache = hass.data.get("bps_sensors")
+        if sensors_cache is None or hass.data.get("bps", {}).get("_tracking_active") is False:
+            return
+        new_sensors = []
+        for entity in get_filtered_entities(hass):
+            ensure_sensors_for_entity(hass, entity, sensors_cache, new_sensors)
+        if new_sensors:
+            async_add_entities(new_sensors, update_before_add=True)
+            normalize_bps_registry_entity_ids_from_cache(hass)
+
+    hass.data.setdefault("bps", {})["resume_sensor_discovery"] = discover_sensors
+
+    @callback
     def state_changed_listener(event):
         """Create BPS sensors when a NEW distance sensor appears.
 
@@ -449,7 +464,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         and stalled the event loop (issue #51).
         """
         sensors_cache = hass.data.get("bps_sensors")
-        if sensors_cache is None:
+        if sensors_cache is None or hass.data.get("bps", {}).get("_tracking_active") is False:
             # Integration is unloading/reloading; ignore late state events.
             return
 
@@ -457,15 +472,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         if "_distance_to_" not in entity_id or event.data.get("old_state") is not None:
             return
 
-        new_entities = get_filtered_entities(hass)
-        new_sensors = []
-
-        for entity in new_entities:
-            ensure_sensors_for_entity(hass, entity, sensors_cache, new_sensors)
-
-        if new_sensors:
-            async_add_entities(new_sensors, update_before_add=True)
-            normalize_bps_registry_entity_ids_from_cache(hass)
+        discover_sensors()
 
     old_unsub = hass.data.pop("bps_state_listener_unsub", None)
     if old_unsub:

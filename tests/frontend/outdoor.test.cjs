@@ -232,6 +232,13 @@ test('diagnostics explain measurement trust and fused beacon disagreement', () =
     assert.match(text, /2 beacons combined · beacon uncertainty 2.5 m · position spread 1.0 m/);
 });
 
+test('tracking diagnostics disclose neutral obstruction fallback', () => {
+    const text = out.diagnosticsText({outdoor: {estimated_uncertainty_m: 2,
+        confidence: 'poor', environment_fallback: true}});
+    assert.match(text, /neutral obstruction weights used; confidence reduced/);
+    assert.doesNotMatch(out.diagnosticsText({outdoor: {estimated_uncertainty_m: 2}}), /unavailable/);
+});
+
 test('group diagnostics include robust residuals and publication shifts for each beacon', () => {
     const details = {residual_m: 3, unadjusted_residual_m: 5, noise_floor_m: 1.1,
         geometry_factor: 3.6, effective_receivers: 2.4, robust_downweighted_receivers: 8,

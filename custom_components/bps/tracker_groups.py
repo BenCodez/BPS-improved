@@ -172,6 +172,7 @@ def _fix(beacon, position, scales, now, max_age_s, use_observation_age):
     return {"ent": beacon, "cords": [x, y], "floor": floor,
             "updated": updated, "observed": outdoor.get("observed", updated),
             "estimated_uncertainty_m": uncertainty,
+            "environment_fallback": outdoor.get("environment_fallback") is True,
             "uncertainty_details": {key: value for key in (
                 "residual_m", "unadjusted_residual_m", "noise_floor_m",
                 "geometry_factor", "effective_receivers", "receiver_count_factor",
@@ -296,7 +297,8 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
     else:
         fusion_confidence = "good" if uncertainty <= 5 else "moderate"
     confidence = "good" if uncertainty <= 5 else "moderate" if uncertainty <= 15 else "poor"
-    if conflict or floor_conflict:
+    environment_fallback = any(p["environment_fallback"] for p in accepted)
+    if conflict or floor_conflict or environment_fallback:
         confidence = "poor"
     diagnostics = [{k: v for k, v in p.items() if k not in ("weight", "scale", "receiver_ids")}
                    for p in fixes]
@@ -323,6 +325,7 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
                         "combined_beacon_uncertainty_m": combined,
                         "beacon_scatter_m": scatter,
                         "confidence": confidence,
+                        **({"environment_fallback": True} if environment_fallback else {}),
                         "receivers_used": receivers_used,
                         "receiver_observations": sum(p["receivers_used"] for p in accepted)}}
 
