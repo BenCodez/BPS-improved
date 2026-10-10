@@ -258,3 +258,27 @@ test('card retains group fixes through HTTP failures and malformed responses', a
     await c._pollOnce();
     assert.equal(c._positions.get('bps_group_rover'), cached);
 });
+
+test('dedicated group position entity resolves floor and both small member markers', async () => {
+    const c = card(), cv = canvas(); c._canvas = cv.value;
+    const eid = 'sensor.bps_group_rover_bps_position';
+    c._config.entities = [eid]; c._outdoorSettings.enabled = true;
+    c._hass.states[eid] = {state: 'Yard', attributes: {group: true, tracker_key: 'bps_group_rover', floor: 'Property'}};
+    const row = {ent: 'bps_group_rover', group: true, name: 'Rover', floor: 'Property', cords: [200, 100],
+        zone: 'Yard', updated: Date.now() / 1000, beacons_reporting: 2, total_beacons: 2,
+        outdoor: {estimated_uncertainty_m: 4, confidence: 'good'}, beacon_positions: [
+            {ent: 'beacon_a', floor: 'Property', cords: [100, 100], estimated_uncertainty_m: 3},
+            {ent: 'beacon_b', floor: 'Property', cords: [300, 100], estimated_uncertainty_m: 3}]};
+    c._apiFetch = async () => ({ok: true, json: async () => [row]});
+    c._baseImage = {}; c._redraw = () => {}; c._setStatus = () => {};
+    await c._pollOnce();
+    assert.equal(c._trackerKeyFromEntity(eid), 'bps_group_rover');
+    assert.equal(c._floorStateForTracker('bps_group_rover'), 'Property');
+    c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+    c._drawMarkers();
+    assert.ok(cv.calls.some(v => Array.isArray(v) && v[0] === 100 && v[1] === 100));
+    assert.ok(cv.calls.some(v => Array.isArray(v) && v[0] === 300 && v[1] === 100));
+    // User renames survive through stable attributes.
+    c._hass.states['sensor.my_dog'] = c._hass.states[eid];
+    assert.equal(c._trackerKeyFromEntity('sensor.my_dog'), 'bps_group_rover');
+});

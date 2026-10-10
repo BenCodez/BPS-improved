@@ -8,7 +8,7 @@ const plain = x => JSON.parse(JSON.stringify(x));
 
 async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false) {
     const ids = new Map(), listeners = new Map(), requests = [], intervals = [], canvasCalls = [];
-    const network = {cords: [], cordsStatus: 200, failCords: false};
+    const network = {cords: [], cordsStatus: 200, failCords: false, calibration: {}};
     let clock = Date.now();
     class ClockDate extends Date {static now() {return clock;}}
     const context = new Proxy({}, {get: (obj, key) => key === 'setLineDash' ? dash => canvasCalls.push(['dash', ...dash])
@@ -23,6 +23,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             offsetWidth: 100, offsetHeight: 30, classList: {add() {}, remove() {}, toggle() {}, contains: () => false},
             get options() {return this.children;}, get selectedOptions() {return this.children.filter(e => e.selected);},
             appendChild(child) {child.parentElement = this; this.children.push(child); if (child.id) ids.set(child.id, child); return child;},
+            contains(child) {return this.children.includes(child) || this.children.some(c => c.contains?.(child));},
             append(...children) {children.forEach(c => this.appendChild(c));},
             replaceChildren(...children) {this.children = []; this.append(...children);},
             remove() {if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(c => c !== this);},
@@ -49,7 +50,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             if (url === '/api/bps/cords' && network.failCords) throw new Error('connection lost');
             const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: []}
                 : url === '/api/bps/cords' ? network.cords
-                : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? {} : [];
+                : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration : [];
             const status = url === '/api/bps/cords' ? network.cordsStatus : 200;
             return {ok: status === 200, status, json: async () => body};
         }});
@@ -57,7 +58,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     vm.runInContext(readFileSync(join(directory, 'diagnostics.js'), 'utf8'), sandbox);
     // Expose closures only in the VM so production keeps its private state.
     const code = readFileSync(join(directory, 'script.js'), 'utf8').replace('    // With a single configured floor', `
-        globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata,
+        globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
             tracks: () => lastTracks, tracked: () => trackedDevices};
@@ -453,4 +454,53 @@ test('panel applies and saves groups containing genuine group-prefixed beacons',
     p.hooks.select('Property'); await p.hooks.savedata(true);
     const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
     assert.deepEqual(saved.tracker_groups[0].beacons, ['bps_group_beacon', 'beacon_b']);
+});
+
+test('visible building tool enables outdoor tracking and saves mixed wall materials', async () => {
+    const p = await panel(layout()); p.hooks.select('Property');
+    await p.el('addBuilding').fire('click');
+    assert.equal(p.hooks.layout().outdoor_tracking.enabled, true);
+    assert.equal(p.el('outdoorEditor').open, true);
+    p.hooks.setPoints(points); p.hooks.drawZonePreview();
+    assert.equal(p.el('environmentWalls').hidden, false);
+    p.el('environmentMaterial').value = 'metal';
+    p.el('environmentWall1').value = 'wood'; await p.el('environmentWall1').fire('change');
+    p.el('environmentWall3').value = 'metal'; await p.el('environmentWall3').fire('change');
+    p.el('zoneName').value = 'Mixed shop';
+    assert.equal(p.hooks.finalizeShape(), true);
+    const shop = p.hooks.layout().floor[0].environment[0];
+    assert.deepEqual(plain(shop.wall_materials), ['wood', null, 'metal', null]);
+    p.hooks.cancelShapeEdit();
+    assert.equal(p.el('environmentWalls').hidden, true);
+    p.hooks.beginEnvironmentEdit(shop);
+    assert.equal(p.el('environmentWall1').value, 'wood');
+    assert.equal(p.el('environmentWall2').value, '');
+    await p.el('addTrees').fire('click');
+    assert.equal(p.el('environmentWalls').hidden, true);
+    p.hooks.cancelShapeEdit(); await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].environment[0].wall_materials, ['wood', null, 'metal', null]);
+});
+
+test('map tools are outside the opt-in controls in the actual document', () => {
+    const html = readFileSync(join(directory, 'index.html'), 'utf8');
+    const controls = html.indexOf('id="outdoorControls"');
+    for (const id of ['addBuilding', 'addTrees', 'openGroupEditor']) {
+        assert.ok(html.indexOf(`id="${id}"`) < controls);
+        assert.equal(html.split(`id="${id}"`).length, 2);
+    }
+});
+
+test('calibration tracking test uses the authenticated read-only action', async () => {
+    const p = await panel(layout()); p.hooks.select('Property');
+    p.network.calibration = {floor: 'Property', verdict: 'improves', baseline: {median_m: 3, p95_m: 5, samples: 20},
+        candidate: {median_m: 1, p95_m: 2}, locations: 2, candidate_failures: 0, candidate_solved_at: 'test-date', scope: 'No calibration changed.'};
+    await p.el('calibTestTracking').fire('click');
+    const request = p.requests.find(r => r.url === '/api/bps/calibration' && r.options?.method === 'POST');
+    assert.deepEqual(JSON.parse(request.options.body), {action: 'validate_tracking', floor: 'Property'});
+    assert.equal(request.options.headers.Authorization, 'Bearer test-token');
+    assert.equal(p.el('calibTestTracking').disabled, false);
+    assert.match(p.el('calibTrackingTest').textContent, /Property: improves/);
+    assert.match(p.el('calibTrackingTest').textContent, /3.00 m → 1.00 m/);
+    assert.ok(!p.requests.some(r => r.url === '/api/bps/save_text'));
 });

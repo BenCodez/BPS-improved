@@ -1597,6 +1597,7 @@ async def update_tracker_groups(hass):
         await sync(groups)
     dom["groups_active"] = bool(groups) or len(originals) != len(apitricords)
     if not groups and len(originals) == len(apitricords):
+        dom.pop("group_stability", None)
         return
     scales = {f["name"]: f.get("scale") for f in layout.get("floor", [])} if isinstance(layout, dict) else {}
     safe_layout = {**layout, "tracker_groups": groups} if isinstance(layout, dict) else {}
@@ -1609,10 +1610,11 @@ async def update_tracker_groups(hass):
         group_max_age = finite_number(layout.get("position_timeout"), STALE_POSITION_SECS,
                                       minimum=0.0) or STALE_POSITION_SECS
     fusion_time = time.time()
-    fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
-                        use_observation_age=use_observation_age, known_trackers=known)
-    lookup = [{"entity": p["ent"], "data": layout} for p in fused]
     previous = {p["ent"]: p for p in apitricords if p.get("group")}
+    fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
+                        use_observation_age=use_observation_age, known_trackers=known,
+                        previous=previous, stability=dom.setdefault("group_stability", {}))
+    lookup = [{"entity": p["ent"], "data": layout} for p in fused]
     for position in fused:
         await hass.async_add_executor_job(_assign_group_zone, position, lookup, scales[position["floor"]])
         position["last_update_age_s"] = max(0.0, time.time() - position["updated"])
@@ -1626,6 +1628,8 @@ async def update_tracker_groups(hass):
         attrs["outdoor"] = {k: v for k, v in position["outdoor"].items() if k != "position_age_s"}
         attrs["beacon_positions"] = [{k: v for k, v in beacon.items() if k != "age_s"}
                                      for beacon in position["beacon_positions"]]
+        update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_position", position["zone"], attrs,
+                                only_changed=True)
         update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_zone", position["zone"], attrs,
                                 only_changed=True)
         update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_floor", position["floor"], attrs,
@@ -1646,6 +1650,10 @@ async def update_tracker_groups(hass):
     for group in groups:
         ent = "bps_group_" + group["id"]
         if ent not in live:
+            update_bps_sensor_state(hass, f"sensor.{ent}_bps_position", "unknown",
+                                    {"group": True, "tracker_key": ent, "name": group["name"],
+                                     "beacons_reporting": 0, "total_beacons": len(group["beacons"])},
+                                    only_changed=True)
             for kind in ("zone", "floor"):
                 update_bps_sensor_state(hass, f"sensor.{ent}_bps_{kind}", "unknown", {}, only_changed=True)
     for ent in previous.keys() - live:
@@ -2072,7 +2080,7 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSReceiverStatusAPI())
             hass.http.register_view(BPSScannerLinkingAPI())
             hass.http.register_view(BPSCordsAPI(hass))
-            hass.http.register_view(BPSCalibrationAPI())
+            hass.http.register_view(BPSCalibrationAPI(_calibration_tracking_check))
             hass.http.register_view(BPSSelfTestAPI(hass))
             hass.http.register_view(BPSTrackerTuneAPI())
             hass.http.register_view(BPSHistoryAPI(hass))
@@ -2518,6 +2526,36 @@ def _diagnostic_inventory(hass):
         for group in groups], "floors": [f["name"] for f in data.get("floor", [])
         if isinstance(f.get("name"), str) and finite_number(f.get("scale"), minimum=1e-6) is not None]
         if isinstance(data, dict) else []}
+
+
+async def _calibration_tracking_check(hass, floor_name):
+    """Compare detached diagnostic samples without touching live calibration."""
+    from .calibration_validation import compare_tracking
+    dom = hass.data.setdefault(DOMAIN, {})
+    if dom.get("calibration_validation_busy"):
+        raise ValueError("A tracking comparison is already running")
+    recording = dom.get("_diagnostics")
+    if recording is None or not recording.frames:
+        raise ValueError("Record Diagnostics at two measured stationary locations first")
+    if not isinstance(floor_name, str) or not floor_name.strip():
+        raise ValueError("Select a floor first")
+    result = next((v for k, v in dom.get("calibration", {}).get("results", {}).items()
+                   if k.strip().lower() == floor_name.strip().lower()), None)
+    layout = get_bps_data(hass)
+    floor = next((f for f in layout.get("floor", []) if f.get("name") == result.get("floor")), None) if result else None
+    if floor is None:
+        raise ValueError("Solve calibration for the selected floor first")
+    # Freeze candidate and geometry before awaiting export/executor work.
+    corrections, floor = copy.deepcopy(result["receivers"]), copy.deepcopy(floor)
+    solved_at = result.get("solved_at")
+    dom["calibration_validation_busy"] = True
+    try:
+        payload = json.loads(await recording.export())
+        report = await hass.async_add_executor_job(compare_tracking, payload, floor["name"], corrections, floor, trilaterate)
+        report.update(candidate_solved_at=solved_at, candidate_corrections=corrections)
+        return report
+    finally:
+        dom.pop("calibration_validation_busy", None)
 
 
 def _diagnostic_snapshot(hass, targets, now):

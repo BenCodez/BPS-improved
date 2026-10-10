@@ -14,6 +14,8 @@ _LOGGER = logging.getLogger(__name__)
 DOMAIN = "bps_sensors"
 
 # (entity_id suffix / unique_id prefix, display label) per tracked device.
+GROUP_SENSOR_KINDS = ("position", "zone", "floor")
+
 SENSOR_KINDS = [
     ("bps_zone", "BPS Zone"),
     ("bps_floor", "BPS Floor"),
@@ -337,14 +339,14 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         cache = hass.data.get("bps_sensors")
         if cache is None:
             return
-        expected = {f"bps_group_{kind}_{g['id']}" for g in groups for kind in ("zone", "floor")}
+        expected = {f"bps_group_{kind}_{g['id']}" for g in groups for kind in GROUP_SENSOR_KINDS}
         registry = er.async_get(hass)
         stale = [e for e in registry.entities.values()
-                 if e.platform == "bps" and str(e.unique_id).startswith(("bps_group_zone_", "bps_group_floor_"))
+                 if e.platform == "bps" and str(e.unique_id).startswith(tuple(f"bps_group_{kind}_" for kind in GROUP_SENSOR_KINDS))
                  and e.unique_id not in expected]
         retired_devices = {entry.device_id for entry in stale if entry.device_id}
         retired_identifiers = {("bps", "bps_group_" + str(entry.unique_id)[len(prefix):])
-                               for entry in stale for prefix in ("bps_group_zone_", "bps_group_floor_")
+                               for entry in stale for prefix in tuple(f"bps_group_{kind}_" for kind in GROUP_SENSOR_KINDS)
                                if str(entry.unique_id).startswith(prefix)}
         for entry in stale:
             owned = [(key, sensor) for key, sensor in cache.items()
@@ -378,14 +380,16 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         for group in groups:
             ent = "bps_group_" + group["id"]
             device_name = f"{group['name']} (BPS group)"
-            for kind in ("zone", "floor"):
+            for kind in GROUP_SENSOR_KINDS:
                 eid = f"sensor.{ent}_bps_{kind}"
-                label = f"{group['name']} BPS {kind.title()}"
+                label = group["name"] if kind == "position" else f"{group['name']} BPS {kind.title()}"
                 if eid in cache:
                     sensor = cache[eid]
                     renamed = sensor._attr_name != label
                     sensor._name = sensor._attr_name = label
                     sensor._attr_device_info["name"] = device_name
+                    if kind == "position":
+                        sensor._attrs = {**sensor._attrs, "group": True, "tracker_key": ent, "name": group["name"]}
                     if renamed and getattr(sensor, "hass", None) is not None and not getattr(sensor, "_bps_group_pending", False):
                         # A no-fix group stays unknown with empty attributes;
                         # the value-change gate will not publish its new name.
@@ -393,6 +397,9 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     continue
                 sensor = BPSGroupSensor(label, f"bps_group_{kind}_{group['id']}", eid, ent)
                 sensor._attr_device_info["name"] = device_name
+                if kind == "position":
+                    sensor._attr_icon = "mdi:dog"
+                    sensor._attrs = {"group": True, "tracker_key": ent, "name": group["name"]}
                 cache[eid] = sensor
                 additions.append(sensor)
             device_registry = dr.async_get(hass)

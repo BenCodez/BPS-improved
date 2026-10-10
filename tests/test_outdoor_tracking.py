@@ -705,3 +705,13 @@ def test_save_rejects_output_collision_even_with_only_ordinary_members(hass, mon
     assert hass._store_backing[STORAGE_KEY_LAYOUT] == edited
     edited["tracker_groups"][0]["enabled"] = True
     assert run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, edited)).status == 400
+
+
+@pytest.mark.parametrize('walls', [['metal'], ['metal', 'wood', 'metal', 5], 'metal'])
+def test_reject_invalid_wall_materials_before_layout_save(walls):
+    points = [{'x': 0, 'y': 0}, {'x': 10, 'y': 0}, {'x': 10, 'y': 10}, {'x': 0, 'y': 10}]
+    data = {'floor': [{'environment': [{'id': 'shop', 'name': 'Shop', 'type': 'building',
+        'material': 'metal', 'points': points, 'wall_materials': walls}]}]}
+    assert validate_outdoor_layout(data)
+    data['floor'][0]['environment'][0]['wall_materials'] = ['wood', None, 'metal', None]
+    assert validate_outdoor_layout(data) is None

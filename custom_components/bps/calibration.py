@@ -1013,6 +1013,9 @@ class BPSCalibrationAPI(HomeAssistantView):
     name = "api:bps:calibration"
     requires_auth = True
 
+    def __init__(self, validate_tracking=None):
+        self.validate_tracking = validate_tracking
+
     async def get(self, request):
         hass = request.app["hass"]
         return web.json_response(_status_payload(get_calibration_state(hass)))
@@ -1047,6 +1050,10 @@ class BPSCalibrationAPI(HomeAssistantView):
                 cal["results"][result["floor"]] = result
                 cal["last_solved_at"] = result["solved_at"]
                 cal["error"] = None
+            elif action == "validate_tracking":
+                if self.validate_tracking is None:
+                    raise ValueError("Tracking validation is unavailable")
+                return web.json_response(await self.validate_tracking(hass, data.get("floor") or cal.get("floor")))
             elif action == "apply":
                 updated = await apply_corrections(hass, cal, data.get("floor") or cal.get("floor"))
                 await save_calibration_state(hass)

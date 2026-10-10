@@ -680,7 +680,7 @@ class BpsMapCard extends HTMLElement {
     }
     if (this._groupEntityKeys?.has(entityId)) return this._groupEntityKeys.get(entityId);
     if (!entityId.startsWith('sensor.bps_group_')) return key;
-    const groupKey = key.replace(/_bps_(zone|floor)$/, '');
+    const groupKey = key.replace(/_bps_(zone|floor|position)$/, '');
     const isGroup = this._groupTrackerKeys?.has(groupKey)
       || this._hass?.states?.[entityId]?.attributes?.group === true;
     return isGroup ? groupKey : key;
@@ -1227,7 +1227,7 @@ class BpsMapCardEditor extends HTMLElement {
     const entInp = document.createElement("input");
     entInp.type = "text";
     entInp.style.width = "100%";
-    entInp.placeholder = "sensor.phone_alice, sensor.phone_bob";
+    entInp.placeholder = "sensor.bps_group_rover_bps_position, sensor.phone_alice";
     entInp.value = Array.isArray(this._config.entities) ? this._config.entities.join(", ") : "";
     entInp.addEventListener("change", () => {
       this._config.entities = entInp.value

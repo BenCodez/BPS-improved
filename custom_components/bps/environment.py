@@ -18,7 +18,7 @@ MAX_COORDINATE_PX = 10_000_000.0
 MIN_RELIABILITY = 0.05
 MIN_ENVIRONMENT_WEIGHT = 0.15
 BUILDING_BOUNDARY_WEIGHTS = {"unknown": 0.80, "light": 0.90,
-                             "heavy": 0.65, "metal": 0.50}
+                             "wood": 0.90, "heavy": 0.65, "metal": 0.50}
 VEGETATION_WEIGHTS = {"dense_trees": 0.75, "light_vegetation": 0.90,
                       "custom": 0.90}
 ENVIRONMENT_TYPES = frozenset({"building", *VEGETATION_WEIGHTS})
@@ -104,7 +104,13 @@ def _environment_signature(records):
             identifier = f"environment_{index}"
         if not isinstance(name, str) or len(name) > 256:
             name = identifier
-        signature.append((identifier, name, kind, material, tuple(coordinates)))
+        walls = record.get("wall_materials")
+        if (not isinstance(walls, list) or len(walls) != len(coordinates)
+                or any(w is not None and (not isinstance(w, str)
+                       or w not in BUILDING_BOUNDARY_WEIGHTS) for w in walls)):
+            walls = None
+        signature.append((identifier, name, kind, material, tuple(coordinates),
+                          tuple(walls) if walls is not None else None))
     return tuple(signature)
 
 
@@ -115,6 +121,7 @@ class EnvironmentRegion:
     kind: str
     material: str
     coordinates: tuple
+    wall_materials: tuple | None
     polygon: object
     prepared: object
 
@@ -127,13 +134,13 @@ class CompiledEnvironment:
 @lru_cache(maxsize=64)
 def _compile(signature):
     regions = []
-    for identifier, name, kind, material, coordinates in signature:
+    for identifier, name, kind, material, coordinates, walls in signature:
         try:
             polygon = Polygon(coordinates)
             if not polygon.is_valid or polygon.is_empty or polygon.area <= 1e-9:
                 continue
             regions.append(EnvironmentRegion(identifier, name, kind, material,
-                                              coordinates, polygon, prep(polygon)))
+                                              coordinates, walls, polygon, prep(polygon)))
         except (ValueError, TypeError):
             continue
     return CompiledEnvironment(tuple(regions))
@@ -150,7 +157,8 @@ def normalize_environment(records):
     compiled = _compile(_environment_signature(records))
     return [{"id": r.identifier, "name": r.name, "type": r.kind,
              "material": r.material,
-             "points": [{"x": x, "y": y} for x, y in r.coordinates]}
+             "points": [{"x": x, "y": y} for x, y in r.coordinates],
+             **({"wall_materials": list(r.wall_materials)} if r.wall_materials is not None else {})}
             for r in compiled.regions]
 
 
@@ -195,11 +203,32 @@ def _interior_transitions(region, line):
             continue
         point = line.interpolate((start + end) / 2)
         if region.prepared.contains(point):
-            states.append(True)
+            states.append((True, start, end))
             length_inside += end - start
         elif not region.polygon.boundary.covers(point):
-            states.append(False)
-    return sum(a != b for a, b in zip(states, states[1:])), length_inside
+            states.append((False, start, end))
+    crossings = [line.interpolate(b[1] if b[0] else a[2])
+                 for a, b in zip(states, states[1:]) if a[0] != b[0]]
+    return crossings, length_inside
+
+
+def _crossed_wall(region, point):
+    """At a corner, count one crossing using the less trusted adjacent wall."""
+    matches = []
+    coords = region.coordinates
+    for i, (ax, ay) in enumerate(coords):
+        bx, by = coords[(i + 1) % len(coords)]
+        dx, dy = bx - ax, by - ay
+        length2 = dx * dx + dy * dy
+        if length2 <= 1e-18:
+            continue
+        t = max(0.0, min(1.0, ((point.x - ax) * dx + (point.y - ay) * dy) / length2))
+        if math.hypot(point.x - ax - t * dx, point.y - ay - t * dy) <= 1e-6:
+            material = (region.wall_materials[i] if region.wall_materials else None) or region.material
+            matches.append((i + 1, material))
+    material = min((m for _, m in matches), key=BUILDING_BOUNDARY_WEIGHTS.get) if matches else region.material
+    return {"walls": [i for i, _ in matches], "material": material,
+            "point": [point.x, point.y]}
 
 
 def path_reliability(compiled, receiver_xy, fix_xy):
@@ -224,13 +253,17 @@ def path_reliability(compiled, receiver_xy, fix_xy):
         result["receiver_inside_building"] |= inside
         if line.length <= 1e-9 or not region.prepared.intersects(line):
             continue
-        crossings, interior_length = _interior_transitions(region, line)
+        crossing_points, interior_length = _interior_transitions(region, line)
+        crossings = len(crossing_points)
         if interior_length <= 1e-9:
             continue
         kinds.add(region.kind)
         if region.kind == "building":
-            weight = BUILDING_BOUNDARY_WEIGHTS[region.material] ** crossings
-            result["reflection_risk"] |= region.material == "metal"
+            walls = [_crossed_wall(region, p) for p in crossing_points]
+            weight = math.prod(BUILDING_BOUNDARY_WEIGHTS[w["material"]] for w in walls)
+            result["reflection_risk"] |= any(w["material"] == "metal" for w in walls) or (
+                not walls and "metal" in tuple(m or region.material for m in
+                    (region.wall_materials or (region.material,))))
             result["building_crossings"] += crossings
             result["building_paths"] += 1
         else:
@@ -242,6 +275,7 @@ def path_reliability(compiled, receiver_xy, fix_xy):
                                          "material": region.material,
                                          "boundary_crossings": crossings,
                                          "path_length_px": interior_length,
+                                         **({"wall_crossings": walls} if region.kind == "building" else {}),
                                          "weight": weight})
     result["environmental_weight"] = max(MIN_ENVIRONMENT_WEIGHT,
                                            result["environmental_weight"])

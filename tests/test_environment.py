@@ -171,3 +171,29 @@ def test_invalid_path_is_conservative_finite():
     info = path_reliability(compiled(rectangle()), (float("nan"), 2), (1, 2))
     assert info["invalid_path"] is True
     assert info["environmental_weight"] == MIN_ENVIRONMENT_WEIGHT
+
+
+def test_mixed_walls_use_crossed_edge_material_and_inherit_defaults():
+    shop = rectangle(material='metal')
+    shop['wall_materials'] = ['wood', None, None, None]
+    env = compiled(shop)
+    wood = path_reliability(env, (5, -5), (5, 5))
+    metal = path_reliability(env, (15, 5), (5, 5))
+    assert wood['environmental_weight'] == pytest.approx(.9)
+    assert not wood['reflection_risk']
+    assert metal['environmental_weight'] < wood['environmental_weight']
+    assert metal['reflection_risk']
+    assert wood['intersections'][0]['wall_crossings'][0]['walls'] == [1]
+    # Even an entirely interior path retains reflection risk from inherited
+    # metal walls; null does not mean an unknown wall material.
+    assert path_reliability(env, (4, 4), (6, 6))['reflection_risk']
+    assert normalize_environment([shop])[0]['wall_materials'] == shop['wall_materials']
+
+
+def test_mixed_walls_corner_crossing_counted_once_with_strongest_material():
+    shop = rectangle(material='wood')
+    shop['wall_materials'] = ['wood', 'wood', 'metal', 'wood']
+    result = path_reliability(compiled(shop), (-5, -5), (15, 15))
+    assert result['building_crossings'] == 2
+    assert result['reflection_risk']
+    assert result['intersections'][0]['wall_crossings'][1]['walls'] == [2, 3]

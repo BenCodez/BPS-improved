@@ -3027,6 +3027,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // don't follow buttonreset with a drawElements, so the end-of-drawElements
         // sync alone would leave them stranded; hiding here covers those.
         if (mapToolActions) mapToolActions.style.display = "none";
+        document.getElementById("environmentWalls").hidden = true;
     }
 
     // Manual zone colour: the swatch beside a zone's name in the sidebar. Fires
@@ -3341,6 +3342,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // old rectangle tool) stored their four corners in scan order; new zones
     // carry poly: true and keep the order they were drawn in.
     let zonePoints = [];
+    let environmentWallMaterials = [], environmentWallsSignature = "";
     let selectedVertex = null;
     let draggingZone = false;
     let dragLast = null;
@@ -3523,6 +3525,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                     name, type: document.getElementById('environmentType').value,
                     material: document.getElementById('environmentMaterial').value,
                     points: cords,
+                    ...(document.getElementById('environmentType').value === 'building'
+                        && environmentWallMaterials.some(m => m !== null)
+                        ? {wall_materials: [...environmentWallMaterials]} : {}),
                 });
             } catch (error) { bpsToast(error.message); return false; }
             savebuttondiv.appendChild(saveButton);
@@ -3577,6 +3582,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         selectedVertex = null;
         draggingZone = false;
         editTarget = null;
+        renderWallEditor();
         clearCanvas();
         drawElements();
     }
@@ -3780,6 +3786,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             bpsToast(`A zone or sub-zone can have at most ${MAX_ZONE_POINTS} corners.`);
             return;
         }
+        if (editTarget?.kind === 'environment') {
+            const closing = environmentWallMaterials[zonePoints.length - 1] ?? null;
+            environmentWallMaterials.push(closing);
+        }
         zonePoints.push(constrainForEdit(pos));
         drawZonePreview();
     }
@@ -3839,6 +3849,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!(editTarget && !editTarget.id)) return;
             idx = zonePoints.length - 1;
         }
+        if (editTarget?.kind === 'environment') {
+            const n = zonePoints.length, previous = (idx + n - 1) % n;
+            const merged = environmentWallMaterials[previous] === environmentWallMaterials[idx]
+                ? environmentWallMaterials[idx] : null;
+            environmentWallMaterials.splice(idx, 1);
+            if (n > 1) environmentWallMaterials[(idx + n - 2) % (n - 1)] = merged;
+        }
         zonePoints.splice(idx, 1);
         // Deleting the very last corner cancels the whole add/edit; anything
         // above that just removes the clicked corner (you can go below three
@@ -3851,6 +3868,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function drawZonePreview() {
+        renderWallEditor();
         clearCanvas();
         drawElements();
 
@@ -3938,6 +3956,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         ctx.lineWidth = 2;
         ctx.stroke();
 
+        if (editTarget?.kind === 'environment' && document.getElementById('environmentType').value === 'building') {
+            ctx.save(); ctx.font = `${12 / view.zoom}px sans-serif`; ctx.fillStyle = '#111';
+            zonePoints.forEach((p, i) => {
+                const next = zonePoints[(i + 1) % zonePoints.length];
+                ctx.fillText(`Wall ${i + 1}`, (p.x + next.x) / 2, (p.y + next.y) / 2);
+            });
+            ctx.restore();
+        }
         // Draw handles on every corner
         zonePoints.forEach(point => {
             ctx.beginPath();
@@ -6047,12 +6073,51 @@ document.addEventListener('DOMContentLoaded', async () => {
             ctx.restore();
         }
     }
+    function renderWallEditor() {
+        const node = document.getElementById('environmentWalls');
+        const active = drawAreaButton.dataset.active === 'true' && editTarget?.kind === 'environment' && document.getElementById('environmentType').value === 'building';
+        node.hidden = !active;
+        if (!active) return;
+        while (environmentWallMaterials.length < zonePoints.length) environmentWallMaterials.push(null);
+        environmentWallMaterials.length = zonePoints.length;
+        const signature = JSON.stringify([editTarget.id, environmentWallMaterials]);
+        if (signature === environmentWallsSignature) return;
+        environmentWallsSignature = signature;
+        node.replaceChildren();
+        const hint = document.createElement('p'); hint.className = 'bps-hint';
+        hint.textContent = 'Choose each numbered wall’s material. Building default follows the material above. Adding a corner splits the closing wall; merging unlike walls resets the merged wall to Building default.';
+        node.appendChild(hint);
+        const labels = {unknown: 'Unknown', light: 'Light', wood: 'Wood', heavy: 'Heavy', metal: 'Metal / reflective'};
+        environmentWallMaterials.forEach((material, i) => {
+            const label = document.createElement('label'); label.className = 'bps-label';
+            label.textContent = `Wall ${i + 1} (corner ${i + 1} → ${(i + 1) % zonePoints.length + 1})`;
+            const select = document.createElement('select'); select.className = 'bps-input';
+            select.id = `environmentWall${i + 1}`; label.setAttribute('for', select.id);
+            [null, ...outdoor.MATERIALS].forEach(value => {
+                const option = document.createElement('option'); option.value = value ?? '';
+                option.textContent = value === null ? 'Building default' : labels[value];
+                select.appendChild(option);
+            });
+            select.value = material ?? '';
+            select.addEventListener('change', () => {
+                environmentWallMaterials[i] = select.value || null;
+                environmentWallsSignature = JSON.stringify([editTarget.id, environmentWallMaterials]);
+                drawZonePreview();
+            });
+            node.append(label, select);
+        });
+    }
+    document.getElementById('environmentType').addEventListener('change', () => {
+        if (editTarget?.kind === 'environment') drawZonePreview();
+    });
     function beginEnvironmentEdit(polygon = null) {
         if (!outdoor.settings(finalcords).enabled || !currentFloor() || !checkCanvasImage()) {
             bpsToast('Enable Outdoor Tracking and select a saved floor first.'); return;
         }
         removeListeners(); buttonreset();
         zonePoints = polygon ? polygon.points.map(p => ({x: p.x, y: p.y})) : [];
+        environmentWallMaterials = polygon?.wall_materials ? [...polygon.wall_materials] : zonePoints.map(() => null);
+        environmentWallsSignature = '';
         selectedVertex = null; draggingZone = false;
         editTarget = {kind: 'environment', id: polygon ? polygon.id : null};
         if (polygon) {
@@ -6064,15 +6129,32 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('zoneName').value = polygon ? polygon.name : '';
         messdiv.textContent = 'Draw corners, drag a corner or the whole shape, right-click to delete a corner. Choose type/material in Outdoor settings, name the polygon, then press ✓ Save. Save Floor Plan to persist.';
     }
+    function enableOutdoorFromTool() {
+        if (!outdoor.settings(finalcords).enabled) {
+            finalcords.outdoor_tracking = {...outdoor.settings(finalcords), ...(finalcords.outdoor_tracking || {}), enabled: true};
+            syncOutdoorSettings(); refreshGroupEditor(); markOutdoorChanged();
+        }
+        document.getElementById('outdoorEditor').open = true;
+    }
+    function startEnvironmentTool(type) {
+        if (!currentFloor() || !checkCanvasImage()) {
+            bpsToast('Select a saved floor with a map first.'); return;
+        }
+        enableOutdoorFromTool();
+        document.getElementById('environmentType').value = type;
+        if (type !== 'building') document.getElementById('environmentMaterial').value = 'unknown';
+        beginEnvironmentEdit();
+    }
+    document.getElementById('openGroupEditor').addEventListener('click', () => {
+        document.getElementById('outdoorEditor').open = true;
+        document.getElementById('groupName').focus();
+    });
     document.getElementById('drawEnvironment').addEventListener('click', () => beginEnvironmentEdit());
     document.getElementById('addBuilding').addEventListener('click', () => {
-        document.getElementById('environmentType').value = 'building';
-        beginEnvironmentEdit();
+        startEnvironmentTool('building');
     });
     document.getElementById('addTrees').addEventListener('click', () => {
-        document.getElementById('environmentType').value = 'dense_trees';
-        document.getElementById('environmentMaterial').value = 'unknown';
-        beginEnvironmentEdit();
+        startEnvironmentTool('dense_trees');
     });
     function drawEnvironmentPolygons(floor) {
         if (!outdoor.settings(finalcords).enabled) return;
@@ -6159,6 +6241,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         const id = document.getElementById('groupId'); id.value = group ? group.id : ''; id.disabled = !!group;
         document.getElementById('groupEnabled').checked = !group || group.enabled === true;
         const beacons = document.getElementById('groupBeacons'); beacons.replaceChildren();
+        document.getElementById('groupEntityHint').textContent = group
+            ? `Save Floor Plan to create sensor.bps_group_${group.id}_bps_position. Use that entity in the BPS map card and select ${group.name} in the Tracking picker.`
+            : 'Apply a group, then Save Floor Plan to create its own BPS position entity for the map card.';
         const members = group && Array.isArray(group.beacons) ? group.beacons : [];
         for (const key of [...new Set([...availableBeaconKeys, ...members])]) {
             const option = document.createElement('option'); option.value = key;
@@ -6177,6 +6262,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 enabled: document.getElementById('groupEnabled').checked,
                 beacons: [...document.getElementById('groupBeacons').selectedOptions].map(o => o.value)}, availableBeaconKeys);
         } catch (error) { bpsToast(error.message); return; }
+        if (document.getElementById('groupEnabled').checked) enableOutdoorFromTool();
         if (!document.getElementById('groupEnabled').checked && !availableBeaconKeys.includes(`bps_group_${id}`))
             removeTrackedDevice(`bps_group_${id}`);
         refreshGroupEditor(); document.getElementById('groupSelector').value = id; loadGroupFields(); markOutdoorChanged();
@@ -6196,6 +6282,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const calibStart = document.getElementById('calibStart');
     const calibCancel = document.getElementById('calibCancel');
     const calibApply = document.getElementById('calibApply');
+    const calibTestTracking = document.getElementById('calibTestTracking');
+    const calibTrackingTest = document.getElementById('calibTrackingTest');
     const calibReset = document.getElementById('calibReset');
     const calibStatus = document.getElementById('calibStatus');
     const calibResults = document.getElementById('calibResults');
@@ -6442,6 +6530,33 @@ document.addEventListener('DOMContentLoaded', async () => {
             renderCalibration(await calibRequest({ action: 'cancel' }));
         } catch (e) {
             bpsToast(e.message);
+        }
+    });
+
+    calibTestTracking.addEventListener('click', async () => {
+        if (savebuttondiv.contains(saveButton)) {
+            bpsToast('Save Floor Plan before testing tracking.');
+            return;
+        }
+        const floor = mapname.value;
+        calibTestTracking.disabled = true;
+        calibTrackingTest.textContent = 'Comparing recorded tracking…';
+        try {
+            const result = await calibRequest({action: 'validate_tracking', floor});
+            const metric = value => typeof value === 'number' ? value.toFixed(2) + ' m' : '—';
+            // Keep the tested floor/date in view if selection or auto results
+            // changed while the executor was comparing the frozen candidate.
+            calibTrackingTest.textContent = `${result.floor}: ${result.verdict}. ` +
+                `Median ${metric(result.baseline.median_m)} → ${metric(result.candidate.median_m)}; ` +
+                `95th percentile ${metric(result.baseline.p95_m)} → ${metric(result.candidate.p95_m)}. ` +
+                `${result.baseline.samples} paired fixes at ${result.locations} locations; ` +
+                `${result.candidate_failures} candidate failures. ` +
+                `${result.truncated ? 'Sampled across the recording. ' : ''}` +
+                `Candidate solved ${result.candidate_solved_at || 'unknown'}. ${result.scope}`;
+        } catch (error) {
+            calibTrackingTest.textContent = error.message;
+        } finally {
+            calibTestTracking.disabled = false;
         }
     });
 
