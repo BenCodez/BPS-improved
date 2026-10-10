@@ -55,6 +55,7 @@ from . import history as history_mod
 from .zone_adjust import adjust_zones, adjust_subzones
 from .environment import outdoor_settings, finite_number, reading_max_age
 from .outdoor_tracking import solve_outdoor, account_for_published_position
+from .solver_settings import MIN_WEIGHT_RADIUS_M, SOLVER_ROBUST_F_SCALE
 from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
@@ -203,13 +204,6 @@ KF_MAX_GAP_S = 30.0          # gap beyond which state is reset (tracker was away
 # points to fix a position even while every distance is legitimately changing
 # during movement.
 RADIUS_JUMP_TOL = 0.5
-# Robust-loss knee for the trilateration solver, in units of the objective's
-# residual (~relative radius error). soft_l1 down-weights any receiver whose
-# radius disagrees with the fit by more than ~this fraction, so one persistently
-# wrong (through-wall / body-shadowed) reading can't drag the position — the
-# temporal jump gate only sees a one-tick change and is blind to a steady liar.
-SOLVER_ROBUST_F_SCALE = 0.3
-
 # Uploaded floor-plan maps: accepted image extensions and a size cap. Client
 # filenames are never trusted for filesystem paths (see _safe_maps_child).
 # .jfif/.jpe are ordinary JPEG variants a browser's image/jpeg picker yields.
@@ -276,13 +270,6 @@ TRACKER_HEIGHT_M = 1.0
 # different dB scale (this is a relative knob, not a calibrated instrument).
 PATH_LOSS_EXPONENT = 3.0
 TRACKER_REF_OFFSET_MAX_DB = 20.0  # +/- range accepted from the panel/API
-# Slant->horizontal legitimately produces very short radii (tracker nearly
-# under a ceiling probe). The solver's geometric 1/r^2 weight would explode
-# there and let that one receiver dominate the fit, so for WEIGHTING (not for
-# the residual) radii are clamped to this physical minimum, converted to each
-# floor's pixel scale.
-MIN_WEIGHT_RADIUS_M = 0.5
-
 # --- Floor election by hypothesis competition ---------------------------------
 # The floor used to be elected by the single nearest receiver — one noisy
 # reading through a ceiling could steal the tracker for a cycle (kitchen <->
