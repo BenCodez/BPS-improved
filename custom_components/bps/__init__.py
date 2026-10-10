@@ -107,6 +107,46 @@ def _tracking_context_current(context):
             and bucket.get("_tracking_lifecycle") is lifecycle)
 
 
+async def _tracking_executor_job(hass, function, *args):
+    """Keep physical worker admission until completion, including after reload.
+
+    Cancelling an awaiter cannot stop its executor thread. The semaphore and
+    owned tasks survive lifecycle changes in the per-HA bucket, so new batches
+    cannot queue more native jobs while abandoned private calculations run.
+    """
+    bucket = hass.data.setdefault(DOMAIN, {})
+    slots = bucket.setdefault("_tracking_executor_slots", asyncio.Semaphore(MAX_CONCURRENT_TRACKERS))
+    jobs = bucket.setdefault("_tracking_executor_jobs", set())
+    await slots.acquire()
+
+    async def owned():
+        try:
+            return await hass.async_add_executor_job(function, *args), None
+        except Exception as error:
+            # Python 3.14 reports exceptions in abandoned shielded tasks even
+            # if a callback retrieves them. Transfer errors as outcome values.
+            return None, error
+
+    try:
+        task = asyncio.create_task(owned())
+    except BaseException:
+        slots.release()
+        raise
+    jobs.add(task)
+
+    def finished(done):
+        jobs.discard(done)
+        slots.release()
+        if not done.cancelled():
+            done.exception()
+
+    task.add_done_callback(finished)
+    result, error = await asyncio.shield(task)
+    if error is not None:
+        raise error
+    return result
+
+
 async def _stop_tracking(hass):
     """Invalidate publications before cancelling and draining background work.
 
@@ -1340,7 +1380,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
             prior = next((p.get("raw") for p in apitricords
                           if p["ent"] == entity and p["floor"] == floor_name), None)
             # Additional geometry and bounded re-solving belong off HA's loop.
-            outdoor_result = await hass.async_add_executor_job(partial(
+            outdoor_result = await _tracking_executor_job(hass, partial(
                 solve_outdoor, floor, weighted, floor_bounds, scale, min_wr,
                 _reading_max_age(entity_layout), prior, trilaterate,
                 position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS),
@@ -1675,7 +1715,7 @@ async def update_tracker_groups(hass):
     group_layout = copy.deepcopy(layout)
     lookup = [{"entity": p["ent"], "data": group_layout} for p in fused]
     for position in fused:
-        await hass.async_add_executor_job(_assign_group_zone, position, lookup, scales[position["floor"]])
+        await _tracking_executor_job(hass, _assign_group_zone, position, lookup, scales[position["floor"]])
         if not _tracking_context_current(context):
             return
         position["last_update_age_s"] = max(0.0, time.time() - position["updated"])

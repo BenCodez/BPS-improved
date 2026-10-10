@@ -45,7 +45,7 @@ factors or fabricates a corrected BLE distance.
 
 | Work | Ownership and scheduling |
 | --- | --- |
-| Tracker refresh | One batch per HA instance; at most eight trackers active. Failed siblings settle before groups or another cycle. Detached per-tracker layouts go to workers. |
+| Tracker refresh | One batch per HA instance; at most eight trackers active. Physical executor admission survives cancellation/reload until the private jobs finish. Failed siblings settle before groups or another cycle. Detached per-tracker layouts go to workers. |
 | Map edits / reload / unload | Layout identity and lifecycle checks reject obsolete post-executor results before election, Kalman state, history or sensors change. Tracking is invalidated, cancelled and awaited before teardown; failed unload resumes a fresh generation. Deferred startup cannot resurrect an unloaded integration. |
 | Group zone assignment | Each executor job receives an unpublished fused fix and detached layout. Results are checked against layout/lifecycle before publication. |
 | Calibration | Numeric samples/receiver records are detached. Auto/manual sampling loops await their own solves and stop on cancellation. Concurrent manual API solves are rejected; obsolete results cannot replace newer candidates after session, map or lifecycle changes. |

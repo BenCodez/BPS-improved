@@ -3,6 +3,7 @@ import asyncio
 import copy
 import datetime
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -295,6 +296,85 @@ def test_direct_outdoor_tracking_without_runtime_task_remains_supported(hass):
         await bps.process_single_entity(hass, [entry], entry)
         assert bps.apitricords[0]["ent"] == "beacon_a"
         assert bps.apitricords[0]["cords"] == pytest.approx([50, 50])
+    run(scenario())
+
+
+@pytest.mark.parametrize("fail_abandoned", [False, True])
+def test_repeated_reload_retains_physical_worker_limit(hass, monkeypatch, fail_abandoned):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        # Exceed the intended limit in the underlying executor so the test
+        # cannot pass solely because HA/asyncio's pool happens to be small.
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=24))
+        release = threading.Event()
+        full = asyncio.Event()
+        lock = threading.Lock()
+        active = maximum = started = 0
+        abandoned_errors = []
+        loop.set_exception_handler(lambda _loop, context: abandoned_errors.append(context))
+
+        def worker():
+            nonlocal active, maximum, started
+            with lock:
+                active += 1
+                started += 1
+                maximum = max(maximum, active)
+                if started == bps.MAX_CONCURRENT_TRACKERS:
+                    loop.call_soon_threadsafe(full.set)
+            try:
+                assert release.wait(3)
+                if fail_abandoned:
+                    raise ValueError("abandoned private worker")
+            finally:
+                with lock:
+                    active -= 1
+
+        async def executor(func, *args):
+            return await asyncio.to_thread(func, *args)
+
+        async def tracker(_hass, _data, entry):
+            await bps._tracking_executor_job(hass, worker)
+
+        async def groups(_hass):
+            pass
+
+        hass.async_add_executor_job = executor
+        monkeypatch.setattr(bps, "process_single_entity", tracker)
+        monkeypatch.setattr(bps, "update_tracker_groups", groups)
+        entries = [{"entity": str(i)} for i in range(bps.MAX_CONCURRENT_TRACKERS)]
+        bucket = hass.data.setdefault("bps", {})
+        first = asyncio.create_task(bps.process_entities(hass, entries))
+        hass.data["bps_update_task"] = first
+        await full.wait()
+        try:
+            await bps._stop_tracking(hass)
+            assert first.cancelled()
+            for _ in range(3):
+                bucket["_tracking_active"] = True
+                next_batch = asyncio.create_task(bps.process_entities(hass, entries))
+                hass.data["bps_update_task"] = next_batch
+                # Let the fresh batch reach worker admission without any
+                # physical thread being allowed to complete yet.
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                assert started == bps.MAX_CONCURRENT_TRACKERS
+                assert len(bucket["_tracking_executor_jobs"]) == bps.MAX_CONCURRENT_TRACKERS
+                await bps._stop_tracking(hass)
+                assert next_batch.cancelled()
+            bucket["_tracking_active"] = True
+            recovery = asyncio.create_task(bps.process_entities(hass, entries))
+            hass.data["bps_update_task"] = recovery
+            release.set()
+            await recovery
+            assert started == 2 * bps.MAX_CONCURRENT_TRACKERS
+            assert maximum == bps.MAX_CONCURRENT_TRACKERS
+            assert active == 0
+            assert bucket["_tracking_executor_jobs"] == set()
+            assert abandoned_errors == []
+        finally:
+            release.set()
+            await bps._stop_tracking(hass)
+
     run(scenario())
 
 
