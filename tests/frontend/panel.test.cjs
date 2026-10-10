@@ -396,7 +396,7 @@ test('panel displays tiny numbered beacons under the main icon with diagnostics 
     assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'text' && ['1', '2'].includes(c[1])).map(c => c[1]), ['2']);
 });
 
-test('panel constituent circles inherit group freshness and expire during failed polling', async () => {
+test('panel draws only the main group circle with diagnostics and ages it on failed polling', async () => {
     const source = layout(); source.outdoor_tracking = {enabled: true};
     source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a', 'beacon_b']}];
     const p = await panel(source); p.hooks.select('Property'); p.setClock(1000000);
@@ -409,16 +409,37 @@ test('panel constituent circles inherit group freshness and expire during failed
     await p.el('starttrack').fire('click');
     const poll = p.intervals.findLast(i => i.ms === 500);
     p.canvasCalls.length = 0; await poll.cb();
-    assert.ok(p.canvasCalls.some(call => call[0] === 'arc' && call[3] === 60));
+    assert.ok(!p.canvasCalls.some(call => call[0] === 'arc' && call[3] === 60));
+    assert.equal(p.canvasCalls.filter(call => call[0] === 'arc' && call[3] >= 60).length, 1);
+    assert.ok(p.canvasCalls.some(call => call[0] === 'arc' && call[3] === 148));
     const staleDash = call => call[0] === 'dash' && call[1] === 3 && call[2] === 6;
     assert.ok(!p.canvasCalls.some(staleDash), '45-second beacon is fresh under the 90-second cutoff');
-    p.setClock(1046000); p.network.failCords = true;
+    p.setClock(1091000); p.network.failCords = true;
     p.canvasCalls.length = 0; await poll.cb();
     assert.ok(p.canvasCalls.some(staleDash), 'cached beacon expires at its inherited cutoff');
     const cached = p.hooks.tracks().get('bps_group_rover');
     cached.outdoor.stale_after_s = 300; p.setClock(1155000);
     p.canvasCalls.length = 0; await poll.cb();
     assert.ok(!p.canvasCalls.some(staleDash), 'group position timeout applies when the reading gate is disabled');
+});
+
+test('panel keeps one uncertainty circle per tracker when a group and an individual are selected', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a', 'beacon_b']}];
+    const p = await panel(source, undefined, true); p.hooks.select('Property'); p.setClock(1000000);
+    p.el('outdoorDiagnostics').checked = true;
+    const outdoor = {observed: 1000, estimated_uncertainty_m: 3};
+    p.network.cords = [{ent: 'beacon_a', cords: [60, 100], floor: 'Property', updated: 1000, outdoor},
+        {ent: 'bps_group_rover', group: true, name: 'Rover', cords: [100, 100], floor: 'Property', updated: 1000,
+            outdoor: {...outdoor, estimated_uncertainty_m: 4}, beacon_positions: [
+                {ent: 'beacon_a', cords: [60, 100], floor: 'Property', estimated_uncertainty_m: 3},
+                {ent: 'beacon_b', cords: [140, 100], floor: 'Property', estimated_uncertainty_m: 3}]}];
+    p.el('entSelector').value = 'beacon_a'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click');
+    p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
+    p.canvasCalls.length = 0; await p.intervals.findLast(i => i.ms === 500).cb();
+    assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'arc' && c[3] >= 60).map(c => c.slice(1, 4)),
+        [[60, 100, 60], [100, 100, 80]], 'one circle each; diagnostic members do not add bubbles');
 });
 
 test('panel retains group fixes through HTTP failures and malformed responses', async () => {

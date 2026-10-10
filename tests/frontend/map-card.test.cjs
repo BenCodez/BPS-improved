@@ -62,6 +62,23 @@ test('card rendering preserves old markers and adds correctly scaled optional un
     assert.equal(cv.calls.filter(Array.isArray).length, 1);
 });
 
+test('card keeps exactly one uncertainty circle per selected tracker including a group', () => {
+    const c = card(), cv = canvas(); c._canvas = cv.value;
+    c._outdoorSettings.enabled = true; c._config.show_outdoor_diagnostics = true;
+    c._config.entities.push('sensor.bps_group_rover_bps_position');
+    c._entityByTrackerKey.set('bps_group_rover', 'sensor.bps_group_rover_bps_position');
+    c._hass.states['sensor.bps_group_rover_bps_position'] = {state: 'tracking', attributes: {group: true, floor: 'Property'}};
+    c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+    c._positions.set('beacon_a', {x: 100, y: 100, outdoor: {estimated_uncertainty_m: 3}});
+    c._positions.set('bps_group_rover', {x: 200, y: 100, outdoor: {estimated_uncertainty_m: 4},
+        payload: {group: true, beacon_positions: [
+            {ent: 'beacon_a', cords: [100, 100], estimated_uncertainty_m: 3},
+            {ent: 'beacon_b', cords: [220, 100], estimated_uncertainty_m: 3}]}});
+    c._drawMarkers();
+    assert.deepEqual(cv.calls.filter(v => Array.isArray(v) && v[2] >= 60).map(v => v.slice(0, 3)),
+        [[100, 100, 60], [200, 100, 80]], 'only the individual tracker and the main group have uncertainty circles');
+});
+
 test('card shows quiet member icons without diagnostics and retains one main group icon', () => {
     const c = card(), cv = canvas(); c._canvas = cv.value;
     c._config.entities = ['sensor.bps_group_rover_bps_zone'];
@@ -104,7 +121,7 @@ test('group zone sensor resolves fused map key/name and shows constituent beacon
     assert.match(c.status, /2\/2 beacons/);
     c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg'; c._drawMarkers();
     assert.ok(cv.calls.some(v => Array.isArray(v) && v[2] === 80)); // fused radius
-    assert.ok(cv.calls.some(v => Array.isArray(v) && v[2] === 60)); // beacon radius
+    assert.ok(!cv.calls.some(v => Array.isArray(v) && v[2] === 60)); // member has no second uncertainty circle
     assert.ok(cv.calls.includes('Rover'));
     row.beacon_positions.push({ent: 'beacon_b', floor: 'Barn', cords: [400, 300], estimated_uncertainty_m: 9});
     cv.calls.length = 0; c._drawMarkers();
@@ -114,7 +131,7 @@ test('group zone sensor resolves fused map key/name and shows constituent beacon
     assert.equal(c._positions.get('bps_group_rover').receivedAt, 500, 'repeated poll preserves source observation time');
 });
 
-test('card constituent circles inherit group freshness limits and age cached source times', () => {
+test('card draws one group uncertainty circle even with member diagnostics enabled', () => {
     const c = card(), cv = canvas(), now = Date.now(); c._canvas = cv.value;
     c._config.entities = ['sensor.bps_group_rover_bps_zone']; c._config.show_outdoor_diagnostics = true;
     c._entityByTrackerKey.set('bps_group_rover', c._config.entities[0]);
@@ -126,12 +143,17 @@ test('card constituent circles inherit group freshness limits and age cached sou
     const pos = {x: 200, y: 100, receivedAt: now, outdoor: {estimated_uncertainty_m: 4, stale_after_s: 90},
         payload: {group: true, beacon_positions: [beacon]}};
     c._positions.set('bps_group_rover', pos); c._drawMarkers();
-    assert.ok(cv.calls.some(v => Array.isArray(v) && v[2] === 60));
+    assert.equal(cv.calls.filter(v => Array.isArray(v) && v[2] >= 60).length, 1);
+    assert.ok(cv.calls.some(v => Array.isArray(v) && v[2] === 80));
     assert.ok(!cv.dashes.some(dash => dash[0] === 3 && dash[1] === 6), '45-second beacon remains fresh with a 90-second cutoff');
-    // An old cached diagnostic age cannot keep a source circle fresh forever.
+    // Member age affects the mini icon, not another uncertainty circle.
     beacon.updated = now / 1000 - 91;
     cv.dashes.length = 0; c._drawMarkers();
-    assert.ok(cv.dashes.some(dash => dash[0] === 3 && dash[1] === 6));
+    assert.ok(!cv.dashes.some(dash => dash[0] === 3 && dash[1] === 6));
+    assert.ok(cv.dashes.some(dash => dash[0] === 2 && dash[1] === 2));
+    pos.receivedAt = now - 91 * 1000;
+    cv.dashes.length = 0; c._drawMarkers();
+    assert.ok(cv.dashes.some(dash => dash[0] === 3 && dash[1] === 6), 'only the main group circle ages with its own fix');
     pos.outdoor.stale_after_s = 300; beacon.age_s = 200; beacon.updated = now / 1000 - 200;
     cv.dashes.length = 0; c._drawMarkers();
     assert.ok(!cv.dashes.some(dash => dash[0] === 3 && dash[1] === 6), 'disabled reading gate uses the group position timeout');

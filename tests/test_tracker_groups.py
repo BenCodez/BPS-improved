@@ -96,6 +96,23 @@ def test_agreeing_beacons_improve_uncertainty_modestly():
     assert all(p["used"] for p in result["beacon_positions"])
 
 
+def test_one_group_radius_combines_both_beacons_with_the_published_position_weights():
+    a = position(uncertainty=3, updated=NOW)
+    b = position("beacon_b", x=110, uncertainty=10, updated=NOW - 100)
+    result = fuse(a, b)
+    # Recover the normalized weight from the fused centre. An old/noisy member
+    # has small influence but its variance still follows that actual weight.
+    fraction_b = (result["cords"][0] - a["cords"][0]) / (b["cords"][0] - a["cords"][0])
+    combined = math.hypot((1 - fraction_b) * 3, fraction_b * 10)
+    spread = math.sqrt((1 - fraction_b) * fraction_b)  # member separation is 1 m
+    outdoor = result["outdoor"]
+    assert outdoor["beacons_used"] == 2
+    assert outdoor["combined_beacon_uncertainty_m"] == pytest.approx(combined)
+    assert outdoor["beacon_scatter_m"] == pytest.approx(spread)
+    assert outdoor["estimated_uncertainty_m"] == pytest.approx(math.hypot(combined, spread))
+    assert outdoor["uncertainty_method"] == "beacon_fusion_heuristic"
+
+
 def test_good_and_poor_far_apart_fix_prefers_strong_and_inflates_uncertainty():
     result = fuse(position(), position("beacon_b", x=400, uncertainty=20, receivers=3))
     assert result["cords"] == [100.0, 100.0]

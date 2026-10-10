@@ -219,12 +219,17 @@ test('known tracker collisions reject group creation and activation while permit
 test('diagnostics explain measurement trust and fused beacon disagreement', () => {
     const text = out.diagnosticsText({ent: 'bps_group_rover', group: true, name: 'Rover', beacons_reporting: 2, total_beacons: 2,
         beacon_disagreement_m: 4.5, fusion_confidence: 'moderate', beacon_positions: [{ent: 'beacon_a', estimated_uncertainty_m: 3}],
-        outdoor: {estimated_uncertainty_m: 7.4, confidence: 'moderate', receivers_used: 4, receiver_diagnostics: [{receiver: 'shop', measured_distance_m: 15,
+        outdoor: {estimated_uncertainty_m: 7.4, confidence: 'moderate', receivers_used: 4,
+            residual_m: 2, noise_floor_m: 1.5, geometry_factor: 1.2, effective_receivers: 3.5,
+            beacons_used: 2, combined_beacon_uncertainty_m: 2.5, beacon_scatter_m: 1,
+            receiver_diagnostics: [{receiver: 'shop', measured_distance_m: 15,
             corrected_distance_m: 13, reading_age_s: 2, classification: 'building_exit', building_crossings: 1, reflection_risk: true, environmental_weight: .4, reliability_weight: .3, status: 'down_weighted'}]}});
     assert.match(text, /2\/2 beacons/);
     assert.match(text, /disagreement 4.5 m/);
     assert.match(text, /measured 15.0 m, corrected 13.0 m/);
     assert.match(text, /reflection \/ multipath risk/);
+    assert.match(text, /weighted residual 2.0 m · noise floor 1.5 m · geometry ×1.2 · effective receivers 3.5/);
+    assert.match(text, /2 beacons combined · beacon uncertainty 2.5 m · position spread 1.0 m/);
 });
 
 test('unknown prefixed beacon members survive missing inventory but configured groups cannot nest', () => {

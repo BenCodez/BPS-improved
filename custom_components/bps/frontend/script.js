@@ -6058,10 +6058,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             outdoor.drawMiniBeacon(ctx, p, iconSize, color, outdoor.beaconNumber(p, group),
                 position.outdoor?.stale_after_s, view.zoom || 1);
             if (!document.getElementById('outdoorDiagnostics').checked) continue;
-            outdoor.drawUncertainty(ctx, {x, y, receivedAt: outdoor.fixTime(p), outdoor: {
-                estimated_uncertainty_m: p.estimated_uncertainty_m, position_age_s: p.age_s,
-                stale_after_s: position.outdoor?.stale_after_s}},
-                (currentFloor() || {}).scale, outdoor.settings(finalcords), color, view.zoom || 1);
             ctx.save();
             ctx.strokeStyle = color;
             ctx.globalAlpha = 0.65;
