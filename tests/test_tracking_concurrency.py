@@ -474,6 +474,13 @@ def test_failed_unload_resumes_tracking_with_fresh_generation(hass, monkeypatch,
         listener = hass.data["bps_state_listener_unsub"] = lambda: pytest.fail("live listener removed")
         bucket = hass.data.setdefault("bps", {})
         generation = bucket["_tracking_lifecycle"] = object()
+        reconciled = []
+
+        def reconcile():
+            assert bucket["_tracking_active"] is True
+            reconciled.append(True)
+
+        bucket["resume_sensor_discovery"] = reconcile
         old = asyncio.create_task(tracking(hass))
         hass.data["bps_update_task"] = old
         await started.wait()
@@ -487,6 +494,7 @@ def test_failed_unload_resumes_tracking_with_fresh_generation(hass, monkeypatch,
             assert hass.data["bps_initialized"] is True
             assert hass.data["bps_sensors"] is sensors
             assert hass.data["bps_state_listener_unsub"] is listener
+            assert reconciled == [True]
             await started.wait()
         finally:
             await bps._stop_tracking(hass)
@@ -535,6 +543,7 @@ def test_successful_platform_unload_completes_even_if_panel_removal_fails(hass, 
         hass.data["bps_state_listener_unsub"] = lambda: events.append("listener")
         bucket = hass.data.setdefault("bps", {})
         bucket["sync_group_sensors"] = object()
+        bucket["resume_sensor_discovery"] = lambda: pytest.fail("unloaded platform resumed")
         old = asyncio.create_task(tracking(hass))
         hass.data["bps_update_task"] = old
         await started.wait()
@@ -544,5 +553,6 @@ def test_successful_platform_unload_completes_even_if_panel_removal_fails(hass, 
         assert bucket["_tracking_active"] is False
         assert not {"bps_update_task", "bps_initialized", "bps_sensors", "bps_state_listener_unsub"} & hass.data.keys()
         assert "sync_group_sensors" not in bucket
+        assert "resume_sensor_discovery" not in bucket
 
     run(scenario())

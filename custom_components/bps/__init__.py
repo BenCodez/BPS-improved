@@ -2293,6 +2293,9 @@ async def async_setup(hass, config):
             return
         bucket["_tracking_lifecycle"] = object()
         bucket["_tracking_active"] = True
+        resume_discovery = bucket.get("resume_sensor_discovery")
+        if resume_discovery is not None:
+            resume_discovery()
         activate_diagnostics(hass)
         hass.data["bps_update_task"] = hass.async_create_task(update_tracked_entities(hass))
 
@@ -2339,6 +2342,9 @@ async def async_unload_entry(hass: HomeAssistant, entry):
             bucket = hass.data.setdefault(DOMAIN, {})
             bucket["_tracking_lifecycle"] = object()
             bucket["_tracking_active"] = True
+            resume_discovery = bucket.get("resume_sensor_discovery")
+            if resume_discovery is not None:
+                resume_discovery()
             activate_diagnostics(hass)
             hass.data["bps_update_task"] = hass.async_create_task(update_tracked_entities(hass))
         return False
@@ -2406,6 +2412,7 @@ async def async_unload_entry(hass: HomeAssistant, entry):
     hass.data.pop("bps_initialized", None)
     hass.data.pop("bps_sensors", None)
     hass.data.get(DOMAIN, {}).pop("sync_group_sensors", None)
+    hass.data.get(DOMAIN, {}).pop("resume_sensor_discovery", None)
 
     return True
 

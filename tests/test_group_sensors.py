@@ -199,7 +199,9 @@ def test_retained_discovery_listener_pauses_during_unload_and_resumes(platform, 
         listeners["state_changed"](event)
     assert len(added) == before
     hass.data["bps"]["_tracking_active"] = True
-    listeners["state_changed"](event)
+    # The creation event will never recur; ordinary updates have old_state.
+    # Lifecycle recovery must explicitly reconcile the retained platform.
+    hass.data["bps"]["resume_sensor_discovery"]()
     assert "sensor.dog_bps_zone" in hass.data["bps_sensors"]
 
 
