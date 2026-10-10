@@ -258,6 +258,10 @@ def normalize_bps_registry_entity_ids_from_cache(hass):
 
     expected_by_uid = {}
     for expected_entity_id, sensor in sensors_cache.items():
+        # Group entities use stable metadata, so user registry names are valid
+        # map-card references. The legacy beacon migration must not undo them.
+        if isinstance(sensor, BPSGroupSensor):
+            continue
         uid = getattr(sensor, "unique_id", None)
         if uid and expected_entity_id.startswith("sensor."):
             expected_by_uid[uid] = expected_entity_id

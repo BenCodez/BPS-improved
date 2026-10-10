@@ -369,3 +369,29 @@ def test_primary_group_entity_is_selectable_without_fix_and_rename_safe(platform
     asyncio.run(sync([]))
     assert 'sensor.my_dog' not in registry.entities
     assert primary.removed
+
+
+@pytest.mark.parametrize('kind', ['position', 'zone', 'floor'])
+def test_renamed_group_entities_survive_another_group_registration(platform, kind):
+    hass, registry, module, add, added = platform
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    sync = hass.data['bps']['sync_group_sensors']
+    rover = {'id': 'rover', 'name': 'Rover'}
+    asyncio.run(sync([rover]))
+    key = f'sensor.bps_group_rover_bps_{kind}'
+    primary = hass.data['bps_sensors'][key]
+    renamed = f'sensor.my_dog_{kind}'
+    registry.async_update_entity(key, renamed)
+    primary.entity_id = renamed
+    asyncio.run(sync([rover, {'id': 'fido', 'name': 'Fido'}]))
+    assert renamed in registry.entities
+    assert key not in registry.entities
+    assert hass.data['bps_sensors'][key] is primary
+    # Adding ordinary beacon sensors also invokes the legacy post-add migration.
+    additions = []
+    module.ensure_sensors_for_entity(hass, 'beacon_new', hass.data['bps_sensors'], additions)
+    add(additions)
+    module.normalize_bps_registry_entity_ids_from_cache(hass)
+    assert renamed in registry.entities
+    asyncio.run(sync([]))
+    assert renamed not in registry.entities

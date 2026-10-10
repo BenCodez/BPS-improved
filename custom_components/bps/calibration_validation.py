@@ -124,7 +124,8 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver):
             gate = layout.get("reading_max_age", context.get("defaults", {}).get("reading_max_age_s", 30))
             rows = [r for r in frame.get("readings", []) if r.get("tracker") == target
                 and r.get("floor") == floor_name and r.get("status") == "current"
-                and not r.get("ignored") and not r.get("assumed_unit_m")
+                and not (layout.get("outdoor_tracking", {}).get("enabled") is True and r.get("ignored"))
+                and not r.get("assumed_unit_m")
                 and number(r.get("measured_distance_m")) and r["measured_distance_m"] >= 0
                 and number(r.get("observed")) and max(truth["time"], context_since) <= r["observed"] <= frame["time"]
                 and (not gate or frame["time"] - r["observed"] < gate)]

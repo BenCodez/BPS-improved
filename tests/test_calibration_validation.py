@@ -108,3 +108,16 @@ def test_authenticated_calibration_test_uses_detached_recording(hass, monkeypatc
     hass.data['bps']['calibration_validation_busy'] = True
     with pytest.raises(ValueError, match='already running'):
         asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
+
+
+@pytest.mark.parametrize('enabled,expected', [(False, 20), (True, 0)])
+def test_saved_ignore_policy_matches_live_outdoor_enablement(enabled, expected):
+    data, floor = recording()
+    floor['receivers'] = floor['receivers'][:3]
+    floor['receivers'][0]['outdoor_policy'] = 'ignore'
+    data['contexts']['c']['layout']['outdoor_tracking']['enabled'] = enabled
+    for frame in data['frames']:
+        frame['readings'] = [r for r in frame['readings'] if r['receiver'] != 'r3']
+        for row in frame['readings']:
+            row['ignored'] = row['receiver'] == 'r0'
+    assert compare(data, floor)['baseline']['samples'] == expected
