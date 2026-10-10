@@ -133,7 +133,7 @@ def test_group_disable_removes_owned_entities_preserves_beacons(platform):
     asyncio.run(sync([{"id": "rover", "name": "Rover"}]))
     owned = [s for s in added if str(s.unique_id).startswith("bps_group_")]
     asyncio.run(sync([]))
-    assert len(owned) == 2 and all(s.removed for s in owned)
+    assert len(owned) == 3 and all(s.removed for s in owned)
     assert "sensor.beacon_a_bps_zone" in registry.entities
     assert not any("bps_group_rover" in eid for eid in hass.data["bps_sensors"])
 
@@ -338,7 +338,7 @@ def test_missing_prefixed_beacon_keeps_group_registry_identity(platform, monkeyp
     asyncio.run(module.async_setup_entry(hass, None, add))
     entities = {key: value for key, value in registry.entities.items() if key.startswith("sensor.bps_group_")}
     initial_additions = len(added)
-    assert len(entities) == 2
+    assert len(entities) == 3
     entities["sensor.bps_group_rover_bps_zone"].name = "My dog's zone"
     for sensors in (["sensor.bps_group_beacon_distance_to_p0"], [],
                     ["sensor.bps_group_beacon_distance_to_p0"]):
@@ -347,3 +347,51 @@ def test_missing_prefixed_beacon_keeps_group_registry_identity(platform, monkeyp
         assert all(registry.entities[key] is entity for key, entity in entities.items())
     assert registry.entities["sensor.bps_group_rover_bps_zone"].name == "My dog's zone"
     assert registry.removed == [] and len(added) == initial_additions
+
+
+def test_primary_group_entity_is_selectable_without_fix_and_rename_safe(platform):
+    hass, registry, module, add, added = platform
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    sync = hass.data['bps']['sync_group_sensors']
+    asyncio.run(sync([{'id': 'rover', 'name': 'Rover'}]))
+    key = 'sensor.bps_group_rover_bps_position'
+    primary = hass.data['bps_sensors'][key]
+    assert primary.unique_id == 'bps_group_position_rover'
+    assert primary._attrs == {'group': True, 'tracker_key': 'bps_group_rover', 'name': 'Rover'}
+    assert primary.name == 'Rover'
+    count = len(added)
+    registry.async_update_entity(key, 'sensor.my_dog')
+    primary.entity_id = 'sensor.my_dog'
+    asyncio.run(sync([{'id': 'rover', 'name': 'Rover renamed'}]))
+    assert len(added) == count
+    assert primary._attrs['name'] == 'Rover renamed'
+    assert primary._attrs['tracker_key'] == 'bps_group_rover'
+    asyncio.run(sync([]))
+    assert 'sensor.my_dog' not in registry.entities
+    assert primary.removed
+
+
+@pytest.mark.parametrize('kind', ['position', 'zone', 'floor'])
+def test_renamed_group_entities_survive_another_group_registration(platform, kind):
+    hass, registry, module, add, added = platform
+    asyncio.run(module.async_setup_entry(hass, None, add))
+    sync = hass.data['bps']['sync_group_sensors']
+    rover = {'id': 'rover', 'name': 'Rover'}
+    asyncio.run(sync([rover]))
+    key = f'sensor.bps_group_rover_bps_{kind}'
+    primary = hass.data['bps_sensors'][key]
+    renamed = f'sensor.my_dog_{kind}'
+    registry.async_update_entity(key, renamed)
+    primary.entity_id = renamed
+    asyncio.run(sync([rover, {'id': 'fido', 'name': 'Fido'}]))
+    assert renamed in registry.entities
+    assert key not in registry.entities
+    assert hass.data['bps_sensors'][key] is primary
+    # Adding ordinary beacon sensors also invokes the legacy post-add migration.
+    additions = []
+    module.ensure_sensors_for_entity(hass, 'beacon_new', hass.data['bps_sensors'], additions)
+    add(additions)
+    module.normalize_bps_registry_entity_ids_from_cache(hass)
+    assert renamed in registry.entities
+    asyncio.run(sync([]))
+    assert renamed not in registry.entities

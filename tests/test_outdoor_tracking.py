@@ -705,3 +705,35 @@ def test_save_rejects_output_collision_even_with_only_ordinary_members(hass, mon
     assert hass._store_backing[STORAGE_KEY_LAYOUT] == edited
     edited["tracker_groups"][0]["enabled"] = True
     assert run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, edited)).status == 400
+
+
+@pytest.mark.parametrize('walls', [['metal'], ['metal', 'wood', 'metal', 5], 'metal'])
+def test_reject_invalid_wall_materials_before_layout_save(walls):
+    points = [{'x': 0, 'y': 0}, {'x': 10, 'y': 0}, {'x': 10, 'y': 10}, {'x': 0, 'y': 10}]
+    data = {'floor': [{'environment': [{'id': 'shop', 'name': 'Shop', 'type': 'building',
+        'material': 'metal', 'points': points, 'wall_materials': walls}]}]}
+    assert validate_outdoor_layout(data)
+    data['floor'][0]['environment'][0]['wall_materials'] = ['wood', None, 'metal', None]
+    assert validate_outdoor_layout(data) is None
+
+
+def test_primary_position_remains_usable_without_zones_then_expires(hass, monkeypatch):
+    now = 1000.
+    monkeypatch.setattr(bps.time, 'time', lambda: now)
+    data = layout(True)
+    data['tracker_groups'] = [{'id': 'rover', 'beacons': ['beacon_a']}]
+    run(save_bps_data(hass, data))
+    bps.apitricords = [{'ent': 'beacon_a', 'floor': 'Property', 'cords': [50, 60],
+        'updated': now, 'outdoor': {'observed': now, 'estimated_uncertainty_m': 3}}]
+    primary = SimpleNamespace(_state='unknown', _attrs={}, async_write_ha_state=lambda: None)
+    hass.data['bps_sensors'] = {'sensor.bps_group_rover_bps_position': primary}
+    run(bps.update_tracker_groups(hass))
+    assert primary._state == 'tracking'
+    assert primary._attrs['zone'] == 'unknown'
+    assert primary._attrs['floor'] == 'Property'
+    assert primary._attrs['cords'] == [50, 60]
+    now += 31
+    run(bps.update_tracker_groups(hass))
+    assert primary._state == 'unknown'
+    assert primary._attrs['tracker_key'] == 'bps_group_rover'
+    assert 'cords' not in primary._attrs

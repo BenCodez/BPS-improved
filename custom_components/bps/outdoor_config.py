@@ -59,6 +59,12 @@ def validate_outdoor_layout(layout, known_trackers=None):
                 points = region.get("points")
                 if not isinstance(points, list) or not 3 <= len(points) <= MAX_ENVIRONMENT_VERTICES:
                     return f"Environment polygons need 3–{MAX_ENVIRONMENT_VERTICES} vertices"
+                if "wall_materials" in region:
+                    walls = region["wall_materials"]
+                    if (kind != "building" or not isinstance(walls, list) or len(walls) != len(points)
+                            or any(w is not None and (not isinstance(w, str)
+                                   or w not in BUILDING_BOUNDARY_WEIGHTS) for w in walls)):
+                        return "Building wall materials need one valid material or null per polygon edge"
             if len(normalize_environment(regions)) != len(regions):
                 return "Environment polygons must be finite, nonempty and free of self-intersections"
         receivers = floor.get("receivers", [])

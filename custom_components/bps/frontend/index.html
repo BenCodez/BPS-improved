@@ -58,6 +58,12 @@
                         <div class="bps-setup-col">
                             <div class="bps-col-title">Tools</div>
                             <div class="bps-btnrow" id="mapbuttondiv"></div>
+                            <div class="bps-btnrow">
+                                <button type="button" id="addBuilding" class="bps-btn bps-btn-outline">Add building</button>
+                                <button type="button" id="addTrees" class="bps-btn bps-btn-outline">Add trees</button>
+                                <button type="button" id="openGroupEditor" class="bps-btn bps-btn-outline">Group trackers</button>
+                            </div>
+                            <p class="bps-hint">Building/tree tools enable Outdoor Tracking. Save Floor Plan to keep changes.</p>
                             <div class="bps-btnrow" id="savebuttondiv"></div>
                         </div>
 
@@ -332,12 +338,11 @@
                             <label class="bps-switch"><input type="checkbox" id="outdoorDiagnostics"><span>Show tracking diagnostics</span></label>
                             <p class="bps-hint">Estimated uncertainty is a heuristic radius, not a guaranteed confidence interval. Grey dotted circles mark stale fixes.</p>
                             <p class="bps-hint">Select a saved floor, add a building or tree area, click at least three corners on the map and name the shape. Press ✓ Save, then Save Floor Plan.</p>
-                            <button type="button" id="addBuilding" class="bps-btn bps-btn-outline">Add building</button>
-                            <button type="button" id="addTrees" class="bps-btn bps-btn-outline">Add trees</button>
                             <label class="bps-label" for="environmentType">Environment type</label>
                             <select id="environmentType" class="bps-input"><option value="building">Building</option><option value="dense_trees">Dense trees</option><option value="light_vegetation">Light vegetation</option><option value="custom">Custom</option></select>
                             <label class="bps-label" for="environmentMaterial">Building material</label>
-                            <select id="environmentMaterial" class="bps-input" title="Obstruction / multipath risk; changes trust, not distance."><option value="unknown">Unknown</option><option value="light">Light</option><option value="heavy">Heavy</option><option value="metal">Metal / reflective (shop)</option></select>
+                            <select id="environmentMaterial" class="bps-input" title="Obstruction / multipath risk; changes trust, not distance."><option value="unknown">Unknown</option><option value="light">Light</option><option value="wood">Wood</option><option value="heavy">Heavy</option><option value="metal">Metal / reflective (shop)</option></select>
+                            <div id="environmentWalls" hidden></div>
                             <button type="button" id="drawEnvironment" class="bps-btn bps-btn-outline">Draw environment polygon</button>
                             <div id="environmentList"></div>
                             <label class="bps-label" for="outdoorReceiver">Receiver override</label>
@@ -352,7 +357,8 @@
                         <label class="bps-label" for="groupBeacons">Beacons (select multiple)</label><select id="groupBeacons" class="bps-input" multiple size="4"></select>
                         <label class="bps-switch"><input id="groupEnabled" type="checkbox" checked><span>Enable group</span></label>
                         <div class="bps-btnrow"><button type="button" id="saveGroup" class="bps-btn bps-btn-outline">Apply group</button><button type="button" id="deleteGroup" class="bps-btn bps-btn-outline">Delete group</button></div>
-                        <p class="bps-hint">Up to 32 groups, 16 beacons per group, and 64 characters per ID. Original beacon trackers remain available. Apply group, Save Floor Plan, then add the group from the Tracking picker.</p>
+                        <p id="groupEntityHint" class="bps-hint"></p>
+                        <p class="bps-hint">Applying an enabled group enables Outdoor Tracking. Up to 32 groups, 16 beacons per group, and 64 characters per ID. Original beacon trackers remain available. Apply group, Save Floor Plan, then add the group from the Tracking picker.</p>
                     </details>
                     <!-- Compact "not reporting" heads-up (issue #64): placed receivers on
                          this floor that are linked but have no distance right now (names
@@ -402,6 +408,11 @@
                         <button type="button" id="calibReset" class="bps-btn bps-btn-outline">Reset corrections</button>
                     </div>
                 </div>
+                <div class="bps-btnrow">
+                    <button type="button" id="calibTestTracking" class="bps-btn bps-btn-outline">Test tracking with corrections</button>
+                </div>
+                <p class="bps-hint">Record Diagnostics at two measured stationary locations, clearing the position marker before moving. This test compares raw beacon tracking with recorded versus proposed corrections; it does not apply them. Auto calibration still applies corrections automatically.</p>
+                <div id="calibTrackingTest" role="status"></div>
                 <div id="calibStatus" class="bps-calib-status"></div>
                 <div id="calibResults" class="bps-calib-matrix"></div>
             </div>

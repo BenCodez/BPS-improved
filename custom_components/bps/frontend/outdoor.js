@@ -2,7 +2,7 @@
 (function (root) {
     'use strict';
     const TYPES = ['building', 'dense_trees', 'light_vegetation', 'custom'];
-    const MATERIALS = ['unknown', 'light', 'heavy', 'metal'];
+    const MATERIALS = ['unknown', 'light', 'wood', 'heavy', 'metal'];
     const POLICIES = ['auto', 'normal', 'prefer', 'deprioritize', 'ignore'];
     const MAX_UNCERTAINTY_THRESHOLD_M = 10000;
     const MAX_ENVIRONMENT_POLYGONS = 128;
@@ -128,11 +128,16 @@
             || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 256
             || !TYPES.includes(item.type) || !MATERIALS.includes(item.material)
             || !validPolygon(item.points)) throw new Error('Use a named polygon with at least three distinct corners and no crossing edges.');
+        if (item.wall_materials !== undefined && (item.type !== 'building'
+            || !Array.isArray(item.wall_materials) || item.wall_materials.length !== item.points.length
+            || item.wall_materials.some(m => m !== null && !MATERIALS.includes(m))))
+            throw new Error('Choose one material or Building default for each wall.');
         const entries = Array.isArray(floor.environment) ? floor.environment : [];
         const index = entries.findIndex(p => p.id === item.id);
         if (entries.length > MAX_ENVIRONMENT_POLYGONS || index < 0 && entries.length >= MAX_ENVIRONMENT_POLYGONS)
             throw new Error('A floor supports at most 128 environment polygons. Delete a polygon before adding another.');
-        const copy = {...item, name: item.name.trim(), points: item.points.map(p => ({x: p.x, y: p.y}))};
+        const copy = {...item, name: item.name.trim(), points: item.points.map(p => ({x: p.x, y: p.y})),
+            ...(item.wall_materials ? {wall_materials: [...item.wall_materials]} : {})};
         if (!Array.isArray(floor.environment)) floor.environment = [];
         if (index < 0) floor.environment.push(copy); else floor.environment[index] = copy;
         return copy;

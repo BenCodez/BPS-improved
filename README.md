@@ -10,19 +10,21 @@ maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hog
 Quick list of changes in this fork:
 
 - Optional outdoor tracking with buildings, trees, and a **Metal / reflective**
-  material for shops; these areas adjust measurement trust.
+  material for shops, with separate wood/metal materials per wall; these areas adjust measurement trust.
 - Multiple beacons for one dog: one fused main icon plus small, subdued numbered
   icons showing each beacon's estimated position in the panel and Lovelace card.
 - Estimated uncertainty, stale-fix styling, receiver trust controls, and
   diagnostics explaining beacon disagreement and possible reflection risk.
+- Dedicated selectable group position entities and a stability check against brief BLE quality reversals.
 - Diagnostic recordings and known-position tests, with an offline accuracy
-  report to help identify improvements using measurements from your property.
+  report and a read-only comparison of tracking with proposed calibration corrections.
 - Existing BPS storage, individual beacon sensors, calibration, and history are
   preserved; outdoor changes are opt-in and do not automatically retune calibration.
 
-The feature work is currently in [PR #1](https://github.com/BenCodez/BPS-improved/pull/1).
-Until it is included in a release, installing the default branch will not include
-these new features. The sections below also document features inherited from
+The initial outdoor features landed in [PR #1](https://github.com/BenCodez/BPS-improved/pull/1)
+and release [1.0](https://github.com/BenCodez/BPS-improved/releases/tag/1.0).
+The group entity, visible map tools, per-wall materials and calibration comparison
+require a release containing this follow-up change. The sections below also document features inherited from
 maxi1134's fork.
 
 **New here?** Read the upstream project first — this fork does not repeat it:
@@ -81,8 +83,8 @@ The Lovelace card
 
 This repository is configured for HACS release downloads using a `bps.zip`
 asset. A release containing the feature branch must be published before these
-changes are available through HACS; a prerelease can do that without merging
-the PR. At the time of this PR, this fork has no published releases.
+follow-up changes are available through HACS; a prerelease can do that without merging
+the PR. Release 1.0 contains the initial outdoor features.
 
 Once a release is available, install this fork through HACS as a custom repository:
 
@@ -233,13 +235,20 @@ inputs. Bermuda remains required and no Sextant migration or Bermuda changes are
 needed. Enabling it does not change the existing beacon trackers or their
 entities.
 
-Open **Map & Setup → Outdoor tracking: trees, buildings & dog groups** and
-enable the feature. Select a saved floor and click **Add building** or **Add
-trees**. Click at least three corners on the map, name the shape, press **✓
+Select a saved floor under **Map & Setup** and use **Tools → Add building**
+or **Add trees**. These visible buttons enable Outdoor Tracking and open its
+settings automatically. You can also enable it directly under **Outdoor tracking:
+trees, buildings & dog groups**. Click at least three corners on the map, name the shape, press **✓
 Save**, then **Save Floor Plan**. Use **Environment type → Light vegetation**
 or **Custom** with **Draw environment polygon** for other areas. Click a saved
 shape's name to edit it, or **×** to delete it. Building polygons also have
-a material classification: **Unknown**, **Light**, **Heavy**, or **Metal / reflective (shop)**.
+a default material: **Unknown**, **Light**, **Wood**, **Heavy**, or **Metal / reflective (shop)**.
+While drawing or editing a building, numbered walls appear on the map and each
+has its own material selector. Use **Building default** to inherit the default,
+or set wood and metal separately on a mixed building. Each wall runs from its
+numbered corner to the next (the last closes the polygon). Adding a corner
+splits the closing wall; deleting a corner merges its adjoining walls, keeping
+the material if they match and reverting to the default if they differ.
 These are conservative starting weights, not universal dB values. BPS examines
 the receiver-to-fix path: for example, an indoor receiver reaching outdoors can
 cross one building boundary, while a path through a building can cross two.
@@ -292,14 +301,30 @@ conflicting saved group and recreate it with another ID. Real Bermuda beacons
 whose slugs start with `bps_group_` can still be members; generated group
 positions cannot be used as members. A temporarily missing member remains
 configured and counted in the total, including a real beacon with that prefix.
-The group produces additional zone and floor sensors; the original
+The group produces a dedicated `sensor.bps_group_<id>_bps_position` entity, plus
+zone and floor sensors. The position entity is `tracking` with a valid fix and
+`unknown` without one; its zone is an attribute, so a floor without zones can
+still show it on the map. The original
 beacon trackers and their sensors remain available. BPS combines their existing
 position fixes using estimated quality, and reports beacon count, disagreement,
 and fusion confidence as attributes. It does not combine raw BLE or Bermuda
 measurements. A group only combines fixes on the same floor; stale or unavailable
 beacons do not produce a fix, and disagreement lowers confidence instead of
 being hidden by an unconditional average. Select the group in the existing
-Tracking picker to display it on the map.
+Tracking picker to display it on the map. **Tools → Group trackers** opens the
+editor. Applying an enabled group enables Outdoor Tracking; save the floor plan
+to create its entities. Add the position entity (for example,
+`sensor.bps_group_rover_bps_position`) to the Lovelace BPS map card’s `entities`.
+If it is renamed in Home Assistant, the card resolves its stable tracker metadata.
+
+When widely separated beacon fixes disagree, the group retains its fresh preferred
+beacon through a brief quality reversal. Switching to the challenger requires two
+distinct new source observations; polling or re-solving cached readings does not
+confirm a switch. A missing/stale preferred beacon permits immediate handoff.
+Nearby agreeing fixes still use a quality-weighted average. This reduces source
+switching caused by BLE spikes; it cannot determine which of two persistently
+disagreeing beacons is physically correct. Diagnostics include `anchor_beacon`
+and `anchor_switch_pending`.
 
 The panel and Lovelace card keep one main group icon and show small, subdued
 numbered icons at each member beacon's estimated position on that floor.
@@ -1029,3 +1054,27 @@ This is teamwork on top of two great projects — [Bermuda](https://github.com/a
 by [@agittins](https://github.com/agittins) and [BPS](https://github.com/Hogster/BPS)
 by [@Hogster](https://github.com/Hogster). Improving Bermuda's precision and
 stability benefits BPS directly.
+
+### Test proposed calibration against actual tracking
+
+After solving receiver calibration, use **Calibration → Test tracking with corrections**.
+First record **Diagnostics** while the tracker stays at a measured, marked position,
+clear the position marker **before moving**, then mark a second measured position.
+A group recording tests its member beacons. Stop the recording when finished.
+
+The test replays the same observations with recorded versus proposed receiver
+corrections and reports median and 95th-percentile position errors in metres.
+It ignores duplicate polls, stale/future observations, unknown distance units,
+and recordings whose floor geometry differs from the current floor. It samples
+at most 128 distinct beacon observations spread across the recording. At least
+five paired fixes at two locations are required before claiming improvement;
+both error metrics must improve by at least 0.25 m or 10%, whichever is larger,
+without additional candidate solve failures. Otherwise it reports worse or
+inconclusive. The result names the candidate solve time.
+
+This is a read-only raw-fix comparison using the live solver, height projection
+and obstruction weights. It omits temporal jump weights, Kalman smoothing,
+group fusion, floor election and zone snapping, so field tracking can still
+differ. It does not apply corrections or suspend auto calibration; auto mode
+continues to apply corrections every 15 minutes. For testing before application,
+use a manual calibration run with auto mode off.

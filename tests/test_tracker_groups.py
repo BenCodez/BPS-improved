@@ -309,3 +309,52 @@ def test_configured_group_outputs_are_rejected_even_when_disabled():
     # A genuine beacon with the same name takes precedence; the conflicting
     # generated output is retired instead of preventing the beacon's use.
     assert G.normalize_groups(layout([nested, other]), ["bps_group_other"]) == [nested]
+
+
+def test_runtime_holds_a_distant_quality_spike_until_distinct_observations():
+    state = {}
+    a, b = position(x=0, uncertainty=1), position('beacon_b', x=600, uncertainty=2)
+    previous = G.fuse_group(GROUP, [a, b], SCALES, NOW, stability=state)
+    assert previous['anchor_beacon'] == 'beacon_a'
+    b['outdoor'].update(estimated_uncertainty_m=.5, observed=NOW + 1)
+    b['updated'] = NOW + 1
+    held = G.fuse_group(GROUP, [a, b], SCALES, NOW + 1, previous=previous, stability=state)
+    assert held['cords'] == [0, 100]
+    assert held['anchor_switch_pending'] is True
+    # A new solve timestamp of the same measurements does not confirm motion.
+    for i in range(2, 5):
+        b['updated'] = NOW + i
+        held = G.fuse_group(GROUP, [a, b], SCALES, NOW + i, previous=held,
+                            stability=state, use_observation_age=False)
+        assert held['anchor_beacon'] == 'beacon_a'
+    b['outdoor']['observed'] = NOW + 5
+    b['updated'] = NOW + 5
+    moved = G.fuse_group(GROUP, [a, b], SCALES, NOW + 5, previous=held, stability=state)
+    assert moved['anchor_beacon'] == 'beacon_b'
+    assert moved['anchor_switch_pending'] is False
+    assert moved['cords'] == [600, 100]
+    assert moved['outdoor']['confidence'] == 'poor'
+
+
+def test_runtime_stale_incumbent_hands_off_without_waiting():
+    state = {}
+    a, b = position(x=0, uncertainty=1), position('beacon_b', x=600, uncertainty=2)
+    previous = G.fuse_group(GROUP, [a, b], SCALES, NOW, stability=state)
+    b['updated'] = NOW + 120
+    result = G.fuse_group(GROUP, [a, b], SCALES, NOW + 121, previous=previous, stability=state)
+    assert result['anchor_beacon'] == 'beacon_b'
+    assert not result['anchor_switch_pending']
+
+
+def test_runtime_membership_changes_and_disable_clear_challenges():
+    state = {}
+    a, b = position(x=0, uncertainty=1), position('beacon_b', x=600, uncertainty=2)
+    prev = G.fuse_groups(layout(), [a, b], SCALES, NOW, stability=state)
+    b['outdoor']['estimated_uncertainty_m'] = .5
+    held = G.fuse_groups(layout(), [a, b], SCALES, NOW, previous={prev[0]['ent']: prev[0]}, stability=state)
+    assert held[0]['anchor_switch_pending']
+    changed = layout([{**GROUP, 'beacons': ['beacon_b']}])
+    result = G.fuse_groups(changed, [a, b], SCALES, NOW, previous={held[0]['ent']: held[0]}, stability=state)
+    assert result[0]['anchor_beacon'] == 'beacon_b'
+    G.fuse_groups(layout([]), [a, b], SCALES, NOW, stability=state)
+    assert state == {}

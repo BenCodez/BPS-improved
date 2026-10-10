@@ -170,7 +170,8 @@ def _fix(beacon, position, scales, now, max_age_s, use_observation_age):
             if receiver_id:
                 receiver_ids.add(receiver_id)
     return {"ent": beacon, "cords": [x, y], "floor": floor,
-            "updated": updated, "estimated_uncertainty_m": uncertainty,
+            "updated": updated, "observed": outdoor.get("observed", updated),
+            "estimated_uncertainty_m": uncertainty,
             "receivers_used": count, "age_s": age,
             "weight": reliability / uncertainty ** 2, "scale": scale,
             "receiver_ids": receiver_ids}
@@ -182,7 +183,7 @@ def _distance(first, second):
 
 
 def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
-               use_observation_age=True):
+               use_observation_age=True, previous=None, stability=None):
     """Fuse one normalized enabled group, returning a fresh payload or None.
 
     Different floors are never averaged. A distant fix cannot drag a better
@@ -219,6 +220,40 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
     floor = max(by_floor, key=lambda f: sum(p["weight"] for p in by_floor[f]))
     candidates = by_floor[floor]
     anchor = max(candidates, key=lambda p: p["weight"])
+    pending = False
+    if isinstance(stability, dict):
+        signature = (tuple(members), floor)
+        if stability.get("signature") != signature:
+            stability.clear()
+            previous = None
+        stability["signature"] = signature
+        incumbent = next((p for p in candidates if isinstance(previous, Mapping)
+                          and p["ent"] == previous.get("anchor_beacon")), None)
+        if incumbent is not None and incumbent["ent"] != anchor["ent"] and _distance(anchor, incumbent) > max(
+                AGREEMENT_FLOOR_M, AGREEMENT_UNCERTAINTY_FACTOR * min(
+                    anchor["estimated_uncertainty_m"], incumbent["estimated_uncertainty_m"])):
+            # Re-solving cached readings is not another observation, including
+            # when the reading-age gate is off. A brief quality reversal must
+            # not immediately hand the animal's icon to a distant BLE spike.
+            epoch = anchor["observed"]
+            challenge = stability.get("challenge")
+            if challenge is None or challenge["ent"] != anchor["ent"]:
+                previous_epoch = next((p.get("observed", p.get("updated"))
+                                       for p in previous.get("beacon_positions", [])
+                                       if p.get("ent") == anchor["ent"]), None)
+                challenge = {"ent": anchor["ent"], "observed": epoch,
+                             "count": int(previous_epoch is None or epoch > previous_epoch)}
+            elif epoch > challenge["observed"]:
+                challenge = {**challenge, "observed": epoch, "count": challenge["count"] + 1}
+            if challenge["count"] < 2:
+                stability["challenge"] = challenge
+                anchor = incumbent
+                pending = True
+            else:
+                stability.pop("challenge", None)
+        else:
+            # Agreement, a stale/missing incumbent or a new floor needs no hold.
+            stability.pop("challenge", None)
     accepted = [p for p in candidates if _distance(anchor, p) <= max(
         AGREEMENT_FLOOR_M, AGREEMENT_UNCERTAINTY_FACTOR * min(
             anchor["estimated_uncertainty_m"], p["estimated_uncertainty_m"]))]
@@ -273,6 +308,7 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
             "beacons_reporting": len(fixes), "total_beacons": len(set(members)),
             "beacon_disagreement_m": disagreement if not floor_conflict else None,
             "fusion_confidence": fusion_confidence, "beacon_positions": diagnostics,
+            "anchor_beacon": anchor["ent"], "anchor_switch_pending": pending,
             "outdoor": {"estimated_uncertainty_m": uncertainty,
                         "confidence": confidence,
                         "receivers_used": receivers_used,
@@ -280,15 +316,26 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
 
 
 def fuse_groups(layout, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
-                use_observation_age=True, known_trackers=None):
+                use_observation_age=True, known_trackers=None, previous=None, stability=None):
     """Normalize and fuse configured groups; disabled layouts do no work."""
     outdoor = layout.get("outdoor_tracking") if isinstance(layout, Mapping) else None
     if not isinstance(outdoor, Mapping) or outdoor.get("enabled") is not True:
+        if isinstance(stability, dict):
+            stability.clear()
         return []
     index = _position_index(positions)
     known = set(known_trackers or ())
     known.update(ent for ent, p in index.items() if not p.get("group"))
     groups = normalize_groups(layout, known_trackers=known)
+    previous = previous if isinstance(previous, Mapping) else {}
+    if isinstance(stability, dict):
+        active = {"bps_group_" + g["id"] for g in groups}
+        for key in list(stability):
+            if key not in active:
+                stability.pop(key)
     return [payload for group in groups
             if (payload := fuse_group(group, index, scales, now, max_age_s,
-                                      use_observation_age=use_observation_age)) is not None]
+                                      use_observation_age=use_observation_age,
+                                      previous=previous.get("bps_group_" + group["id"]),
+                                      stability=stability.setdefault("bps_group_" + group["id"], {})
+                                      if isinstance(stability, dict) else None)) is not None]
