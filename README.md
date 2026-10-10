@@ -24,7 +24,10 @@ Quick list of changes in this fork:
 The initial outdoor features landed in [PR #1](https://github.com/BenCodez/BPS-improved/pull/1)
 and release [1.0](https://github.com/BenCodez/BPS-improved/releases/tag/1.0).
 The group entity, visible map tools, per-wall materials and calibration comparison
-require a release containing this follow-up change. The sections below also document features inherited from
+landed in [PR #2](https://github.com/BenCodez/BPS-improved/pull/2) and release
+[1.1](https://github.com/BenCodez/BPS-improved/releases/tag/1.1). The revised
+uncertainty calculation and one-circle-per-tracker behavior require a newer
+release containing those changes. The sections below also document features inherited from
 maxi1134's fork.
 
 **New here?** Read the upstream project first — this fork does not repeat it:
@@ -82,9 +85,10 @@ The Lovelace card
 ## Installation
 
 This repository is configured for HACS release downloads using a `bps.zip`
-asset. A release containing the feature branch must be published before these
-follow-up changes are available through HACS; a prerelease can do that without merging
-the PR. Release 1.0 contains the initial outdoor features.
+asset. Release 1.1 includes the group entity, map tools, per-wall materials and
+calibration comparison. The revised uncertainty calculation and single-circle
+behavior require a newer release; publishing a prerelease can make those
+changes available through HACS before merging the PR.
 
 Once a release is available, install this fork through HACS as a custom repository:
 
@@ -282,8 +286,11 @@ predict reflected rays, and a nearby clear path around a metal building is not
 marked as a reflection risk.
 
 When enabled, BPS can draw an **estimated uncertainty** circle around a fix.
-Its radius is a conservative heuristic using factors such as receiver geometry,
-residual, reading freshness, and path reliability. It is useful as a relative
+Its radius uses the solver's reliability / measured-range² weights for both
+residual and receiver geometry, with a range-dependent noise floor. Freshness
+and obstruction already affect reliability and are not multiplied in again;
+normal movement does not inflate the radius. Kalman lag and map clamping still
+add the measured raw-to-published displacement. It is useful as a relative
 quality cue, but it is not a guaranteed confidence interval or GPS-like accuracy
 radius. The circle can be hidden globally or below a configured metre threshold
 from 0 to 10,000 metres.
@@ -332,8 +339,18 @@ Numbers follow the saved group's beacon order, so beacon 2 stays 2 when beacon
 1 is unavailable. Member icons are 30% of the main icon size, capped at 24 canvas
 pixels (also capped under panel zoom), without extra name labels or animation.
 Stale or excluded member fixes appear grey and faded. Enable diagnostics for
-member names, uncertainty circles, and connecting lines; those extras stay hidden
-during normal tracking. Overlapping member icons sit underneath the main icon.
+member names, uncertainty values, and connecting lines; those extras stay hidden
+during normal tracking. Each displayed tracker has one uncertainty circle; a
+group keeps just its main circle even with diagnostics enabled. Member markers
+remain small and do not draw extra uncertainty bubbles. Overlapping member
+icons sit underneath the main icon. The separate **Distance circles** toggle is
+a receiver range visualization, with circles centred on receivers rather than
+tracker accuracy bubbles.
+The group circle combines member uncertainty using the same weights as its
+published position, plus their positional spread. Agreeing beacons can reduce
+the radius, with a floor of 75% of the best member's uncertainty because they
+share RF conditions. Disagreement enlarges it; a lone available member retains
+its own radius. Diagnostics show the combined beacon uncertainty and spread.
 
 With `reading_max_age: 0`, the receiver reading-age gate is disabled for ordinary
 outdoor fixes and groups. Map freshness then follows the last position solve and

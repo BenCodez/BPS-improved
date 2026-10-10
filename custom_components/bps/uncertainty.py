@@ -1,22 +1,22 @@
 """Finite, conservative estimated uncertainty, expressed as a radius in metres.
 
 This is an empirical heuristic, NOT a covariance or confidence interval. A
-small residual alone can hide poor geometry or correlated RF errors. We add a
-range-dependent noise floor, then account for directional coverage, receiver
-count, reliability, age, obstruction, map clipping, and recent movement.
+small residual alone can hide poor geometry or correlated RF errors. We use the
+solver's range/reliability weights for residuals and directional coverage, add a
+range-dependent noise floor, and account for map clipping. Path and freshness
+penalties are already in reliability and must not be multiplied in again.
 Constants are centralized here so real property recordings can tune them.
 """
 import math
-from statistics import median
 
 from .environment import MAX_COORDINATE_PX, finite_number
 
 MAX_UNCERTAINTY_M = 10_000.0
 BASE_NOISE_M = 0.75
 RANGE_NOISE_FRACTION = 0.05
-REFERENCE_RECEIVERS = 6.0
-REFERENCE_AGE_S = 30.0
-MOTION_NOISE_FRACTION = 0.15
+REFERENCE_RECEIVERS = 3.0
+MIN_WEIGHT_RADIUS_M = 0.5
+NEGLIGIBLE_BEARING_WEIGHT_FRACTION = 0.05
 
 
 def _point(value):
@@ -39,7 +39,7 @@ def _geometry(point, samples):
     eigenvalues look reasonable: range errors can all push the fix together.
     """
     xx = yy = xy = total = mean_x = mean_y = 0.0
-    angles = []
+    bearings = []
     for x, y, _radius, weight in samples:
         dx, dy = x - point[0], y - point[1]
         length = math.hypot(dx, dy)
@@ -52,16 +52,28 @@ def _geometry(point, samples):
         mean_x += weight * ux
         mean_y += weight * uy
         total += weight
-        angles.append(math.atan2(dy, dx) % (2 * math.pi))
-    if total <= 0 or len(angles) < 2:
+        bearings.append((math.atan2(dy, dx) % (2 * math.pi), weight))
+    if total <= 0 or len(bearings) < 2:
         return 8.0, 360.0
     xx, yy, xy = xx / total, yy / total, xy / total
     eigenvalue = max(0.0, (xx + yy - math.hypot(xx - yy, 2 * xy)) / 2)
     factor = min(6.0, math.sqrt(0.5 / max(0.005, eigenvalue)))
-    angles.sort()
-    gaps = [b - a for a, b in zip(angles, angles[1:])]
-    gaps.append(angles[0] + 2 * math.pi - angles[-1])
-    maximum_gap = max(gaps)
+    bearings.sort()
+    # A sector supported by at most 5% of bearing information is effectively
+    # uncovered. Aggregate that budget across the sector, so many individually
+    # weak but collectively useful receivers still count. A distant outlier
+    # cannot split a large gap merely by contributing a direction.
+    maximum_gap = 0.0
+    negligible = total * NEGLIGIBLE_BEARING_WEIGHT_FRACTION
+    for start, (angle, _weight) in enumerate(bearings):
+        skipped = 0.0
+        for offset in range(1, len(bearings) + 1):
+            index = (start + offset) % len(bearings)
+            end_angle, end_weight = bearings[index]
+            if offset == len(bearings) or skipped + end_weight > negligible:
+                maximum_gap = max(maximum_gap, end_angle + (2 * math.pi if index <= start else 0) - angle)
+                break
+            skipped += end_weight
     factor *= 1.0 + 1.5 * max(0.0, maximum_gap / math.pi - 1.0)
     # A semicircle can have a 180-degree gap and balanced eigenvalues while
     # still placing all useful receivers on one side. The resultant bearing
@@ -91,7 +103,7 @@ def estimate_uncertainty(fix, weighted, scale, diagnostics, bounds=None, previou
               "geometry_factor": 8.0, "largest_bearing_gap_deg": 360.0,
               "near_bounds": False, "motion_m": 0.0,
               "reflection_risk_paths": 0,
-              "uncertainty_method": "conservative_heuristic"}
+              "uncertainty_method": "solver_weighted_heuristic"}
     samples = []
     if isinstance(weighted, (list, tuple)):
         for sample in weighted:
@@ -100,23 +112,38 @@ def estimate_uncertainty(fix, weighted, scale, diagnostics, bounds=None, previou
             location = _point(sample)
             radius = finite_number(sample[2], minimum=0.0, maximum=1e9)
             weight = finite_number(sample[3], minimum=0.0, maximum=1.0)
-            if location is not None and radius is not None and weight is not None and weight > 0:
-                samples.append((*location, radius, weight))
+            slant = finite_number(sample[4] if len(sample) > 4 else sample[2],
+                                  minimum=0.0, maximum=1e9)
+            if location is not None and radius is not None and slant is not None and weight is not None and weight > 0:
+                samples.append((*location, radius, weight, slant))
     result["receivers_used"] = len(samples)
     if point is None or pixels_per_metre is None or not samples:
         return result
-    total_weight = sum(s[3] for s in samples)
-    rms = math.sqrt(sum(w * (math.hypot(x - point[0], y - point[1]) - r) ** 2
-                        for x, y, r, w in samples) / total_weight) / pixels_per_metre
-    geometry_factor, gap = _geometry(point, samples)
-    # Normalize first so tiny but valid weights cannot underflow w*w to zero.
+    # Match trilaterate: reliability / measured slant range squared. The
+    # horizontal projection can collapse near a raised receiver, so using it
+    # as a weight radius would give that reading disproportionate influence.
+    # Normalize before division/squaring to retain very small valid weights.
     maximum_weight = max(s[3] for s in samples)
-    normalized_weights = [s[3] / maximum_weight for s in samples]
-    effective_count = sum(normalized_weights) ** 2 / sum(w * w for w in normalized_weights)
+    ranges = [max(MIN_WEIGHT_RADIUS_M, s[4] / pixels_per_metre) for s in samples]
+    minimum_range = min(ranges)
+    weights = [s[3] / maximum_weight * (minimum_range / r) ** 2
+               for s, r in zip(samples, ranges)]
+    maximum_influence = max(weights)
+    weights = [w / maximum_influence for w in weights]
+    total_weight = sum(weights)
+    rms = math.sqrt(sum(w * (math.hypot(s[0] - point[0], s[1] - point[1]) - s[2]) ** 2
+                        for s, w in zip(samples, weights)) / total_weight) / pixels_per_metre
+    geometry_factor, gap = _geometry(point, [(*s[:3], w) for s, w in zip(samples, weights)])
+    effective_count = total_weight ** 2 / sum(w * w for w in weights)
+    # Three usable range constraints are the solver's minimum. Extra receivers
+    # improve coverage/count instead of requiring six to avoid a blanket penalty.
     count_factor = max(1.0, math.sqrt(REFERENCE_RECEIVERS / effective_count))
-    weight_factor = min(3.0, math.sqrt(len(samples) / total_weight))
+    # Low trust raises the noise floor once, rather than multiplying the
+    # measured residual by trust, age, obstruction and reflection separately.
+    weight_factor = math.sqrt(sum(w / max(s[3], 1.0 / 9.0)
+                                  for s, w in zip(samples, weights)) / total_weight)
     result["downweighted_receivers"] = sum(s[3] < 0.999 for s in samples)
-    ages, environmental_penalties = [], []
+    ages = []
     for diagnostic in records:
         classification = diagnostic.get("classification", "unknown")
         if classification == "clear":
@@ -127,9 +154,6 @@ def estimate_uncertainty(fix, weighted, scale, diagnostics, bounds=None, previou
             result["vegetation_paths"] += 1
         elif classification == "custom":
             result["custom_paths"] += 1
-        weight = finite_number(diagnostic.get("environmental_weight"), 1.0,
-                               minimum=0.0, maximum=1.0)
-        environmental_penalties.append(1.0 - weight)
         if diagnostic.get("reflection_risk") is True:
             result["reflection_risk_paths"] += 1
         age = finite_number(diagnostic.get("reading_age_s"), minimum=0.0, maximum=1e9)
@@ -140,20 +164,17 @@ def estimate_uncertainty(fix, weighted, scale, diagnostics, bounds=None, previou
     unknown = max(0, len(samples) - len(records))
     result["freshness_unknown"] += unknown
     mean_age = sum(ages) / len(ages) if ages else None
-    freshness_factor = 1.0 + (min(2.0, mean_age / REFERENCE_AGE_S)
-                               if mean_age is not None else 0.0)
-    freshness_factor += 0.10 * min(1.0, result["freshness_unknown"] / len(samples))
-    environment_factor = 1.0 + (sum(environmental_penalties) / len(environmental_penalties)
-                                 if environmental_penalties else 0.0)
-    environment_factor += 0.15 * min(1.0, result["reflection_risk_paths"] / len(samples))
-    baseline = BASE_NOISE_M + RANGE_NOISE_FRACTION * median(s[2] / pixels_per_metre for s in samples)
-    uncertainty = math.hypot(baseline, rms) * geometry_factor * count_factor * weight_factor
-    uncertainty *= freshness_factor * environment_factor
+    baseline = BASE_NOISE_M + RANGE_NOISE_FRACTION * sum(
+        w * s[4] / pixels_per_metre for s, w in zip(samples, weights)) / total_weight
+    noise_floor = baseline * weight_factor * (
+        1.0 + 0.10 * min(1.0, result["freshness_unknown"] / len(samples)))
+    uncertainty = math.hypot(noise_floor, rms) * geometry_factor * count_factor
     motion = 0.0
     previous_point = _point(previous)
     if previous_point is not None:
         motion = math.dist(point, previous_point) / pixels_per_metre
-        uncertainty = math.hypot(uncertainty, MOTION_NOISE_FRACTION * min(1000.0, motion))
+        # Movement is not measurement error. Kalman lag/clamping is accounted
+        # for separately using raw versus published coordinates.
     near_bounds = False
     if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
         numbers = [finite_number(b, minimum=-MAX_COORDINATE_PX,
@@ -171,7 +192,9 @@ def estimate_uncertainty(fix, weighted, scale, diagnostics, bounds=None, previou
                   confidence="good" if uncertainty <= 3 else ("moderate" if uncertainty <= 10 else "poor"),
                   residual_m=rms, geometry_factor=geometry_factor,
                   largest_bearing_gap_deg=gap, effective_receivers=effective_count,
-                  reading_age_s=mean_age, motion_m=motion, near_bounds=near_bounds)
+                  reading_age_s=mean_age, motion_m=motion, near_bounds=near_bounds,
+                  noise_floor_m=noise_floor, reliability_factor=weight_factor,
+                  receiver_count_factor=count_factor)
     return result
 
 

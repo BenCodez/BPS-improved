@@ -270,9 +270,11 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
         for p in accepted) / weight)
     best_u = min(p["estimated_uncertainty_m"] for p in accepted)
     # Reliability should never make one beacon artificially more certain.
-    uncertainty = math.hypot(max(best_u * MIN_AGREEMENT_UNCERTAINTY_RATIO,
-                                math.sqrt(1.0 / sum(1.0 / p["estimated_uncertainty_m"] ** 2
-                                                    for p in accepted))), scatter)
+    # Propagate uncertainty using the same normalized weights as the published
+    # group centre; age/quality tie-breakers can differ from inverse variance.
+    combined = max(best_u * MIN_AGREEMENT_UNCERTAINTY_RATIO, math.sqrt(sum(
+        (p["weight"] / weight * p["estimated_uncertainty_m"]) ** 2 for p in accepted)))
+    uncertainty = math.hypot(combined, scatter)
     conflict = len(accepted) < len(candidates)
     floor_conflict = len(by_floor) > 1
     if conflict:
@@ -310,6 +312,10 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
             "fusion_confidence": fusion_confidence, "beacon_positions": diagnostics,
             "anchor_beacon": anchor["ent"], "anchor_switch_pending": pending,
             "outdoor": {"estimated_uncertainty_m": uncertainty,
+                        "uncertainty_method": "beacon_fusion_heuristic",
+                        "beacons_used": len(accepted),
+                        "combined_beacon_uncertainty_m": combined,
+                        "beacon_scatter_m": scatter,
                         "confidence": confidence,
                         "receivers_used": receivers_used,
                         "receiver_observations": sum(p["receivers_used"] for p in accepted)}}
