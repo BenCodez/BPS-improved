@@ -152,9 +152,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     function isReceiverOffline(slug) {
         return offlineReceivers.includes(slug);
     }
+    function receiverKnown(slug) {
+        return receiverOptions.includes(slug) || (scannerDiagnostics.alias_receivers || []).some(row => row.entity_id === slug);
+    }
     function receiverStatusLabel(slug) {
         if (isReceiverOffline(slug)) return "(Offline) ";
-        if (receiverInventoryLoaded && !receiverOptions.includes(slug)) return "(Unmatched) ";
+        if (receiverInventoryLoaded && !receiverKnown(slug)) return "(Unmatched) ";
         if (unknownReceivers.includes(slug)) return "(Unknown) ";
         return "";
     }
@@ -5189,6 +5192,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 rec.entity_id = choice;
                 rec.scanner_uid = option.token || scannerTokenJs(choice);
                 if (option.scanner_mac) rec.scanner_mac = option.scanner_mac; else delete rec.scanner_mac;
+                if (option.config_entry_ids?.length === 1) rec.scanner_config_entry_id = option.config_entry_ids[0];
+                else delete rec.scanner_config_entry_id;
                 receiverMatching = fresh; receiverOptions = fresh.options.map(o => o.entity_id); receiverInventoryLoaded = true;
                 close(); savebuttondiv.appendChild(saveButton); clearCanvas(); drawElements();
                 bpsToast(`Matched “${oldId}” to “${option.name || choice}”. Save Floor Plan to keep it.`);
@@ -5203,9 +5208,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!host) return;
         const floor = currentFloor();
         const unmatched = receiverInventoryLoaded && floor ? (floor.receivers || []).map((r, index) => ({r, index}))
-            .filter(({r}) => r && r.entity_id && !receiverOptions.includes(r.entity_id)) : [];
-        if (!unmatched.length) { host.innerHTML = ''; return; }
-        host.innerHTML = '<div class="bps-scanner-issues"><div class="bps-issues-title">Unmatched receivers</div>'
+            .filter(({r}) => r && r.entity_id && !receiverKnown(r.entity_id)) : [];
+        const issues = (scannerDiagnostics.placement_issues || []).filter(row => floor && sameFloorName(row.floor, floor.name)
+            && floor.receivers?.[row.placement_index]?.entity_id === row.entity_id);
+        if (!unmatched.length && !issues.length) { host.innerHTML = ''; return; }
+        host.innerHTML = '<div class="bps-scanner-issues"><div class="bps-issues-title">Receiver matching issues</div>'
+            + issues.map(issue => `<div class="bps-issue"><span class="bps-issue-msg">${escHtml(issue.entity_id)}: ${escHtml(issue.status)}. ${escHtml(issue.action)}</span></div>`).join('')
             + unmatched.map(({r, index}) => '<div class="bps-issue">'
                 + `<span class="bps-issue-msg">No known Bermuda identity for “${escHtml(r.entity_id)}”</span>`
                 + `<button class="bps-btn bps-btn-outline" data-type="matchrec" data-id="${escHtml(r.entity_id)}" data-index="${index}">Match receiver…</button></div>`).join('') + '</div>';
@@ -5244,8 +5252,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         renderDebugView();
     }
 
-    const LINKING_STATUS_LABEL = { live: "Live", silent: "No reading", unmatched: "Unmatched", unknown: "Unknown", offline: "Offline" };
-    const LINKING_STATUS_RANK = { unmatched: 0, offline: 0, unknown: 1, silent: 1, live: 2 };
+    const LINKING_STATUS_LABEL = { live: "Live", silent: "No reading", unmatched: "Unmatched", unknown: "Unknown", offline: "Offline", conflict: "Placement conflict" };
+    const LINKING_STATUS_RANK = { unmatched: 0, offline: 0, conflict: 0, unknown: 1, silent: 1, live: 2 };
     const linkingStatusOf = r => (LINKING_STATUS_RANK.hasOwnProperty(r && r.status) ? r.status : "unmatched");
 
     // Map-view sidebar: a compact heads-up listing only placed receivers on the
@@ -5282,7 +5290,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             (LINKING_STATUS_RANK[linkingStatusOf(a)] - LINKING_STATUS_RANK[linkingStatusOf(b)])
             || String(a.floor || "").localeCompare(String(b.floor || ""))
             || String(a.entity_id).localeCompare(String(b.entity_id)));
-        const counts = { live: 0, silent: 0, unmatched: 0, unknown: 0, offline: 0 };
+        const counts = { live: 0, silent: 0, unmatched: 0, unknown: 0, offline: 0, conflict: 0 };
         rows.forEach(r => { counts[linkingStatusOf(r)]++; });
 
         let html = '<div class="bps-debug-summary">'
@@ -5291,6 +5299,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             + '<span class="bps-linking-chip bps-chip-unmatched">' + counts.unmatched + ' Unmatched</span>'
             + '<span class="bps-linking-chip bps-chip-unknown">' + counts.unknown + ' Unknown</span>'
             + '<span class="bps-linking-chip bps-chip-offline">' + counts.offline + ' Offline</span>'
+            + '<span class="bps-linking-chip bps-chip-unmatched">' + counts.conflict + ' Placement conflict</span>'
             + '</div>';
 
         if (!rows.length) {
@@ -5302,7 +5311,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             rows.forEach(r => {
                 const status = linkingStatusOf(r);
                 let cell;
-                if (status === "unmatched") {
+                if (status === "conflict") {
+                    cell = '<span class="bps-debug-none">' + escHtml(r.binding_status) + ': reconcile positions/properties and keep one placement per scanner on this floor.</span>';
+                } else if (status === "unmatched") {
                     cell = '<span class="bps-debug-none">No distance sensor carries this name</span>';
                 } else if (!(r.sensors || []).length) {
                     cell = '<span class="bps-debug-none">' + escHtml(r.matching?.warning || (r.matching?.disabled_sensors?.length ? "Distance entities disabled in Home Assistant" : "Known scanner; no distance entities currently publish readings")) + '</span>';

@@ -9,6 +9,9 @@ maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hog
 
 Quick list of changes in this fork:
 
+- Receiver matching uses Bermuda names and proven hardware identities. Old and
+  current aliases work across renames; missing readings show Unknown or Unmatched
+  status rather than falsely implying Offline.
 - Optional outdoor tracking with buildings, trees, and fences. Buildings support
   different materials per wall; open fence lines support solid or thin/wire
   styles, including metal. Crossings adjust measurement trust.
@@ -681,6 +684,20 @@ stay in place. **Cancel**, Escape and closing the overlay leave it unchanged,
 including cancellation during the fresh inventory check. Use **Save Floor Plan**
 to persist an applied match.
 
+Old and current scanner names work as aliases when Bermuda-owned filtered range
+entities prove the same full scanner MAC and config entry. BPS uses the freshest
+valid reading for each beacon and physical scanner, retaining its source timestamp.
+Similar names or matching MAC suffixes alone do not establish an alias. Matching
+stores the scanner MAC and owner so a later rename can still resolve when the old
+entity name disappears.
+
+Equivalent same-floor placements of that physical scanner count once. If their
+positions, heights, corrections or tracking policies conflict, BPS excludes that
+scanner and reports the conflict in **Debugging → Receivers** and full diagnostics.
+Resolve the conflicting placement before relying on it. Distinct physical scanners
+at the same location remain independent. Receiver calibration uses the same
+identity evidence and deduplicates physical scanner observations.
+
 The chooser checks the inventory again before applying and rejects stale choices,
 a changed floor or placement, ambiguous identities and another binding to the
 same scanner on the selected floor. Separate scanners can share coordinates;
@@ -691,7 +708,7 @@ Disabled distance entities remain known receivers; enable them in Home Assistant
 to restore distance readings.
 
 Scanner linking and **Copy full BPS + Bermuda report** include these read-only
-matching labels and identity diagnostics, including disabled and renamed distance
+matching labels, aliases, selected source entities and identity diagnostics, including disabled and renamed distance
 entities. Only the public scanner MAC suffix is extracted from Bermuda range
 identities; tracker unique IDs, IRKs and arbitrary Bermuda options are not included.
 

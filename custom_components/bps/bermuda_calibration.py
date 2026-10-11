@@ -76,7 +76,7 @@ def source_snapshot(receivers, devices, scanner_map):
 def runtime_context(hass, coords, floor_name):
     """Detach public scanner fields from installed Bermuda coordinators."""
     from .calibration import _all_placed_slugs, _build_receiver_map, _match_scanners
-    receivers = _build_receiver_map(coords, floor_name)
+    receivers = _build_receiver_map(coords, floor_name, hass=hass)
     manager = getattr(hass, "config_entries", None)
     entries = manager.async_entries("bermuda") if manager is not None else []
     devices, owners, options_by_mac, offset_keys = {}, {}, {}, {}
@@ -93,7 +93,7 @@ def runtime_context(hass, coords, floor_name):
                 continue
             original_address = address
             address = address.lower()
-            row = {"_is_scanner": True, "address": address, "name": getattr(dev, "name", ""), "adverts": {}}
+            row = {"_is_scanner": True, "address": address, "name": getattr(dev, "name", ""), "_bps_config_entry_id": entry.entry_id, "adverts": {}}
             ads = getattr(dev, "adverts", {})
             if isinstance(ads, Mapping):
                 for index, advert in enumerate(ads.values()):

@@ -720,6 +720,11 @@ class BpsMapCard extends HTMLElement {
     const coords = JSON.parse(data.coordinates);
     this._knownBeaconKeys = new Set(Array.isArray(data.entities) ? data.entities : []);
     this._receiverMatching = new Map((data.receiver_matching?.options || []).map(option => [option.entity_id, option]));
+    for (const alias of data.scanner_diagnostics?.alias_receivers || []) {
+      const option = [...this._receiverMatching.values()].find(row => row.scanner_mac === alias.scanner_mac
+        && row.config_entry_ids?.length === 1 && row.config_entry_ids[0] === alias.config_entry_id);
+      if (option) this._receiverMatching.set(alias.entity_id, option);
+    }
     this._outdoorSettings = BPSOutdoor.settings(coords);
     this._trackerGroups = BPSOutdoor.groups(coords);
     this._trackerIcons = coords.tracker_icons && typeof coords.tracker_icons === "object"

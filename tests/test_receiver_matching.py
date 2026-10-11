@@ -145,7 +145,9 @@ def test_matching_suggestion_uses_full_mac_and_rejects_contradictory_token(hass,
     add("sensor.tag_distance_to_workshop")
     content = json.dumps({"floor": [{"name": "Ground", "receivers": [
         {"entity_id": "old_station", "scanner_mac": MAC, "scanner_uid": "112233"}]}]})
-    assert bps._scanner_diagnostics(hass, content)["unmatched_receivers"][0]["suggested"] == "workshop"
+    diagnostics = bps._scanner_diagnostics(hass, content)
+    assert diagnostics["unmatched_receivers"] == []
+    assert diagnostics["alias_receivers"][0]["aliases"] == ["workshop"]
     content = content.replace(MAC, "dd:ee:ff:11:22:33")
     assert bps._scanner_diagnostics(hass, content)["unmatched_receivers"][0]["suggested"] is None
 

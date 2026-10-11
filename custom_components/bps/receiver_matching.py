@@ -67,9 +67,12 @@ def inventory(hass):
 
     # Scanner-only installations remain selectable even with all distance
     # entities disabled/absent. Prefer actual registry slugs for proven MACs.
+    runtime_name_ids = {}
     for identity, names in runtime.items():
-        matched = [r for r in rows.values() if identity in r["identities"]]
-        if not matched and len(names) == 1:
+        for name in names:
+            runtime_name_ids.setdefault(slugify(name), set()).add(identity)
+    for identity, names in runtime.items():
+        if len(names) == 1 and len(runtime_name_ids[slugify(next(iter(names)))]) == 1:
             target = row(slugify(next(iter(names))))
             target["identities"].add(identity)
             target["names"].update(names)
@@ -92,6 +95,11 @@ def inventory(hass):
             target[key].sort()
         target["label"] = f'{target["name"]} · {slug}' + (f' · {mac}' if mac else '')
         options.append(target)
+    for option in options:
+        option["aliases"] = sorted(other["entity_id"] for other in options
+            if option["scanner_mac"] and not option["identity_ambiguous"] and not other["identity_ambiguous"]
+            and option["scanner_mac"] == other["scanner_mac"]
+            and option["config_entry_ids"] == other["config_entry_ids"])
     name_identities = {}
     for option in options:
         name = slugify(option["name"])

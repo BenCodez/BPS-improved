@@ -33,6 +33,7 @@ import math
 import re
 import time
 from collections import deque
+from .receiver_sources import ReceiverSources
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -229,8 +230,11 @@ def get_calibration_state(hass) -> dict:
     )
 
 
-def _build_receiver_map(coords, floor_name=None) -> dict:
+def _build_receiver_map(coords, floor_name=None, *, hass=None) -> dict:
     """Map receiver slug -> position/scale/floor, for one floor or all floors."""
+    sources = ReceiverSources(hass) if hass is not None else None
+    if sources is not None:
+        coords = sources.calibration_layout(coords)
     receivers = {}
     for floor in coords.get("floor", []):
         if floor_name is not None and _normalize(floor.get("name")) != _normalize(floor_name):
@@ -251,6 +255,10 @@ def _build_receiver_map(coords, floor_name=None) -> dict:
                     # Hardware identity stored by a panel re-link (issue #64);
                     # lets calibration match the scanner after a rename.
                     "uid": uid if isinstance(uid, str) and uid else None,
+                    "scanner_mac": receiver.get("scanner_mac"),
+                    "scanner_config_entry_id": receiver.get("scanner_config_entry_id"),
+                    "scanner_owner_unique": receiver.get("scanner_owner_unique", False),
+                    "strict_identity": sources is not None and sources.registry is not None,
                     # Mount height (m) set in the panel; makes the pair's
                     # ground-truth distance 3D (see _true_distance_m). The
                     # range guard also drops NaN/Infinity from a hand-edited
@@ -286,9 +294,25 @@ def _match_scanners(cal: dict, devices: dict) -> dict:
         scanners.append((address, slugify(str(dev.get("name") or ""))))
 
     scanner_slug_by_mac = {}
-    for address, name_slug in scanners:
-        if name_slug in cal["receivers"]:
-            scanner_slug_by_mac[address] = name_slug
+    claims = {}
+    for slug, receiver in cal["receivers"].items():
+        address = receiver.get("scanner_mac")
+        if address:
+            owner = receiver.get("scanner_config_entry_id")
+            candidates = [dev for dev in devices.values() if isinstance(dev, dict)
+                and dev.get("_is_scanner") is True and str(dev.get("address", "")).lower() == address
+                and (dev.get("_bps_config_entry_id") == owner or receiver.get("scanner_owner_unique"))]
+            if candidates:
+                claims.setdefault(address, []).append(slug)
+        else:
+            exact = {address for address, name_slug in scanners if name_slug == slug}
+            # Exact current names remain compatible with older Bermuda entity
+            # formats. This cannot expand aliases or override a stored MAC.
+            if len(exact) == 1:
+                claims.setdefault(next(iter(exact)), []).append(slug)
+    for address, slugs in claims.items():
+        if len(set(slugs)) == 1:
+            scanner_slug_by_mac[address] = slugs[0]
 
     matched_slugs = set(scanner_slug_by_mac.values())
     # Tier-2 candidates: devices tier 1 didn't claim, excluding any whose
@@ -309,6 +333,9 @@ def _match_scanners(cal: dict, devices: dict) -> dict:
     while progress and pending:
         progress = False
         for slug in list(pending):
+            if cal["receivers"][slug].get("strict_identity") or cal["receivers"][slug].get("scanner_mac"):
+                pending.remove(slug)
+                continue
             token = cal["receivers"][slug].get("uid") or _scanner_token(slug)
             if not token:
                 pending.remove(slug)
@@ -784,7 +811,7 @@ async def _auto_solve_and_apply(hass, cal: dict) -> None:
     coords = await _read_coords(hass)
     if not coords:
         return
-    cal["receivers"] = _build_receiver_map(coords)
+    cal["receivers"] = _build_receiver_map(coords, hass=hass)
     cal["all_placed_slugs"] = _all_placed_slugs(coords)
     try:
         _ingest_dump(cal, await _dump_devices(hass))
@@ -805,7 +832,7 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
     if not coords:
         return
     # Floors and receivers may have been edited since the last cycle.
-    cal["receivers"] = _build_receiver_map(coords)
+    cal["receivers"] = _build_receiver_map(coords, hass=hass)
     cal["all_placed_slugs"] = _all_placed_slugs(coords)
     _refresh_auto_history(cal)
 
@@ -910,7 +937,7 @@ async def start_calibration(hass, floor_name: str, duration: int) -> dict:
     if not floor.get("scale"):
         raise ValueError("The floor has no scale; set it before calibrating.")
 
-    receivers = _build_receiver_map(coords, floor_name=floor_name)
+    receivers = _build_receiver_map(coords, floor_name=floor_name, hass=hass)
     if len(receivers) < 3:
         raise ValueError("At least three placed receivers are needed to calibrate.")
 
@@ -976,7 +1003,7 @@ async def set_auto_calibration(hass, enabled: bool) -> None:
                 "started_at": time.time(),
                 "ends_at": None,
                 "duration": None,
-                "receivers": _build_receiver_map(coords),
+                "receivers": _build_receiver_map(coords, hass=hass),
                 "matched_placed": {},  # fresh window: re-learn which placements match
                 "all_placed_slugs": _all_placed_slugs(coords),
                 "error": None,
@@ -1010,7 +1037,7 @@ def refresh_receivers_from_coords(hass, coordinates_json) -> None:
         if not isinstance(coords, dict):
             return
         floor = cal.get("floor") if cal.get("mode") == "manual" else None
-        new_map = _build_receiver_map(coords, floor_name=floor)
+        new_map = _build_receiver_map(coords, floor_name=floor, hass=hass)
         if floor is not None and not new_map:
             # The floor this manual window is calibrating vanished from the
             # save (deleted or de-scaled mid-run). Keep the start-of-run

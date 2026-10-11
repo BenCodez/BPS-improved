@@ -61,6 +61,7 @@ from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
 from .receiver_matching import inventory as receiver_inventory
+from .receiver_sources import ReceiverSources
 from . import bermuda_diagnostics
 
 _LOGGER = logging.getLogger(__name__)
@@ -768,7 +769,7 @@ def _bermuda_distance_sensor_ids(hass):
         if "_distance_to_" not in eid:
             continue
         entry = ent_reg.async_get(eid)
-        if entry is None or entry.platform != "bermuda":
+        if entry is None or entry.platform != "bermuda" or str(getattr(entry, "unique_id", "") or "").endswith("_range_raw"):
             continue
         ids.append(eid)
     return ids
@@ -850,6 +851,33 @@ def _placed_receivers(coordinates_json):
 _NO_DISTANCE_STATES = (None, "", "unknown", "unavailable")
 
 
+def _receiver_floors(coordinates_json):
+    try:
+        parsed = json.loads(coordinates_json)
+        floors = parsed.get("floor", []) if isinstance(parsed, dict) else []
+        return [{**floor, "receivers": [rec if isinstance(rec, dict) else {} for rec in floor.get("receivers", [])]
+                 if isinstance(floor.get("receivers"), list) else []}
+                for floor in floors if isinstance(floor, dict)] if isinstance(floors, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def _alias_diagnostics(hass, coordinates_json):
+    sources = ReceiverSources(hass)
+    aliases, issues = [], []
+    for floor in _receiver_floors(coordinates_json):
+        for index, (rec, binding) in enumerate(zip(floor.get("receivers", []), sources.floor_bindings(floor))):
+            row = {"floor": floor.get("name"), "placement_index": index, "entity_id": rec.get("entity_id"),
+                   "aliases": binding["aliases"], "status": binding["status"]}
+            if sources.blocked(binding):
+                row["action"] = "Match this placement to the correct Bermuda scanner. Keep one placement per physical scanner on this floor; reconcile differing positions and properties."
+                issues.append(row)
+            elif binding["identity"]:
+                row.update(scanner_mac=binding["identity"][1], config_entry_id=binding["identity"][0])
+                aliases.append(row)
+    return aliases, issues
+
+
 def _scanner_diagnostics(hass, coordinates_json):
     """Compare placed receivers against the scanner slugs Bermuda actually
     exposes, to flag naming mismatches (issue #64):
@@ -861,6 +889,8 @@ def _scanner_diagnostics(hass, coordinates_json):
     slugs, with_reading = _scanner_slugs_and_readings(hass)
     matching = receiver_inventory(hass)
     slugs.update(row["entity_id"] for row in matching["options"])
+    aliases, issues = _alias_diagnostics(hass, coordinates_json)
+    slugs.update(row["entity_id"] for row in aliases)
     placed = _placed_receivers(coordinates_json)
     placed_slugs = {p[1] for p in placed}
     # Candidates for a re-link: live scanner slugs not already correctly placed.
@@ -873,24 +903,26 @@ def _scanner_diagnostics(hass, coordinates_json):
                 if candidate not in {p[1] for p in placed if p[0] == fname}]
         token = uid or _scanner_token(slug)
         proof = []
+        identities = {(tuple(row["config_entry_ids"]), row["scanner_mac"] or row["entity_id"]) for row in matching["options"]
+                      if (row["token"] or _scanner_token(row["entity_id"])) == token}
         for option in free:
             option_mac = option["scanner_mac"]
             if mac and option_mac:
                 matched = str(mac).lower() == option_mac
             else:
                 candidate_token = option["token"] or _scanner_token(option["entity_id"])
-                matched = token and token == candidate_token and sum(
-                    (row["token"] or _scanner_token(row["entity_id"])) == token
-                    for row in matching["options"]) == 1
+                matched = token and token == candidate_token and len(identities) == 1
             if matched:
                 proof.append(option["entity_id"])
+        proof.sort(key=lambda candidate: (not candidates[candidate]["distance_sensors"], candidate))
+        proof_ids = {(tuple(candidates[candidate]["config_entry_ids"]), candidates[candidate]["scanner_mac"] or candidate) for candidate in proof}
         unmatched.append({
             "entity_id": slug,
             "floor": fname,
-            "suggested": proof[0] if len(proof) == 1 else None,
+            "suggested": proof[0] if len(proof_ids) == 1 else None,
         })
     unplaced = sorted(with_reading - placed_slugs)
-    return {"unmatched_receivers": unmatched, "unplaced_scanners": unplaced, "matching": matching}
+    return {"unmatched_receivers": unmatched, "unplaced_scanners": unplaced, "matching": matching, "alias_receivers": aliases, "placement_issues": issues}
 
 
 def _scanner_linking(hass, coordinates_json):
@@ -925,32 +957,40 @@ def _scanner_linking(hass, coordinates_json):
 
     matching = receiver_inventory(hass)
     options = {row["entity_id"]: row for row in matching["options"]}
-    placed = _placed_receivers(coordinates_json)
-    placed_slugs = {p[1] for p in placed}
-    rows = []
-    for fname, slug, uid, mac in placed:
-        sensors = sorted(by_slug.get(slug, []), key=lambda s: s["device"])
-        reporting = _reporting(sensors)
-        if slug in hass.data.get(DOMAIN, {}).get("rl_offline", []):
-            status = "offline"
-        elif not sensors:
-            status = "unknown" if slug in options else "unmatched"
-        elif reporting:
-            status = "live"
-        else:
-            status = "silent"
-        rows.append({
-            "entity_id": slug,
-            "floor": fname,
-            "scanner_uid": uid,
-            "scanner_mac": mac,
-            "token": options.get(slug, {}).get("token") or _scanner_token(slug),
-            "status": status,
-            "sensor_count": len(sensors),
-            "reporting_count": len(reporting),
-            "sensors": sensors,
-            "matching": options.get(slug),
-        })
+    sources = ReceiverSources(hass)
+    rows, placed_slugs = [], set()
+    for floor in _receiver_floors(coordinates_json):
+        for index, (rec, binding) in enumerate(zip(floor.get("receivers", []), sources.floor_bindings(floor))):
+            slug = rec.get("entity_id", "")
+            placed_slugs.update(binding["aliases"])
+            sensors = sorted((sensor for alias in binding["aliases"] for sensor in by_slug.get(alias, [])), key=lambda row: row["entity_id"])
+            if sources.registry is not None:
+                key = binding["identity"] or slug
+                owned = {eid for (tracker, identity), eids in sources.readings.items() if identity == key for eid in eids}
+                sensors = [sensor for sensor in sensors if sensor["entity_id"] in owned]
+            reporting = _reporting(sensors)
+            matched = next((options[alias] for alias in binding["aliases"] if alias in options), options.get(slug))
+            if sources.blocked(binding):
+                status = "conflict"
+            elif slug in hass.data.get(DOMAIN, {}).get("rl_offline", []):
+                status = "offline"
+            elif reporting:
+                status = "live"
+            elif sensors:
+                status = "silent"
+            else:
+                status = "unknown" if matched else "unmatched"
+            selected = {}
+            for tracker in {sensor["device"] for sensor in sensors}:
+                source, state = sources.source(tracker, rec, binding)
+                if state is not None:
+                    selected[tracker] = source
+            rows.append({"entity_id": slug, "floor": floor.get("name"), "placement_index": index,
+                "scanner_uid": rec.get("scanner_uid"), "scanner_mac": rec.get("scanner_mac"),
+                "token": (matched or {}).get("token") or _scanner_token(slug), "status": status,
+                "binding_status": binding["status"], "aliases": binding["aliases"], "selected_sources": selected,
+                "sensor_count": len(sensors), "reporting_count": len(reporting), "sensors": sensors,
+                "matching": matched})
     unplaced = []
     for slug, sensors in by_slug.items():
         if slug in placed_slugs:
@@ -974,6 +1014,7 @@ def _beacon_links(hass):
     reading still appears (empty list) so a device that's gone dark is visible.
     """
     beacons = {}  # device -> [{scanner, distance, unit}]
+    sources, seen = ReceiverSources(hass), set()
     allowed = set(_bermuda_distance_sensor_ids(hass))
     for st in hass.states.async_all("sensor"):
         eid = st.entity_id
@@ -982,6 +1023,12 @@ def _beacon_links(hass):
         device_part, slug = eid.split("_distance_to_", 1)
         device = device_part[len("sensor."):] if device_part.startswith("sensor.") else device_part
         beacons.setdefault(device, [])
+        binding = sources.binding({"entity_id": slug})
+        selected, chosen = sources.source(device, {"entity_id": slug}, binding)
+        identity = (device, binding["identity"] or slug, sources.tracker_ids.get(eid))
+        if sources.registry is not None and (selected != eid or chosen is None or identity in seen):
+            continue
+        seen.add(identity)
         if st.state in _NO_DISTANCE_STATES:
             continue
         try:
@@ -1112,6 +1159,16 @@ async def update_receiver_liveness(hass):
     receivers, with_reading = _scanner_slugs_and_readings(hass)
     matching = {row["entity_id"]: row for row in receiver_inventory(hass)["options"]}
     receivers.update(matching)
+    sources = ReceiverSources(hass)
+    for floor in (get_bps_data(hass) or {}).get("floor", []):
+        for rec, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
+            if not sources.blocked(binding) and binding["identity"]:
+                alias = next((matching[name] for name in binding["aliases"] if name in matching), None)
+                if alias:
+                    matching[rec["entity_id"]] = alias
+                    receivers.add(rec["entity_id"])
+                    if any(name in with_reading for name in binding["aliases"]):
+                        with_reading.add(rec["entity_id"])
     slug_to_device, device_entities = _build_device_availability(hass)
 
     def device_online(slug):
@@ -1143,8 +1200,8 @@ async def update_receiver_liveness(hass):
             return None
         name = matching.get(slug, {}).get("name")
         mac = matching.get(slug, {}).get("scanner_mac")
-        age = dom.get("rl_mac_ages", {}).get(mac)
-        if age is None and matching.get(slug, {}).get("liveness_name_unique", True):
+        age = dom.get("rl_mac_ages", {}).get(mac) if len(sources.owners_by_mac.get(mac, ())) <= 1 else None
+        if age is None and len(sources.owners_by_mac.get(mac, ())) <= 1 and matching.get(slug, {}).get("liveness_name_unique", True):
             age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS
@@ -1172,15 +1229,17 @@ async def update_receiver_radii(hass, eids):
     capture = bool(recording and recording.active and eids["entity"] in recording.sources)
     if outdoor:
         max_age = finite_number(max_age, READING_MAX_AGE_SECS, minimum=0.0, maximum=1e6)
+    sources = ReceiverSources(hass)
     for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
-        for receiver in floor["receivers"]:
+        for receiver, binding in zip(floor["receivers"], sources.floor_bindings(floor)):
+            receiver.pop("distance", None)
+            receiver.get("cords", {}).pop("r", None)
             receiver.pop("_diagnostic_reading", None)
             if outdoor:
                 # A saved or previous-cycle radius is never a current reading.
                 receiver.pop("distance", None)
                 receiver.pop("_outdoor_reading", None)
-            entity_id = "sensor." + eids["entity"] + "_distance_to_" + receiver["entity_id"]
-            rec_value = hass.states.get(entity_id)
+            entity_id, rec_value = sources.source(eids["entity"], receiver, binding)
             if rec_value is not None:
                 # Drop a STUCK reading: when a scanner stops hearing the
                 # tracker its distance sensor keeps the last value instead of
@@ -1208,12 +1267,14 @@ async def update_receiver_radii(hass, eids):
                     unit = rec_value.attributes.get("unit_of_measurement")
                     if unit in DistanceConverter.VALID_UNITS and unit != UnitOfLength.METERS:
                         distance = DistanceConverter.convert(distance, unit, UnitOfLength.METERS)
+                    if not math.isfinite(distance) or distance < 0:
+                        continue
                     if outdoor:
-                        if not math.isfinite(distance) or distance < 0:
-                            continue
+                        alias_without_clock = age is None and entity_id != f'sensor.{eids["entity"]}_distance_to_{receiver["entity_id"]}'
                         receiver["_outdoor_reading"] = {
                             "measured_distance_m": distance, "reading_age_s": age,
-                            "observed": reading_time - (age if age is not None else 0.0),
+                            "observed": None if alias_without_clock else reading_time - (age if age is not None else 0.0),
+                            "entity_id": entity_id,
                         }
                     # Per-receiver correction factor learned by the
                     # calibration (calibration.py); equivalent to a
@@ -1230,7 +1291,7 @@ async def update_receiver_radii(hass, eids):
                     # below (a per-tracker constant, so cross-floor ordering
                     # for this tracker is unchanged).
                     distance = distance * tracker_factor
-                    if outdoor and (not math.isfinite(distance) or distance < 0):
+                    if not math.isfinite(distance) or distance < 0:
                         continue
                     # Known mount height: the estimate is a slant range, so
                     # remove the vertical leg (mount height vs the assumed
@@ -1262,7 +1323,7 @@ async def update_receiver_radii(hass, eids):
                                        MIN_WEIGHT_RADIUS_M * MIN_WEIGHT_RADIUS_M)
                         horizontal = math.sqrt(max(distance * distance - dz * dz, floor_sq))
                     radius = floor["scale"] * horizontal
-                    if outdoor and (not math.isfinite(radius) or radius < 0):
+                    if not math.isfinite(radius) or radius < 0:
                         continue
                     receiver["cords"]["r"] = radius
                     # Raw SLANT distance for the floor election: radii are in
@@ -1282,7 +1343,7 @@ async def update_receiver_radii(hass, eids):
                         except (AttributeError, ValueError, TypeError, OSError, OverflowError):
                             observed = None
                         receiver["_diagnostic_reading"] = {
-                            "observed": observed, "corrected_distance_m": distance,
+                            "observed": observed, "entity_id": entity_id, "corrected_distance_m": distance,
                             "horizontal_distance_m": horizontal,
                         }
                 except ValueError:
@@ -1559,6 +1620,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 and not (outdoor and r.get("outdoor_policy") == "ignore")]
             extra["diagnostic_inputs"] = [{"receiver": r.get("entity_id"),
                 "observed": r.get("_diagnostic_reading", {}).get("observed"),
+                "entity_id": r.get("_diagnostic_reading", {}).get("entity_id"),
                 "corrected_distance_m": r.get("_diagnostic_reading", {}).get("corrected_distance_m"),
                 "horizontal_distance_m": r.get("_diagnostic_reading", {}).get("horizontal_distance_m"),
                 "radius_px": pt[2], "jump_environment_weight": pt[3]}
@@ -2854,15 +2916,16 @@ def _diagnostic_snapshot(hass, targets, now):
         "mode", "floor", "results", "applied", "last_solved_at")}
     readings = []
     max_age = _reading_max_age(data)
+    sources = ReceiverSources(hass)
     for beacon in beacons:
         factor, tracker_height = _tracker_distance_factor(data, beacon), _tracker_height(data, beacon)
         for floor in floors:
-            for receiver in floor.get("receivers", []):
+            for receiver, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
                 slug = receiver.get("entity_id", "")
-                source = f"sensor.{beacon}_distance_to_{slug}"
-                state = hass.states.get(source)
+                source, state = sources.source(beacon, receiver, binding, now=now)
                 row = {"tracker": beacon, "receiver": slug, "floor": floor.get("name"),
-                       "entity_id": source, "status": "missing", "tracker_height_m": tracker_height,
+                       "entity_id": source, "status": binding["status"] if sources.blocked(binding) else "missing",
+                       "scanner_aliases": binding["aliases"], "tracker_height_m": tracker_height,
                        "tracker_distance_factor": factor, "ignored": receiver.get("outdoor_policy") == "ignore"}
                 if state is not None:
                     raw = state.state

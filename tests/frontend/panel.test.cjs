@@ -54,7 +54,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             if (url === '/api/bps/scanner_linking' && network.matchingRequest) return await network.matchingRequest();
             if (url === '/api/bps/scanner_linking' && network.matching) return {ok: true, status: 200,
                 json: async () => ({placed: [], unplaced: [], beacons: [], matching: network.matching})};
-            const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: (matching?.options || []).map(o => o.entity_id), receiver_matching: matching}
+            const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: (matching?.options || []).map(o => o.entity_id), receiver_matching: matching, scanner_diagnostics: matching?.scanner_diagnostics}
                 : url === '/api/bps/cords' ? network.cords
                 : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration
                 : url === '/api/bps/diagnostics?report=1' ? {text: 'BPS full diagnostics\n{"context":{"layout":{"floor":[]}}}'} : [];
@@ -65,7 +65,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     vm.runInContext(readFileSync(join(directory, 'diagnostics.js'), 'utf8'), sandbox);
     // Expose closures only in the VM so production keeps its private state.
     const code = readFileSync(join(directory, 'script.js'), 'utf8').replace('    // With a single configured floor', `
-        globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons,
+        globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons, redrawAll,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
             tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt};
@@ -962,4 +962,44 @@ test('applying an existing scanner slug repairs stored hardware identity without
     await p.hooks.savedata(true);
     const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
     assert.deepEqual(saved.floor[0].receivers[0], after);
+});
+
+test('real receiver chooser persists full MAC and config owner only on explicit Save', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['synthetic-owner'];
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'old_station', cords: {x: 10, y: 20},
+        height: 2, correction: 1.2, hardware_model: 'Synthetic', custom_metadata: {keep: true}}];
+    const before = plain(source.floor[0].receivers[0]);
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    const dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    const matched = plain(p.hooks.layout().floor[0].receivers[0]);
+    assert.deepEqual(matched, {...before, entity_id: 'workshop_112233', scanner_uid: '112233',
+        scanner_mac: 'aa:bb:cc:11:22:33', scanner_config_entry_id: 'synthetic-owner'});
+    assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    await p.hooks.savedata(true);
+    const save = p.requests.find(r => r.url === '/api/bps/save_text');
+    assert.equal(save.options.headers.Authorization, 'Bearer test-token');
+    const saved = JSON.parse(save.options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].receivers[0], matched);
+    const reopened = await panel(saved, [], false, matching);
+    assert.equal(reopened.hooks.layout().floor[0].receivers[0].scanner_config_entry_id, 'synthetic-owner');
+    assert.equal(reopened.hooks.layout().floor[0].receivers[0].scanner_mac, 'aa:bb:cc:11:22:33');
+});
+
+test('proven saved aliases render as known and conflicting placements show actionable diagnostics', async () => {
+    const matching = matchingFixture();
+    matching.scanner_diagnostics = {alias_receivers: [{entity_id: 'old_station', scanner_mac: 'aa:bb:cc:11:22:33',
+        config_entry_ids: ['synthetic-owner'], aliases: ['workshop_112233']}], placement_issues: [{floor: 'Property',
+        placement_index: 1, entity_id: 'workshop_112233', status: 'conflicting_scanner_placements',
+        action: 'Keep one placement for this physical scanner on this floor, or match the other placement to a different scanner.'}]};
+    const source = layout(); source.floor[0].receivers = [
+        {entity_id: 'old_station', scanner_mac: 'aa:bb:cc:11:22:33', scanner_config_entry_id: 'synthetic-owner', cords: {x: 10, y: 20}},
+        {entity_id: 'workshop_112233', cords: {x: 30, y: 40}},
+    ];
+    const before = plain(source); const p = await panel(source, [], false, matching);
+    p.hooks.select('Property'); p.hooks.redrawAll();
+    assert.match(p.el('scannerissues').innerHTML, /Receiver matching issues/);
+    assert.match(p.el('scannerissues').innerHTML, /Keep one placement/);
+    assert.doesNotMatch(p.el('scannerissues').innerHTML, /No known Bermuda identity/);
+    assert.deepEqual(plain(p.hooks.layout().floor), before.floor);
+    assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
 });
