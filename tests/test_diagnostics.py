@@ -198,6 +198,20 @@ def test_recent_inventory_cap_preserves_groups_and_members(hass, monkeypatch):
     assert len(frame["positions"]) == 128 and frame["omitted_positions"] == 15
 
 
+def test_recent_inventory_cap_does_not_prioritize_disabled_group_members(hass, monkeypatch):
+    data, _ = configure(hass, monkeypatch)
+    positions = [{"ent": "other" + str(i)} for i in range(144)]
+    disabled = [{"id": "disabled" + str(i), "enabled": False,
+                 "beacons": ["other" + str(j) for j in range(i * 16, (i + 1) * 16)]}
+                for i in range(9)]
+    data["tracker_groups"] = disabled + data["tracker_groups"]
+    positions.extend([{"ent": "tag"}, {"ent": "tag2"},
+                      {"ent": "bps_group_dog", "group": True}])
+    hass.data["bps"]["apitricords"] = positions
+    frame = bps._recent_tracking_snapshot(hass, 100)
+    assert [p["ent"] for p in frame["positions"][:3]] == ["bps_group_dog", "tag", "tag2"]
+
+
 def test_recent_history_reserves_actual_large_panel_context():
     history = recent.RecentTrackingHistory()
     for now in range(100, 180, 2):
