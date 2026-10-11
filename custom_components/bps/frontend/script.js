@@ -4554,7 +4554,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         let best = null, bestDist = Infinity;
         lastTracks.forEach((t, entKey) => {
             if (focusedDevice && entKey !== focusedDevice) return;
-            const d = Math.hypot(t.x - pos.x, t.y - pos.y);
+            const marker = outdoor.markerPlacement(t, canvas.width, canvas.height, mapIconSize() / 2 + 6);
+            const d = Math.hypot(marker.x - pos.x, marker.y - pos.y);
             if (d <= hitRadius && d < bestDist) { bestDist = d; best = entKey; }
         });
         return best;

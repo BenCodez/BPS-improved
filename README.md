@@ -196,7 +196,7 @@ in, or is nobody home" signal to automate on. `_bps_zone` (and `_bps_floor`)
 instead **keep their last value** through a grace period, so a brief detection
 gap doesn't blink someone out of their room — see [Away detection](#away-detection).
 
-(While the device is in range, a fix that lands between rooms is snapped back
+(With Outdoor Tracking disabled, a fix that lands between rooms is snapped back
 into the nearest zone before it's published — see [Positions stay on the
 map](#positions-stay-on-the-map) — so `_bps_zone` no longer flickers to
 `unknown` from trilateration jitter.)
@@ -218,9 +218,8 @@ sensor's `_distance_to_detection_object`) are no longer mistaken for trackers.
 
 ## Positions stay on the map
 
-Noisy BLE readings used to let the solver place a device far outside the floor
-plan, or in the dead space between rooms. This fork constrains positioning in
-two ways:
+With Outdoor Tracking disabled, positioning is constrained to the indoor plan
+in two ways:
 
 - The trilateration solver is **bounded to the floor** (the extent of its
   receivers and zones), so a fix can never leave the map — when an
@@ -229,7 +228,8 @@ two ways:
   the nearest zone** before it's published.
 
 The map card, `/api/bps/cords`, and the zone sensors all see the same corrected
-position.
+position. Outdoor Tracking allows estimates beyond the plan and labels them
+at the map edge instead; see [Outdoor dog tracking](#outdoor-dog-tracking).
 
 ## Away detection
 

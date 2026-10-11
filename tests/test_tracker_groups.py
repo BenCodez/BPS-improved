@@ -422,12 +422,13 @@ def test_high_uncertainty_does_not_call_a_thirty_metre_separation_agreement():
 
 
 @pytest.mark.parametrize('jumping', ['beacon_a', 'beacon_b'])
-def test_a_brief_jump_in_either_beacon_keeps_the_group_with_the_stable_member(jumping):
+@pytest.mark.parametrize('interval', [1, 3, 5, 10])
+def test_a_brief_jump_in_either_beacon_keeps_the_group_with_the_stable_member(jumping, interval):
     state = {}
     positions = [position(uncertainty=50), position('beacon_b', uncertainty=55)]
     prev = G.fuse_group(GROUP, positions, SCALES, NOW, stability=state)
     original = copy.deepcopy(positions)
-    for offset in range(1, 4):
+    for offset in range(interval, interval * 4, interval):
         for p in positions:
             p['updated'] = NOW + offset
             p['outdoor']['observed'] = NOW + offset
@@ -437,20 +438,21 @@ def test_a_brief_jump_in_either_beacon_keeps_the_group_with_the_stable_member(ju
         assert prev['outdoor']['beacons_used'] == 1
         assert prev['outdoor']['confidence'] == 'poor'
     for p in positions:
-        p['updated'] = NOW + 4
-        p['outdoor']['observed'] = NOW + 4
+        p['updated'] = NOW + interval * 4
+        p['outdoor']['observed'] = NOW + interval * 4
         p['cords'] = [100, 100]
-    returned = G.fuse_group(GROUP, positions, SCALES, NOW + 4, previous=prev, stability=state)
+    returned = G.fuse_group(GROUP, positions, SCALES, NOW + interval * 4, previous=prev, stability=state)
     assert returned['cords'] == pytest.approx([100, 100])
     assert returned['outdoor']['beacons_used'] == 2
     assert 'motion_gate' not in returned
     assert original[0]['cords'] == [100, 100]
 
 
-def test_coherent_normal_running_is_not_held():
+@pytest.mark.parametrize('interval', [1, 3, 10])
+def test_coherent_normal_running_is_not_held(interval):
     state = {}
     prev = None
-    for offset in range(8):
+    for offset in range(0, interval * 8, interval):
         ps = [position(x=100 + offset * 50, updated=NOW + offset),
               position('beacon_b', x=105 + offset * 50, updated=NOW + offset)]
         prev = G.fuse_group(GROUP, ps, SCALES, NOW + offset, previous=prev, stability=state)

@@ -335,8 +335,9 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
     prior = _motion_previous(previous, floor, anchor["scale"], now, max_age_s) if isinstance(stability, dict) and not detection_only else None
     rejected_motion = []
     if prior is not None:
-        nearby = [p for p in candidates if _distance(prior, p) <= max(
-            GROUP_MOTION_SLACK_M, GROUP_MAX_SPEED_MS * max(0.0, p["observed"] - prior["updated"]))]
+        nearby = [p for p in candidates if _distance(prior, p) <= min(
+            MAX_AGREEMENT_DISTANCE_M, max(GROUP_MOTION_SLACK_M,
+                GROUP_MAX_SPEED_MS * max(0.0, p["observed"] - prior["updated"])))]
         if nearby and anchor not in nearby:
             # This also catches the incumbent beacon itself jumping: retaining
             # its ID is not sufficient when its coordinates have just changed.

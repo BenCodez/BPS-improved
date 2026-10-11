@@ -65,7 +65,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
-            tracks: () => lastTracks, tracked: () => trackedDevices};
+            tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt};
     // With a single configured floor`);
     vm.runInContext(code, sandbox);
     const ready = listeners.get('DOMContentLoaded')();
@@ -234,6 +234,8 @@ test('panel marks outside-map positions at the edge and labels detection-only fi
     assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[1] === 2200 && c[3] === 160), 'uncertainty stays at raw position');
     assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[1] < 2000 && c[1] > 1900), 'edge marker remains inside map');
     assert.ok(p.canvasCalls.some(c => c[0] === 'text' && /Off map.*inferred/.test(c[1])));
+    assert.equal(p.hooks.hitDeviceAt({x: 1954, y: 500}), 'beacon_a', 'visible edge marker is selectable');
+    assert.equal(p.hooks.hitDeviceAt({x: 2200, y: 500}), null, 'raw coordinates are not an invisible hit target');
     row.cords = [100, 100]; row.outdoor.detection_only = true; row.outdoor.direction_known = false;
     p.canvasCalls.length = 0; await p.intervals.findLast(i => i.ms === 500).cb();
     assert.ok(p.canvasCalls.some(c => c[0] === 'text' && /Detected only.*direction unknown/.test(c[1])));
