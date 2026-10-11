@@ -848,19 +848,26 @@ class BpsMapCard extends HTMLElement {
       }
       const iconUrl = this._trackerIconUrl(trackerKey);
       const iconImg = this._getIconImage(iconUrl);
+      const marker = BPSOutdoor.markerPlacement(pos, this._canvas.width, this._canvas.height, iconSize / 2 + 6);
+      if (marker.offMap) {
+        ctx.save(); ctx.globalAlpha = .6; ctx.strokeStyle = '#2196f3'; ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.arc(marker.x, marker.y, iconSize / 2 + 4, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+      }
       if (iconImg && iconImg.complete && iconImg.naturalWidth > 0) {
-        ctx.drawImage(iconImg, pos.x - iconSize / 2, pos.y - iconSize / 2, iconSize, iconSize);
+        ctx.drawImage(iconImg, marker.x - iconSize / 2, marker.y - iconSize / 2, iconSize, iconSize);
       } else {
         ctx.beginPath();
         ctx.fillStyle = "rgba(33, 150, 243, 0.85)";
         ctx.strokeStyle = "#0d47a1";
         ctx.lineWidth = 2;
-        ctx.arc(pos.x, pos.y, iconSize / 2, 0, Math.PI * 2);
+        ctx.arc(marker.x, marker.y, iconSize / 2, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
       }
-      if (this._config.show_labels) {
-        const text = this._markerLabelText(trackerKey, pos);
+      const status = BPSOutdoor.markerStatus(pos.outdoor, marker.offMap);
+      if (this._config.show_labels || status) {
+        const label = this._config.show_labels ? this._markerLabelText(trackerKey, pos) : '';
+        const text = [label, status].filter(Boolean).join(' · ');
         if (text) {
           const scale = this._config.scale_labels / 100;
           const fontPx = Math.max(11, iconSize * 0.35) * scale;
@@ -869,11 +876,11 @@ class BpsMapCard extends HTMLElement {
           // Right of the icon; flipped to the left side when it would run
           // off the canvas edge.
           const textWidth = ctx.measureText(text).width;
-          let labelX = pos.x + iconSize / 2 + 4;
+          let labelX = marker.x + iconSize / 2 + 4;
           if (labelX + textWidth > this._canvas.width - 2) {
-            labelX = pos.x - iconSize / 2 - 4 - textWidth;
+            labelX = marker.x - iconSize / 2 - 4 - textWidth;
           }
-          ctx.fillText(text, Math.max(2, labelX), pos.y + iconSize * 0.12);
+          ctx.fillText(text, Math.max(2, labelX), marker.y + iconSize * 0.12);
         }
       }
     }
@@ -1128,7 +1135,7 @@ class BpsMapCard extends HTMLElement {
         // only hint at what went wrong; keep it visible.
         this._updateFloorStatus();
         if (this._outdoorSettings.enabled && this._config.show_outdoor_diagnostics) {
-          const diagnostics = [...this._positions.values()].map(p => BPSOutdoor.diagnosticsText(p.payload)).filter(Boolean);
+          const diagnostics = [...this._positions.values()].map(p => BPSOutdoor.diagnosticsText({...p.payload, outdoor: p.outdoor})).filter(Boolean);
           if (diagnostics.length) this._setStatus(diagnostics.join('\n\n'));
         }
       }

@@ -57,8 +57,11 @@ def validate_outdoor_layout(layout, known_trackers=None):
                 if not isinstance(material, str) or material not in BUILDING_BOUNDARY_WEIGHTS:
                     return "Unknown building material"
                 points = region.get("points")
-                if not isinstance(points, list) or not 3 <= len(points) <= MAX_ENVIRONMENT_VERTICES:
-                    return f"Environment polygons need 3–{MAX_ENVIRONMENT_VERTICES} vertices"
+                minimum_points = 2 if kind == "fence" else 3
+                if not isinstance(points, list) or not minimum_points <= len(points) <= MAX_ENVIRONMENT_VERTICES:
+                    return f"Environment {kind} needs {minimum_points}–{MAX_ENVIRONMENT_VERTICES} vertices"
+                if "thickness" in region and (kind != "fence" or region["thickness"] not in ("thin", "solid")):
+                    return "Fence thickness must be thin or solid"
                 if "wall_materials" in region:
                     walls = region["wall_materials"]
                     if (kind != "building" or not isinstance(walls, list) or len(walls) != len(points)
@@ -69,10 +72,31 @@ def validate_outdoor_layout(layout, known_trackers=None):
                 return "Environment polygons must be finite, nonempty and free of self-intersections"
         receivers = floor.get("receivers", [])
         for receiver in receivers if isinstance(receivers, list) else []:
+            if not isinstance(receiver, dict):
+                continue
+            for key, limit in (("hardware_model", 128), ("antenna_notes", 256)):
+                if key in receiver and (not isinstance(receiver[key], str) or len(receiver[key]) > limit):
+                    return f"Receiver {key} must be text of at most {limit} characters"
+            if "height_unit" in receiver and receiver["height_unit"] not in ("m", "ft"):
+                return "Receiver height unit must be m or ft"
+            if "distance_accuracy_m" in receiver and finite_number(receiver["distance_accuracy_m"], minimum=0, maximum=1000) is None:
+                return "Receiver expected distance error must be a finite number from 0 to 1000 metres"
             if isinstance(receiver, dict) and "outdoor_policy" in receiver:
                 policy = receiver["outdoor_policy"]
                 if not isinstance(policy, str) or policy not in RECEIVER_POLICIES:
                     return "Unknown outdoor receiver policy"
+    if "tracker_hardware" in layout:
+        profiles = layout["tracker_hardware"]
+        if not isinstance(profiles, dict) or len(profiles) > 128:
+            return "Beacon hardware must be an object of at most 128 profiles"
+        for beacon, profile in profiles.items():
+            if not isinstance(beacon, str) or not SLUG.fullmatch(beacon) or not isinstance(profile, dict):
+                return "Beacon hardware profiles need individual tracker slugs and objects"
+            for key, limit in (("hardware_model", 128), ("notes", 256)):
+                if key in profile and (not isinstance(profile[key], str) or len(profile[key]) > limit):
+                    return f"Beacon {key} must be text of at most {limit} characters"
+            if any(key not in ("hardware_model", "notes") for key in profile):
+                return "Unknown beacon hardware field"
     if "tracker_groups" in layout:
         groups = layout["tracker_groups"]
         if not isinstance(groups, list) or len(groups) > MAX_GROUPS:

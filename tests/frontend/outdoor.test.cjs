@@ -10,12 +10,114 @@ const out = context.BPSOutdoor;
 const plain = value => JSON.parse(JSON.stringify(value));
 const polygon = [{x: 0, y: 0}, {x: 100, y: 0}, {x: 100, y: 100}, {x: 0, y: 100}];
 
+test('open fences save two-point and bent paths with material and thickness and reject malformed edits atomically', () => {
+    const floor = {}, points = [{x: 0, y: 0}, {x: 100, y: 0}];
+    const item = {id: 'fence', name: ' Metal fence ', type: 'fence', material: 'metal', points};
+    out.upsertEnvironment(floor, item);
+    assert.equal(floor.environment[0].thickness, 'solid');
+    assert.equal(floor.environment[0].name, 'Metal fence');
+    assert.notEqual(floor.environment[0].points, points);
+    out.upsertEnvironment(floor, {...item, points: polygon.slice(0, 3), thickness: 'thin'});
+    assert.deepEqual(plain(floor.environment[0].points), polygon.slice(0, 3));
+    assert.equal(floor.environment[0].thickness, 'thin');
+    const before = JSON.stringify(floor);
+    for (const bad of [[], points.slice(0, 1), [points[0], points[0]], [...points, points[0]],
+        [{x: 0, y: 0}, {x: 100, y: 0}, {x: 50, y: 0}],
+        [{x: 0, y: 0}, {x: 100, y: 100}, {x: 0, y: 100}, {x: 100, y: 0}],
+        [{x: NaN, y: 0}, points[1]], Array.from({length: 257}, (_, x) => ({x, y: 0}))]) {
+        assert.throws(() => out.upsertEnvironment(floor, {...item, points: bad}));
+        assert.equal(JSON.stringify(floor), before);
+    }
+    assert.equal(out.validPolyline([{x: 0, y: 0}, {x: 50, y: 0}, {x: 100, y: 0}]), true);
+    for (const extra of [{thickness: 'mesh'}, {wall_materials: ['wood', null]}]) {
+        assert.throws(() => out.upsertEnvironment(floor, {...item, ...extra}));
+        assert.equal(JSON.stringify(floor), before);
+    }
+});
+
+test('fence renderer draws only open segments and shows thin/solid and material styling', () => {
+    const calls = [], ctx = new Proxy({}, {get: (target, key) => (...args) => calls.push([key, ...args]),
+        set: (target, key, value) => {calls.push([key, value]); return true;}});
+    const item = {type: 'fence', material: 'metal', thickness: 'thin', points: polygon.slice(0, 3)};
+    assert.equal(out.drawFence(ctx, item, 2), true);
+    assert.deepEqual(calls.filter(c => ['moveTo', 'lineTo'].includes(c[0])), [['moveTo', 0, 0], ['lineTo', 100, 0], ['lineTo', 100, 100]]);
+    assert.equal(calls.some(c => c[0] === 'fill' || c[0] === 'closePath'), false);
+    assert.ok(calls.some(c => c[0] === 'strokeStyle' && c[1] === '#607d8b'));
+    assert.ok(calls.some(c => c[0] === 'lineWidth' && c[1] === 1));
+    assert.deepEqual(plain(calls.find(c => c[0] === 'setLineDash')[1]), [2.5, 1.5]);
+    calls.length = 0;
+    out.drawFence(ctx, {...item, material: 'wood', thickness: 'solid'}, 2);
+    assert.ok(calls.some(c => c[0] === 'strokeStyle' && c[1] === '#8d6e63'));
+    assert.ok(calls.some(c => c[0] === 'lineWidth' && c[1] === 2.5));
+    assert.deepEqual(plain(calls.find(c => c[0] === 'setLineDash')[1]), []);
+    calls.length = 0;
+    assert.equal(out.drawFence(ctx, {...item, points: []}), false);
+    assert.deepEqual(calls, []);
+});
+
+test('fence diagnostics show actual crossings and each material/thickness trust weight', () => {
+    const report = out.diagnosticsText({outdoor: {receiver_diagnostics: [{receiver: 'proxy', classification: 'fence',
+        fence_crossings: 2, environmental_weight: .4, reliability_weight: .3, intersections: [
+            {type: 'fence', id: 'metal_fence', material: 'metal', thickness: 'thin', fence_crossings: 1, weight: .8},
+            {type: 'fence', name: 'Wood wall', material: 'wood', thickness: 'solid', fence_crossings: 1, weight: .5}]}]}});
+    assert.match(report, /proxy:.*fence crossings 2/);
+    assert.match(report, /metal_fence · metal · thin · crossings 1 · trust weight 0.8/);
+    assert.match(report, /Wood wall · wood · solid · crossings 1 · trust weight 0.5/);
+});
+
+test('outside-map markers clamp for display only and detection-only diagnostics disclose unknown bearing', () => {
+    const raw = {x: 2200, y: -10};
+    assert.deepEqual(plain(out.markerPlacement(raw, 2000, 1000, 26)), {x: 1974, y: 26, offMap: true});
+    assert.deepEqual(raw, {x: 2200, y: -10});
+    assert.deepEqual(plain(out.markerPlacement({x: 5, y: 10}, 2000, 1000)), {x: 5, y: 10, offMap: false});
+    assert.match(out.markerStatus({detection_only: true}, true), /Detected only.*direction unknown.*Off map.*inferred/);
+    assert.match(out.diagnosticsText({outdoor: {detection_only: true, receiver: 'proxy'}}), /Detected only.*direction unknown.*proxy/);
+});
+
+test('group distances retain same-floor member ranges including excluded beacons and deduplicate identical circles', () => {
+    const row = {group: true, floor: 'Property', beacon_positions: [null,
+        {ent: 'a', floor: 'Property'}, {ent: 'b', floor: 'Property', used: false},
+        {ent: 'c', floor: 'Barn'}, {ent: 'missing'}, {ent: 'wrong_floor'}]};
+    const snapshot = [{ent: 'a', floor: 'Property', radii: [[1, 2, 3], [4, 5, 6], [1, 2, NaN]]},
+        {ent: 'b', floor: 'Property', radii: [[1, 2, 3], [1, 2, 4], [1, 2, -1], [1, 2]]},
+        {ent: 'c', floor: 'Barn', radii: [[9, 9, 9]]}, {ent: 'wrong_floor', floor: 'Barn', radii: [[8, 8, 8]]}];
+    assert.deepEqual(plain(out.distanceRadii(row, snapshot)), [[1, 2, 3], [4, 5, 6], [1, 2, 4]]);
+    assert.equal(out.distanceRadii(snapshot[0], snapshot), snapshot[0].radii, 'individual circles are preserved');
+    assert.deepEqual(plain(out.distanceRadii({group: true, floor: 'Property', beacon_positions: [
+        {ent: 'embedded', radii: [[10, 20, 30]]}]}, [])), [[10, 20, 30]]);
+});
+
 function radiusFix(raw, seconds, previous, floor = 'Property', extra = {}) {
     const now = 100000 + seconds * 1000;
     const row = {floor, updated: now / 1000, outdoor: {estimated_uncertainty_m: raw,
         confidence: raw > 10 ? 'poor' : 'good', observed: now / 1000, ...extra}};
     return {...out.stabilizeUncertainty(row, previous, now), receivedAt: out.fixTime(row, now)};
 }
+
+test('reporting receiver display bound caps initial and sustained uncertainty while retaining diagnostic estimate', () => {
+    let fix = radiusFix(120, 0, undefined, 'Property', {display_radius_limit_m: 8});
+    assert.equal(fix.outdoor.display_uncertainty_m, 8);
+    assert.equal(fix.outdoor.display_uncertainty_capped, true);
+    for (let seconds = 1; seconds <= 40; seconds++) fix = radiusFix(120, seconds, fix, 'Property', {display_radius_limit_m: 8});
+    assert.equal(fix.outdoor.display_uncertainty_m, 8);
+    assert.equal(fix.outdoor.estimated_uncertainty_m, 120);
+    assert.equal(fix.outdoor.confidence, 'poor');
+    fix = radiusFix(120, 41, fix, 'Property', {display_radius_limit_m: 4, stale: true});
+    assert.equal(fix.outdoor.display_uncertainty_m, 4, 'bound shrinks immediately on stale/cached polls');
+    assert.match(out.diagnosticsText({outdoor: fix.outdoor}), /Estimated uncertainty: 120.0 m/);
+    assert.match(out.diagnosticsText({outdoor: fix.outdoor}), /limit: 4.0 m.*capped for display.*displayed 4.0 m/);
+    fix = radiusFix(30, 42, fix, 'Barn');
+    assert.equal(fix.outdoor.display_uncertainty_m, 30, 'floor reset releases the former footprint');
+});
+
+test('draw-time display bound applies to legacy untimed rows and rejects invalid limits', () => {
+    const config = {enabled: true};
+    assert.equal(out.uncertaintyRadius({estimated_uncertainty_m: 100, display_radius_limit_m: 8}, 20, config), 160);
+    assert.equal(out.uncertaintyRadius({estimated_uncertainty_m: 100, display_uncertainty_m: 20, display_radius_limit_m: 8}, 20, config), 160);
+    for (const cap of [-1, NaN, '8', Infinity]) {
+        assert.equal(out.uncertaintyRadius({estimated_uncertainty_m: 100, display_radius_limit_m: cap}, 20, config), 2000);
+    }
+});
 
 test('brief uncertainty spikes are held without changing the live estimate or confidence', () => {
     let fix = radiusFix(3, 0);

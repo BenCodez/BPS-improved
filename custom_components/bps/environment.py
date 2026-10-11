@@ -12,7 +12,8 @@ from numbers import Real
 from threading import Lock
 import time
 
-from .environment_geometry import compile_ring, interior_path, point_relation
+from .environment_geometry import (compile_line, compile_ring, interior_path,
+                                   line_crossings, point_relation)
 
 _LOGGER = logging.getLogger(__name__)
 _WARNING_LOCK = Lock()
@@ -30,7 +31,7 @@ BUILDING_BOUNDARY_WEIGHTS = {"unknown": 0.80, "light": 0.90,
                              "wood": 0.90, "heavy": 0.65, "metal": 0.50}
 VEGETATION_WEIGHTS = {"dense_trees": 0.75, "light_vegetation": 0.90,
                       "custom": 0.90}
-ENVIRONMENT_TYPES = frozenset({"building", *VEGETATION_WEIGHTS})
+ENVIRONMENT_TYPES = frozenset({"building", "fence", *VEGETATION_WEIGHTS})
 RECEIVER_POLICIES = frozenset({"auto", "normal", "prefer", "deprioritize", "ignore"})
 
 
@@ -84,9 +85,9 @@ def receiver_policy(value):
 
 
 def _environment_signature(records):
-    """Bound work and reject a whole polygon if any vertex is malformed.
+    """Bound work and reject a whole shape if any vertex is malformed.
 
-    Polygon validity is checked during compilation. Oversized collections are
+    Geometry validity is checked during compilation. Oversized collections are
     rejected rather than silently giving partial obstruction coverage.
     """
     if not isinstance(records, list) or len(records) > MAX_ENVIRONMENT_POLYGONS:
@@ -99,7 +100,8 @@ def _environment_signature(records):
         if not isinstance(kind, str) or kind not in ENVIRONMENT_TYPES:
             continue
         points = record.get("points")
-        if not isinstance(points, list) or not 3 <= len(points) <= MAX_ENVIRONMENT_VERTICES:
+        minimum_points = 2 if kind == "fence" else 3
+        if not isinstance(points, list) or not minimum_points <= len(points) <= MAX_ENVIRONMENT_VERTICES:
             continue
         coordinates = []
         for point in points:
@@ -123,13 +125,16 @@ def _environment_signature(records):
             identifier = f"environment_{index}"
         if not isinstance(name, str) or len(name) > 256:
             name = identifier
-        walls = record.get("wall_materials")
+        thickness = record.get("thickness", "solid") if kind == "fence" else None
+        if not isinstance(thickness, str) or thickness not in {"thin", "solid"}:
+            thickness = "solid" if kind == "fence" else None
+        walls = record.get("wall_materials") if kind != "fence" else None
         if (not isinstance(walls, list) or len(walls) != len(coordinates)
                 or any(w is not None and (not isinstance(w, str)
                        or w not in BUILDING_BOUNDARY_WEIGHTS) for w in walls)):
             walls = None
         signature.append((identifier, name, kind, material, tuple(coordinates),
-                          tuple(walls) if walls is not None else None))
+                          tuple(walls) if walls is not None else None, thickness))
     return tuple(signature)
 
 
@@ -143,6 +148,7 @@ class EnvironmentRegion:
     wall_materials: tuple | None
     edges: tuple
     bounds: tuple
+    thickness: str | None
 
 
 @dataclass(frozen=True)
@@ -153,13 +159,13 @@ class CompiledEnvironment:
 @lru_cache(maxsize=64)
 def _compile_cached(signature):
     regions = []
-    for identifier, name, kind, material, coordinates, walls in signature:
-        ring = compile_ring(coordinates)
-        if ring is None:
+    for identifier, name, kind, material, coordinates, walls, thickness in signature:
+        geometry = compile_line(coordinates) if kind == "fence" else compile_ring(coordinates)
+        if geometry is None:
             continue
-        edges, bounds = ring
+        edges, bounds = geometry
         regions.append(EnvironmentRegion(identifier, name, kind, material,
-                                          coordinates, walls, edges, bounds))
+                                          coordinates, walls, edges, bounds, thickness))
     return CompiledEnvironment(tuple(regions))
 
 
@@ -182,11 +188,12 @@ def compile_environment(floor):
 
 
 def normalize_environment(records):
-    """JSON-safe validated polygons for storage, with invalid polygons omitted."""
+    """JSON-safe polygons/open fences for storage, with invalid shapes omitted."""
     compiled = _compile(_environment_signature(records))
     return [{"id": r.identifier, "name": r.name, "type": r.kind,
              "material": r.material,
              "points": [{"x": x, "y": y} for x, y in r.coordinates],
+             **({"thickness": r.thickness} if r.kind == "fence" else {}),
              **({"wall_materials": list(r.wall_materials)} if r.wall_materials is not None else {})}
             for r in compiled.regions]
 
@@ -225,6 +232,7 @@ def _crossed_wall(region, point):
 def _path_result():
     return {"environmental_weight": 1.0, "classification": "clear",
               "building_crossings": 0, "building_paths": 0,
+              "fence_crossings": 0, "fence_paths": 0,
               "vegetation_paths": 0, "custom_paths": 0,
               "receiver_inside_building": False, "reflection_risk": False,
               "intersections": []}
@@ -264,6 +272,24 @@ def _path_reliability(compiled, receiver_xy, fix_xy):
         return result
     kinds = set()
     for region in compiled.regions:
+        if region.kind == "fence":
+            crossings = line_crossings(start, end, region.edges, region.bounds)
+            if not crossings:
+                continue
+            kinds.add("fence")
+            single_weight = BUILDING_BOUNDARY_WEIGHTS[region.material]
+            if region.thickness == "thin":
+                single_weight = 1.0 - 0.25 * (1.0 - single_weight)
+            weight = single_weight ** len(crossings)
+            result["environmental_weight"] *= weight
+            result["fence_crossings"] += len(crossings)
+            result["fence_paths"] += 1
+            result["reflection_risk"] |= region.material == "metal"
+            result["intersections"].append({"id": region.identifier, "type": "fence",
+                "material": region.material, "thickness": region.thickness,
+                "fence_crossings": len(crossings), "crossing_points": [list(p) for p in crossings],
+                "weight": weight})
+            continue
         inside = region.kind == "building" and point_relation(start, region.edges, region.bounds) == 1
         result["receiver_inside_building"] |= inside
         crossing_points, interior_length = interior_path(start, end, region.edges, region.bounds)
@@ -292,7 +318,7 @@ def _path_reliability(compiled, receiver_xy, fix_xy):
                                          "weight": weight})
     result["environmental_weight"] = max(MIN_ENVIRONMENT_WEIGHT,
                                            result["environmental_weight"])
-    for kind in ("building", "dense_trees", "light_vegetation", "custom"):
+    for kind in ("building", "fence", "dense_trees", "light_vegetation", "custom"):
         if kind in kinds:
             result["classification"] = kind
             break

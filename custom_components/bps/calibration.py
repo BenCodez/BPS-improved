@@ -44,6 +44,7 @@ from homeassistant.util import slugify
 from scipy.optimize import least_squares
 
 from .calibration_auto import assess_update, WINDOW_S as AUTO_HISTORY_WINDOW
+from .bermuda_calibration import build_preview, runtime_context, source_snapshot, source_for_floor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -357,6 +358,23 @@ def _ingest_dump(cal: dict, devices: dict) -> None:
 
     # Scanner MAC -> receiver slug, restricted to receivers on this floor.
     scanner_slug_by_mac = _match_scanners(cal, devices)
+    # Provenance comes from the actual sampled adverts, never today's config
+    # applied retrospectively to an old solve. Do not mix offset/model windows.
+    source = source_snapshot(cal["receivers"], devices, scanner_slug_by_mac)
+    known = all(row["scanner_mac"] and row["attenuation"] is not None
+                and row["rssi_offset_db"] is not None and row["reference_power_dbm"] is not None
+                and len(row["transmitter_reference_power_dbm"]) == 1
+                for row in source["receivers"].values())
+    previous = cal.get("_bermuda_source")
+    if known and source["receivers"]:
+        if previous != source and cal.get("samples"):
+            cal["samples"] = {}
+            cal["_auto_samples"] = {}
+            cal["_advert_stamps"] = {}
+        cal["_bermuda_source"] = source
+    elif previous is not None:
+        # Incomplete evidence cannot certify new samples against the old model.
+        cal.pop("_bermuda_source", None)
 
     # Monotonic "now": the freshest advert stamp in the payload.
     newest = 0.0
@@ -467,6 +485,7 @@ def solve_snapshot(cal: dict) -> dict:
     return {
         "samples": {k: list(v) for k, v in (cal.get("samples") or {}).items()},
         "receivers": copy.deepcopy(cal.get("receivers") or {}),
+        "_bermuda_source": copy.deepcopy(cal.get("_bermuda_source")),
     }
 
 
@@ -638,6 +657,7 @@ def solve(cal: dict, floor_name: str):
 
     return {
         "floor": floor_name,
+        "bermuda_source": source_for_floor(cal.get("_bermuda_source"), floor_name),
         "solved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "pairs_used": len(pairs),
         "bidirectional_pairs": len(diff_rows),
@@ -811,11 +831,13 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
         # Persisted cal['applied'] is just historical metadata.
         current = {str(r.get("entity_id")): r.get("correction", 1.)
                    for r in floor.get("receivers", []) if str(r.get("entity_id")) in on_floor}
+        result_source = source_for_floor(cal.get("_bermuda_source"), floor_name)
         result, updates, decision = await hass.async_add_executor_job(
             assess_update, snapshot, history, current, floor_name, time.time(), solve, _true_distance_m)
         if not updates:
             statuses[floor_name] = decision
         if result is not None:
+            result["bermuda_source"] = result_source
             cal["results"][floor_name] = result
             cal["last_solved_at"] = result["solved_at"]
         if not updates:
@@ -903,6 +925,7 @@ async def start_calibration(hass, floor_name: str, duration: int) -> dict:
             "ends_at": now + duration,
             "duration": duration,
             "samples": {},
+            "_bermuda_source": None,
             "receivers": receivers,
             "matched_placed": {},  # fresh window: re-learn which placements match
             "all_placed_slugs": _all_placed_slugs(coords),
@@ -1203,6 +1226,37 @@ class BPSCalibrationAPI(HomeAssistantView):
                 if self.validate_tracking is None:
                     raise ValueError("Tracking validation is unavailable")
                 return web.json_response(await self.validate_tracking(hass, data.get("floor") or cal.get("floor")))
+            elif action == "preview_bermuda":
+                # Read-only: no services, writes, solves, or state publication.
+                coords = await _read_coords(hass)
+                if not coords:
+                    raise ValueError("No BPS data saved yet")
+                name = data.get("floor") or cal.get("floor")
+                result = next((r for n, r in cal.get("results", {}).items()
+                    if _normalize(n) == _normalize(name)), None)
+                source = runtime_context(hass, coords, name)
+                tracking = None
+                if result is not None and self.validate_tracking is not None:
+                    validation_coords = copy.deepcopy(coords)
+                    validation_source = copy.deepcopy(source)
+                    try:
+                        tracking = await self.validate_tracking(hass, name)
+                    except ValueError:
+                        pass  # Export still explains missing measured evidence.
+                    # Validation awaits work; bind the export to current settings
+                    # and the exact result rather than a replaced candidate.
+                    coords = await _read_coords(hass)
+                    if not coords:
+                        raise ValueError("BPS layout changed during preview; refresh it")
+                    cal = hass.data.get(DOMAIN, {}).get("calibration", {})
+                    result = next((r for n, r in cal.get("results", {}).items()
+                        if _normalize(n) == _normalize(name)), None)
+                    source = runtime_context(hass, coords, name)
+                    if coords != validation_coords or source != validation_source:
+                        tracking = None
+                if cal.get("mode") == "auto":
+                    coords["auto_calibration"] = True
+                return web.json_response(build_preview(coords, name, result, source, tracking))
             elif action == "apply":
                 updated = await apply_corrections(hass, cal, data.get("floor") or cal.get("floor"))
                 await save_calibration_state(hass)

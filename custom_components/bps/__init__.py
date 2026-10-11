@@ -55,6 +55,8 @@ from . import history as history_mod
 from .zone_adjust import adjust_zones, adjust_subzones
 from .environment import outdoor_settings, finite_number, reading_max_age
 from .outdoor_tracking import solve_outdoor, account_for_published_position
+from .display_radius import reporting_radius_limit
+from .sparse_tracking import solve_sparse_detection
 from .solver_settings import MIN_WEIGHT_RADIUS_M, SOLVER_ROBUST_F_SCALE
 from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
@@ -713,7 +715,8 @@ async def update_tracked_entities(hass):
                 _LOGGER.info("There are no devices present to track, sleep 10 seconds")
                 await asyncio.sleep(10)
                 continue  # Skip and start over
-            if num_points < 3:
+            layout = get_bps_data(hass)
+            if num_points < 3 and not outdoor_settings(layout)["enabled"]:
                 await update_tracker_groups(hass)
                 _LOGGER.info("There are not enough trackers with available data to track, sleep 10 seconds")
                 await asyncio.sleep(10)
@@ -722,7 +725,6 @@ async def update_tracked_entities(hass):
             cleaned = [item.split("_distance_to_")[0].replace("sensor.", "") for item in tracked_entities]
             unique_values = list(set(cleaned))
             # Use a separate copy per entity to avoid cross-entity mutation side effects.
-            layout = get_bps_data(hass)
             new_global_data = [{"entity": ent, "data": copy.deepcopy(layout)} for ent in unique_values]
 
             await process_entities(hass, new_global_data)
@@ -1349,10 +1351,8 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
             w = _jump_weight(r, last_r.get((floor_name, x, y)), min_wr)
             weighted.append((x, y, r, w, slant_px))
 
-        # The device cannot be outside the floor: bound the solver to the
-        # extent of the floor's receivers and zones (with some margin) so the
-        # fitted position is the best point WITHIN the map, not a runaway fix
-        # that would need clamping afterwards.
+        # Indoor fixes remain bounded by the floor. Outdoor fixes can be
+        # beyond the map: extend the bounded search by the observed ranges.
         zone_polys = list(_floor_zone_polygons(new_global_data, entity, floor_name))
         xs = [p[0] for p in weighted]
         ys = [p[1] for p in weighted]
@@ -1361,6 +1361,8 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
             xs.extend((minx, maxx))
             ys.extend((miny, maxy))
         margin = 0.1 * max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+        if outdoor and scale:
+            margin = max(margin, min(max(pt[2] for pt in weighted), 1000 * scale))
         floor_bounds = (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
 
         outdoor_result = None
@@ -1405,6 +1407,25 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
 
     # Store current r-values for next time
     update_trilateration_and_zone.last_r_values[entity] = new_last_r
+
+    if outdoor and not solved:
+        previous_payload = next((p for p in apitricords if p["ent"] == entity), None)
+        for cand in candidates:
+            floor_name = cand["name"]
+            scale = _floor_scale(new_global_data, entity, floor_name)
+            floor = next(f for f in entity_layout["floor"] if f["name"] == floor_name)
+            min_wr = MIN_WEIGHT_RADIUS_M * scale if scale else 1e-3
+            weighted = [(x, y, radius, _jump_weight(radius, last_r.get((floor_name, x, y)), min_wr), slant)
+                        for x, y, radius, slant in cand["cords"]]
+            detection = solve_sparse_detection(floor, weighted, scale, _reading_max_age(entity_layout),
+                previous_payload, now=time.time(), position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS))
+            if detection is not None:
+                quality = detection["outdoor"]
+                # Election compares reception floors only; this is not a
+                # directional fix and never claims a room/zone membership.
+                solved[floor_name] = {"fix": detection["fix"], "weighted": detection["weighted"],
+                    "bounds": None, "zone_polys": [], "scale": scale,
+                    "conf": .1 / (1 + quality["detection_range_m"]), "rms_m": None, "outdoor": quality}
 
     if not solved:
         # No candidate floor has three converging receivers (historical
@@ -1477,9 +1498,14 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         # trilaterated fix feeds the filter (so the estimate is never biased by
         # the zone snapping applied below); the filtered output is clipped to the
         # floor bounds inside the helper.
-        avg_x, avg_y = _kalman_position_update(
-            entity, lowest_floor_name, tricords, scale, floor_bounds
-        )
+        detection_only = bool(elected.get("outdoor", {}).get("detection_only")) if elected.get("outdoor") else False
+        if detection_only:
+            _kf_position_state.pop(entity, None)
+            avg_x, avg_y = tricords
+        else:
+            avg_x, avg_y = _kalman_position_update(
+                entity, lowest_floor_name, tricords, scale, floor_bounds
+            )
 
         # A fix outside every zone is physically implausible (BLE noise pushed
         # it into a wall or off the apartment): publish the nearest point on
@@ -1487,13 +1513,16 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         # the filter state keeps the raw fix, so smoothing is not biased toward
         # the boundary.
         test_point = Point(float(avg_x), float(avg_y))
-        snapped = snap_point_into_zones(zone_polys, test_point)
+        snapped = snap_point_into_zones(zone_polys, test_point) if not outdoor else None
         if snapped is not None:
             test_point = snapped
             avg_x, avg_y = float(snapped.x), float(snapped.y)
-        zone = find_zone_for_point(new_global_data, entity, lowest_floor_name, test_point)
-        nearest_zone = find_nearest_zone(new_global_data, entity, lowest_floor_name, test_point)
-        sub_zone, sub_parent = find_sub_zone_for_point(new_global_data, entity, lowest_floor_name, test_point)
+        if detection_only:
+            zone = nearest_zone = sub_zone = sub_parent = "unknown"
+        else:
+            zone = find_zone_for_point(new_global_data, entity, lowest_floor_name, test_point)
+            nearest_zone = find_nearest_zone(new_global_data, entity, lowest_floor_name, test_point)
+            sub_zone, sub_parent = find_sub_zone_for_point(new_global_data, entity, lowest_floor_name, test_point)
         # parent_zone always names the enclosing main zone: the sub-zone's
         # declared parent when inside one, otherwise the current main zone.
         parent_zone = sub_parent if sub_parent else zone
@@ -1513,6 +1542,9 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         if outdoor and elected["outdoor"] is not None:
             quality = elected["outdoor"]
             account_for_published_position(quality, tricords, (avg_x, avg_y), scale)
+            source_floor = next(f for f in entity_layout["floor"] if f["name"] == lowest_floor_name)
+            quality.update(reporting_radius_limit(source_floor, (avg_x, avg_y),
+                quality.get("receiver_diagnostics"), time.time(), _reading_max_age(entity_layout)))
             # Captured with the measurements before executor queuing/solving.
             # Never reconstruct it using a later publication clock.
             if quality.get("observed") is None:
@@ -1538,9 +1570,9 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 # weighted RMS residual (m) and the elected floor's confidence.
                 # Both frontends read named fields, so these keys are inert.
                 "raw": [round(float(tricords[0]), 2), round(float(tricords[1]), 2)],
-                "rms_m": round(elected["rms_m"], 3),
-                "conf": round(elected["conf"], 3),
-                "updated": time.time(),
+                "rms_m": round(elected["rms_m"], 3) if elected["rms_m"] is not None else None,
+                "conf": 0 if detection_only else round(elected["conf"], 3),
+                "updated": elected["outdoor"]["observed"] if detection_only else time.time(),
                 **extra,
             },
         )
@@ -1551,9 +1583,12 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
         # scale has no metric frame, so its fixes are not recordable.
         if scale:
             try:
-                get_position_history(hass).record(
-                    entity, time.time(), avg_x / scale, avg_y / scale,
-                    lowest_floor_name, scale, zone)
+                if detection_only:
+                    get_position_history(hass).mark_gap(entity)
+                else:
+                    get_position_history(hass).record(
+                        entity, time.time(), avg_x / scale, avg_y / scale,
+                        lowest_floor_name, scale, zone)
             except Exception as e:  # history must never break tracking
                 _LOGGER.debug("Position history record failed for %s: %s", entity, e)
         update_bps_sensor_state(hass, f"sensor.{entity}_bps_zone", zone)
@@ -1699,6 +1734,13 @@ async def update_tracker_groups(hass):
     fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
                         use_observation_age=use_observation_age, known_trackers=known,
                         previous=previous, stability=dom.setdefault("group_stability", {}))
+    source_positions = {p["ent"]: p for p in originals}
+    for position in fused:
+        floor = next(f for f in layout["floor"] if f["name"] == position["floor"])
+        diagnostics = [row for member in position["beacon_positions"] if member["used"]
+                       for row in (source_positions[member["ent"]].get("outdoor") or {}).get("receiver_diagnostics", [])]
+        position["outdoor"].update(reporting_radius_limit(floor, position["cords"], diagnostics,
+                                                        fusion_time, group_max_age))
     # Geometry workers mutate only their unpublished fix and read detached
     # Python layout data, never the live position/cache objects.
     group_layout = copy.deepcopy(layout)
@@ -1708,7 +1750,13 @@ async def update_tracker_groups(hass):
         if not _tracking_context_current(context):
             return
         position["last_update_age_s"] = max(0.0, time.time() - position["updated"])
-        position["outdoor"].update(stale_after_s=group_max_age,
+        source_max_age = group_max_age
+        if position["outdoor"].get("detection_only"):
+            source_max_age = min(source_max_age, *(finite_number(
+                (source_positions[member["ent"]].get("outdoor") or {}).get("stale_after_s"),
+                30.0, minimum=0.0) or 30.0
+                for member in position["beacon_positions"] if member["used"]))
+        position["outdoor"].update(stale_after_s=source_max_age,
                                    position_age_s=position["last_update_age_s"],
                                    observed=position["updated"], stale=False)
         # Entity attributes keep source timestamps rather than ticking ages.
@@ -1728,12 +1776,15 @@ async def update_tracker_groups(hass):
         # History dates the published result; API freshness keeps source time.
         # Its existing movement/interval/heartbeat gates bound repeated rows.
         try:
-            get_position_history(hass).record(
-                position["ent"], fusion_time,
-                position["cords"][0] / scales[position["floor"]],
-                position["cords"][1] / scales[position["floor"]],
-                position["floor"], scales[position["floor"]], position["zone"],
-            )
+            if position["outdoor"].get("detection_only"):
+                get_position_history(hass).mark_gap(position["ent"])
+            else:
+                get_position_history(hass).record(
+                    position["ent"], fusion_time,
+                    position["cords"][0] / scales[position["floor"]],
+                    position["cords"][1] / scales[position["floor"]],
+                    position["floor"], scales[position["floor"]], position["zone"],
+                )
         except Exception as error:
             _LOGGER.debug("Group history record failed for %s: %s", position["ent"], error)
     live = {p["ent"] for p in fused}
@@ -1754,14 +1805,11 @@ async def update_tracker_groups(hass):
 
 
 def _assign_group_zone(position, lookup, scale):
-    """Apply the existing zone/no-go rules off the loop to a private group fix."""
+    """Classify the group point without snapping outdoor estimates into zones."""
+    if position.get("outdoor", {}).get("detection_only"):
+        position.update(zone="unknown", nearest_zone="unknown", sub_zone="unknown", parent_zone="unknown")
+        return
     point = Point(*position["cords"])
-    polys = list(_floor_zone_polygons(lookup, position["ent"], position["floor"]))
-    snapped = snap_point_into_zones(polys, point)
-    if snapped is not None:
-        account_for_published_position(position["outdoor"], position["cords"], (snapped.x, snapped.y), scale)
-        position["cords"] = [float(snapped.x), float(snapped.y)]
-        point = snapped
     position["zone"] = find_zone_for_point(lookup, position["ent"], position["floor"], point)
     position["nearest_zone"] = find_nearest_zone(lookup, position["ent"], position["floor"], point)
 
@@ -2716,11 +2764,16 @@ async def _calibration_tracking_check(hass, floor_name):
         raise ValueError("Solve calibration for the selected floor first")
     # Freeze candidate and geometry before awaiting export/executor work.
     corrections, floor = copy.deepcopy(result["receivers"]), copy.deepcopy(floor)
+    current_layout = copy.deepcopy(layout)
+    baseline_corrections = {receiver.get("entity_id"): receiver.get("correction", 1)
+                            for receiver in floor.get("receivers", [])}
     solved_at = result.get("solved_at")
     dom["calibration_validation_busy"] = True
     try:
         payload = await recording.export()
-        report = await hass.async_add_executor_job(compare_tracking_export, payload, floor["name"], corrections, floor, trilaterate)
+        report = await hass.async_add_executor_job(partial(compare_tracking_export, payload,
+            floor["name"], corrections, floor, trilaterate,
+            baseline_corrections=baseline_corrections, current_layout=current_layout))
         report.update(candidate_solved_at=solved_at, candidate_corrections=corrections)
         return report
     finally:
@@ -2763,7 +2816,7 @@ def _diagnostic_snapshot(hass, targets, now):
         raise ValueError("Full diagnostic report supports at most 32768 beacon/receiver readings")
     context = {"layout": {key: copy.deepcopy(data[key]) for key in (
         "outdoor_tracking", "tracker_groups", "tracker_height", "tracker_heights",
-        "tracker_ref_offsets", "reading_max_age", "position_timeout") if key in data},
+        "tracker_hardware", "tracker_ref_offsets", "reading_max_age", "position_timeout") if key in data},
         "target_members": members, "defaults": {"tracker_height_m": TRACKER_HEIGHT_M,
         "reading_max_age_s": READING_MAX_AGE_SECS, "position_timeout_s": STALE_POSITION_SECS}}
     context["layout"]["floor"] = [{key: copy.deepcopy(floor[key]) for key in (

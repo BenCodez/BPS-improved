@@ -21,6 +21,12 @@ AGREEMENT_FLOOR_M = 5.0
 AGREEMENT_UNCERTAINTY_FACTOR = 2.5
 # Shared receiver geometry means two agreeing beacons are not independent.
 MIN_AGREEMENT_UNCERTAINTY_RATIO = 0.75
+# Radio uncertainty must not turn two beacons on one animal into agreement
+# tens of metres apart. Motion confirmation uses source observations, not polls.
+MAX_AGREEMENT_DISTANCE_M = 10.0
+GROUP_MAX_SPEED_MS = 10.0
+GROUP_MOTION_SLACK_M = 5.0
+GROUP_JUMP_CONFIRMATION_S = 3.0
 _SLUG = re.compile(r"[a-z0-9_]{1,64}\Z", re.ASCII)
 
 
@@ -134,8 +140,10 @@ def _fix(beacon, position, scales, now, max_age_s, use_observation_age):
         observed = _number(outdoor["observed"])
         if observed is None or observed > updated:
             return None
-        if use_observation_age:
+        if use_observation_age or outdoor.get("detection_only") is True:
             updated = observed
+    if outdoor.get("detection_only") is True:
+        max_age_s = min(max_age_s, _number(outdoor.get("stale_after_s")) or 30.0)
     if now - updated > max_age_s:
         return None
     residual = _number(position.get("rms_m"))
@@ -172,6 +180,9 @@ def _fix(beacon, position, scales, now, max_age_s, use_observation_age):
     return {"ent": beacon, "cords": [x, y], "floor": floor,
             "updated": updated, "observed": outdoor.get("observed", updated),
             "estimated_uncertainty_m": uncertainty,
+            "detection_only": outdoor.get("detection_only") is True,
+            "detection_receiver": outdoor.get("detection_receiver") if isinstance(outdoor.get("detection_receiver"), str) else None,
+            "detection_range_m": _number(outdoor.get("detection_range_m")),
             "environment_fallback": outdoor.get("environment_fallback") is True,
             "uncertainty_details": {key: value for key in (
                 "residual_m", "unadjusted_residual_m", "noise_floor_m",
@@ -187,6 +198,63 @@ def _fix(beacon, position, scales, now, max_age_s, use_observation_age):
 def _distance(first, second):
     return math.hypot(first["cords"][0] - second["cords"][0],
                       first["cords"][1] - second["cords"][1]) / first["scale"]
+
+
+def _agreement_limit(first, second):
+    return min(MAX_AGREEMENT_DISTANCE_M, max(AGREEMENT_FLOOR_M,
+        AGREEMENT_UNCERTAINTY_FACTOR * min(first["estimated_uncertainty_m"],
+                                         second["estimated_uncertainty_m"])))
+
+
+def _motion_previous(previous, floor, scale, now, max_age_s):
+    if not isinstance(previous, Mapping) or previous.get("floor") != floor:
+        return None
+    if isinstance(previous.get("outdoor"), Mapping) and previous["outdoor"].get("detection_only"):
+        return None
+    cords = previous.get("cords")
+    updated = _number(previous.get("updated"))
+    if not isinstance(cords, (list, tuple)) or len(cords) != 2 or updated is None:
+        return None
+    xy = list(map(_number, cords))
+    if any(v is None or abs(v) > 1e9 for v in xy) or not 0 <= now - updated <= max_age_s:
+        return None
+    return {"cords": xy, "floor": floor, "scale": scale, "updated": updated}
+
+
+def _motion_point(x, y, fixes, previous, stability):
+    """Hold a sudden excursion, then approach persistent evidence gradually."""
+    if previous is None or not isinstance(stability, dict):
+        return x, y, None
+    epoch = max(p["observed"] for p in fixes)
+    old_epoch = _number(stability.get("motion_epoch"))
+    if old_epoch is None:
+        old_epoch = previous["updated"]
+    dt = max(0.0, epoch - old_epoch)
+    stability["motion_epoch"] = max(epoch, old_epoch)
+    scale = previous["scale"]
+    displacement = math.hypot(x - previous["cords"][0], y - previous["cords"][1]) / scale
+    allowed = GROUP_MAX_SPEED_MS * dt
+    if displacement <= max(GROUP_MOTION_SLACK_M, allowed):
+        stability.pop("motion_challenge", None)
+        return x, y, None
+    challenge = stability.get("motion_challenge")
+    if challenge is None or math.hypot(x - challenge["x"], y - challenge["y"]) / scale > max(
+            GROUP_MOTION_SLACK_M, GROUP_MAX_SPEED_MS * max(0, epoch - challenge["epoch"])):
+        challenge = {"x": x, "y": y, "first": epoch, "epoch": epoch,
+                     "count": int(epoch > old_epoch)}
+    elif epoch > challenge["epoch"]:
+        challenge = {**challenge, "x": x, "y": y, "epoch": epoch,
+                     "count": challenge["count"] + 1}
+    stability["motion_challenge"] = challenge
+    confirmed = challenge["count"] >= 3 and epoch - challenge["first"] >= GROUP_JUMP_CONFIRMATION_S
+    fraction = min(1.0, allowed / displacement) if confirmed else 0.0
+    nx = previous["cords"][0] + fraction * (x - previous["cords"][0])
+    ny = previous["cords"][1] + fraction * (y - previous["cords"][1])
+    return nx, ny, {"state": "limited" if fraction else "held",
+                   "displacement_m": displacement, "allowed_step_m": allowed,
+                   "confirmation_observations": challenge["count"],
+                   "confirmation_span_s": max(0.0, epoch - challenge["first"]),
+                   "max_speed_m_s": GROUP_MAX_SPEED_MS}
 
 
 def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
@@ -220,25 +288,28 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
         if fix is not None:
             fixes.append(fix)
     if not fixes:
+        if isinstance(stability, dict):
+            stability.clear()
         return None
     by_floor = {}
     for fix in fixes:
         by_floor.setdefault(fix["floor"], []).append(fix)
-    floor = max(by_floor, key=lambda f: sum(p["weight"] for p in by_floor[f]))
-    candidates = by_floor[floor]
+    directional = [p for p in fixes if not p["detection_only"]]
+    detection_only = not directional
+    floor_votes = {f: [p for p in ps if not p["detection_only"]] for f, ps in by_floor.items()} if directional else by_floor
+    floor = max(floor_votes, key=lambda f: sum(p["weight"] for p in floor_votes[f]))
+    candidates = floor_votes[floor]
     anchor = max(candidates, key=lambda p: p["weight"])
     pending = False
     if isinstance(stability, dict):
-        signature = (tuple(members), floor)
+        signature = (tuple(members), floor, anchor["scale"], detection_only)
         if stability.get("signature") != signature:
             stability.clear()
             previous = None
         stability["signature"] = signature
         incumbent = next((p for p in candidates if isinstance(previous, Mapping)
                           and p["ent"] == previous.get("anchor_beacon")), None)
-        if incumbent is not None and incumbent["ent"] != anchor["ent"] and _distance(anchor, incumbent) > max(
-                AGREEMENT_FLOOR_M, AGREEMENT_UNCERTAINTY_FACTOR * min(
-                    anchor["estimated_uncertainty_m"], incumbent["estimated_uncertainty_m"])):
+        if incumbent is not None and incumbent["ent"] != anchor["ent"] and _distance(anchor, incumbent) > _agreement_limit(anchor, incumbent):
             # Re-solving cached readings is not another observation, including
             # when the reading-age gate is off. A brief quality reversal must
             # not immediately hand the animal's icon to a distant BLE spike.
@@ -261,15 +332,29 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
         else:
             # Agreement, a stale/missing incumbent or a new floor needs no hold.
             stability.pop("challenge", None)
-    accepted = [p for p in candidates if _distance(anchor, p) <= max(
-        AGREEMENT_FLOOR_M, AGREEMENT_UNCERTAINTY_FACTOR * min(
-            anchor["estimated_uncertainty_m"], p["estimated_uncertainty_m"]))]
+    prior = _motion_previous(previous, floor, anchor["scale"], now, max_age_s) if isinstance(stability, dict) and not detection_only else None
+    rejected_motion = []
+    if prior is not None:
+        nearby = [p for p in candidates if _distance(prior, p) <= min(
+            MAX_AGREEMENT_DISTANCE_M, max(GROUP_MOTION_SLACK_M,
+                GROUP_MAX_SPEED_MS * max(0.0, p["observed"] - prior["updated"])))]
+        if nearby and anchor not in nearby:
+            # This also catches the incumbent beacon itself jumping: retaining
+            # its ID is not sufficient when its coordinates have just changed.
+            rejected_motion = [p["ent"] for p in candidates if p not in nearby]
+            anchor = min(nearby, key=lambda p: _distance(prior, p))
+            pending = True
+    accepted = [anchor] if detection_only else [p for p in candidates if _distance(anchor, p) <= _agreement_limit(anchor, p)]
     weight = sum(p["weight"] for p in accepted)
     if len(accepted) == 1:
         x, y = accepted[0]["cords"]
     else:
         x = sum(p["weight"] * p["cords"][0] for p in accepted) / weight
         y = sum(p["weight"] * p["cords"][1] for p in accepted) / weight
+    x, y, motion = _motion_point(x, y, accepted, prior, stability)
+    if motion is None and rejected_motion:
+        motion = {"state": "beacon_jump_rejected", "rejected_beacons": rejected_motion,
+                  "max_speed_m_s": GROUP_MAX_SPEED_MS}
     disagreement = max((_distance(a, b) for i, a in enumerate(candidates)
                         for b in candidates[i + 1:]), default=0.0)
     scatter = math.sqrt(sum(p["weight"] * (
@@ -298,13 +383,15 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
         fusion_confidence = "good" if uncertainty <= 5 else "moderate"
     confidence = "good" if uncertainty <= 5 else "moderate" if uncertainty <= 15 else "poor"
     environment_fallback = any(p["environment_fallback"] for p in accepted)
-    if conflict or floor_conflict or environment_fallback:
+    if conflict or floor_conflict or environment_fallback or motion or detection_only:
         confidence = "poor"
     diagnostics = [{k: v for k, v in p.items() if k not in ("weight", "scale", "receiver_ids")}
                    for p in fixes]
     accepted_ids = {p["ent"] for p in accepted}
     for entry in diagnostics:
         entry["used"] = entry["ent"] in accepted_ids
+        if entry["ent"] in rejected_motion:
+            entry["excluded_reason"] = "group_motion_outlier"
     # The same proxy often sees both beacons. Counts alone cannot identify
     # overlap; use a conservative maximum unless all sources provide names.
     if all(p["receiver_ids"] for p in accepted):
@@ -319,12 +406,16 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
             "beacon_disagreement_m": disagreement if not floor_conflict else None,
             "fusion_confidence": fusion_confidence, "beacon_positions": diagnostics,
             "anchor_beacon": anchor["ent"], "anchor_switch_pending": pending,
+            **({"motion_gate": motion} if motion else {}),
             "outdoor": {"estimated_uncertainty_m": uncertainty,
                         "uncertainty_method": "beacon_fusion_heuristic",
                         "beacons_used": len(accepted),
                         "combined_beacon_uncertainty_m": combined,
                         "beacon_scatter_m": scatter,
                         "confidence": confidence,
+                        **({"detection_only": True, "direction_known": False,
+                            "detection_receiver": anchor["detection_receiver"], "receiver": anchor["detection_receiver"],
+                            "detection_range_m": anchor["detection_range_m"]} if detection_only else {}),
                         **({"environment_fallback": True} if environment_fallback else {}),
                         "receivers_used": receivers_used,
                         "receiver_observations": sum(p["receivers_used"] for p in accepted)}}

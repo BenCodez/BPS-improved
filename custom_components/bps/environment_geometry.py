@@ -70,6 +70,59 @@ def compile_ring(coordinates):
     return edges, (min(xs), min(ys), max(xs), max(ys))
 
 
+def compile_line(coordinates):
+    """Validate a simple open fence, retaining only consecutive segments."""
+    if len(coordinates) < 2 or len(set(coordinates)) != len(coordinates):
+        return None
+    edges = tuple((a, b, i) for i, (a, b) in enumerate(zip(coordinates, coordinates[1:])))
+    for i, (a, b, _) in enumerate(edges):
+        for j in range(i + 1, len(edges)):
+            c, d, _ = edges[j]
+            if j == i + 1:
+                if _area(a, b, d) == 0 and (
+                        (b[0] - a[0]) * (d[0] - b[0])
+                        + (b[1] - a[1]) * (d[1] - b[1]) < 0):
+                    return None
+            elif _segments_meet(a, b, c, d):
+                return None
+    xs, ys = zip(*coordinates)
+    return edges, (min(xs), min(ys), max(xs), max(ys))
+
+
+def line_crossings(start, end, edges, bounds):
+    """Return distinct actual fence crossings; touches/collinear travel are neutral.
+
+    A polyline vertex is a crossing only if its two incident segments lie on
+    opposite sides of the measurement path. Fence and measurement endpoints
+    touching one another provide no evidence of passing through a barrier.
+    """
+    if start == end or not _boxes_overlap(start, end, bounds[:2], bounds[2:]):
+        return []
+    delta = (end[0] - start[0], end[1] - start[1])
+    axis = 0 if abs(delta[0]) >= abs(delta[1]) else 1
+    crossings = set()
+    touches = {}
+
+    def include(point):
+        t = (point[axis] - start[axis]) / delta[axis]
+        if 0 < t < 1:
+            crossings.add(point)
+
+    for a, b, _index in edges:
+        va, vb = _area(start, end, a), _area(start, end, b)
+        if va == 0 and vb != 0:
+            touches.setdefault(a, set()).add(1 if vb > 0 else -1)
+        elif vb == 0 and va != 0:
+            touches.setdefault(b, set()).add(1 if va > 0 else -1)
+        elif va * vb < 0 and _area(a, b, start) * _area(a, b, end) < 0:
+            fraction = float(va / (va - vb))
+            include((a[0] + fraction * (b[0] - a[0]), a[1] + fraction * (b[1] - a[1])))
+    for point, sides in touches.items():
+        if len(sides) == 2:
+            include(point)
+    return sorted(crossings)
+
+
 def point_relation(point, edges, bounds):
     """Return 1 inside, 0 on the boundary, -1 outside a simple ring."""
     x, y = point

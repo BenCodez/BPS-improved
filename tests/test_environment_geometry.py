@@ -20,7 +20,8 @@ from shapely.geometry import LineString, Point, Polygon
 from bps import environment
 
 
-def test_concurrent_cold_map_compilation_runs_once(monkeypatch):
+@pytest.mark.parametrize("kind", ["building", "fence"])
+def test_concurrent_cold_map_compilation_runs_once(monkeypatch, kind):
     attempts = 0
     calls = 0
     attempts_lock = threading.Lock()
@@ -41,7 +42,8 @@ def test_concurrent_cold_map_compilation_runs_once(monkeypatch):
         def __exit__(self, *_args):
             lock.release()
 
-    original = environment.compile_ring
+    compiler = "compile_line" if kind == "fence" else "compile_ring"
+    original = getattr(environment, compiler)
 
     def compile_once(coordinates):
         nonlocal calls
@@ -52,8 +54,8 @@ def test_concurrent_cold_map_compilation_runs_once(monkeypatch):
 
     environment._compile.cache_clear()
     monkeypatch.setattr(environment, "_COMPILE_LOCKS", (ObservedLock(),))
-    monkeypatch.setattr(environment, "compile_ring", compile_once)
-    floor = {"environment": [region()]}
+    monkeypatch.setattr(environment, compiler, compile_once)
+    floor = {"environment": [region(kind=kind)]}
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(environment.compile_environment, copy.deepcopy(floor)) for _ in range(8)]
         try:
@@ -66,6 +68,28 @@ def test_concurrent_cold_map_compilation_runs_once(monkeypatch):
     assert all(snapshot is snapshots[0] for snapshot in snapshots)
     assert calls == 1
     assert environment._compile.cache_info().currsize == 1
+
+
+def test_seeded_open_fence_crossings_match_independent_geos_line_intersections():
+    """Random nondegenerate paths compare with GEOS, including multi-segment fences."""
+    rng = random.Random(1791742)
+    records = []
+    for index in range(20):
+        points = [(i * 10, rng.uniform(-20, 20)) for i in range(8)]
+        record = region(points, kind="fence", material="metal", identifier=f"f-{index}")
+        records.append(record)
+    compiled = environment.compile_environment({"environment": records})
+    for _ in range(100):
+        start = (rng.uniform(-20, 90), rng.uniform(-30, 30))
+        end = (rng.uniform(-20, 90), rng.uniform(-30, 30))
+        path = LineString([start, end])
+        crossings = sum(len(_boundary_points(path.intersection(LineString(
+            [(p["x"], p["y"]) for p in record["points"]])))) for record in records)
+        actual = environment.path_reliability(compiled, start, end)
+        assert actual["fence_crossings"] == crossings
+        assert actual["environmental_weight"] == max(0.15, 0.5 ** crossings)
+        assert actual["receiver_inside_building"] is False
+        json.dumps(actual, allow_nan=False)
 
 
 WALL_WEIGHTS = {"unknown": 0.8, "light": 0.9, "wood": 0.9,
@@ -105,6 +129,7 @@ def shapely_reference(records, start, end):
     """
     output = {"environmental_weight": 1.0, "classification": "clear",
               "building_crossings": 0, "building_paths": 0,
+              "fence_crossings": 0, "fence_paths": 0,
               "vegetation_paths": 0, "custom_paths": 0,
               "receiver_inside_building": False, "reflection_risk": False,
               "intersections": []}

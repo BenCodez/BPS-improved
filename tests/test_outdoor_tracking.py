@@ -11,7 +11,7 @@ import pytest
 import bps
 from bps.environment import compile_environment
 from bps.outdoor_config import validate_outdoor_layout
-from bps.outdoor_tracking import solve_outdoor, account_for_published_position
+from bps.outdoor_tracking import solve_outdoor, account_for_published_position, receiver_accuracy
 from bps.storage import load_bps_data, save_bps_data, STORAGE_KEY_LAYOUT
 
 
@@ -149,6 +149,112 @@ def test_stale_readings_excluded_before_solve(hass):
     assert result == []
 
 
+@pytest.mark.parametrize("count", [1, 2])
+def test_sparse_live_tracking_marks_direction_unknown_and_never_records_position(hass, monkeypatch, count):
+    now = 1000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(True)
+    data["reading_max_age"] = 0
+    data["floor"][0]["receivers"] = data["floor"][0]["receivers"][:count]
+    published_states = {}
+    monkeypatch.setattr(bps, "update_bps_sensor_state", lambda hass, eid, value, *a, **kw:
+                        published_states.update({eid: value}))
+    states(hass, "5", age=2)
+    result, _ = solve(hass, data)
+    assert len(result) == 1
+    fix = result[0]
+    assert fix["cords"] in [[0, 0], [100, 0]]
+    assert fix["outdoor"]["detection_only"] is True
+    assert fix["outdoor"]["direction_known"] is False
+    assert fix["updated"] == 998 and fix["outdoor"]["stale_after_s"] == 30
+    assert fix["rms_m"] is None and fix["conf"] == 0
+    assert fix["zone"] == "unknown"
+    assert published_states["sensor.beacon_a_bps_nearest_zone"] == "unknown"
+    assert "beacon_a" not in bps._kf_position_state
+    assert bps.get_position_history(hass).pending_count() == 0
+    now += 30
+    response = run(bps.BPSCordsAPI(hass).get(None)).json_body[0]
+    assert response["outdoor"]["stale"] is True
+    assert response["updated"] == 998
+    # Re-solving old source data cannot rejuvenate it, even with age gating off.
+    result, _ = solve(hass, data)
+    assert result[0]["updated"] == 998
+
+
+def test_legacy_indoor_tracking_still_needs_three_receivers(hass):
+    data = layout(False)
+    data["floor"][0]["receivers"] = data["floor"][0]["receivers"][:2]
+    states(hass, "5")
+    result, _ = solve(hass, data)
+    assert result == []
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_background_loop_reaches_sparse_tracking_only_when_outdoor_enabled(hass, monkeypatch, count, enabled):
+    now = 1000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(enabled)
+    data["floor"][0]["receivers"] = data["floor"][0]["receivers"][:count]
+    run(save_bps_data(hass, data))
+    states(hass, "5", age=2)
+    ids = [f"sensor.beacon_a_distance_to_p{i}" for i in range(count)]
+    monkeypatch.setattr(bps, "_bermuda_distance_sensor_ids", lambda hass: ids)
+    for name in ("last_liveness", "last_selftest", "last_history_flush"):
+        monkeypatch.setattr(bps.update_tracked_entities, name, now, raising=False)
+    delays = []
+    async def stop_after_cycle(delay):
+        delays.append(delay)
+        raise asyncio.CancelledError
+    monkeypatch.setattr(bps.asyncio, "sleep", stop_after_cycle)
+    with pytest.raises(asyncio.CancelledError):
+        run(bps.update_tracked_entities(hass))
+    if enabled and count:
+        assert len(bps.apitricords) == 1
+        assert bps.apitricords[0]["outdoor"]["detection_only"] is True
+        assert bps.apitricords[0]["updated"] == 998
+        assert delays == [bps.secToUpdate]
+    else:
+        assert bps.apitricords == []
+        assert delays == [10]
+
+
+def test_outdoor_fix_can_be_outside_receiver_extent_and_zone_union(hass):
+    data = layout(True)
+    truth = (300.0, 200.0)
+    distances = {"sensor.beacon_a_distance_to_" + r["entity_id"]:
+        str(math.dist(truth, (r["cords"]["x"], r["cords"]["y"])) / 10)
+        for r in data["floor"][0]["receivers"]}
+    timestamp = datetime.datetime.fromtimestamp(bps.time.time(), datetime.timezone.utc)
+    hass.states = SimpleNamespace(get=lambda eid: SimpleNamespace(
+        state=distances[eid], attributes={"unit_of_measurement": "m"}, last_updated=timestamp))
+    result, _ = solve(hass, data)
+    assert result[0]["cords"] == pytest.approx(truth, abs=0.01)
+    assert result[0]["outdoor"].get("detection_only") is not True
+    assert result[0]["outdoor"]["display_radius_limit_m"] > 0
+
+
+def test_sparse_group_uses_source_expiry_without_false_history_or_zone(hass, monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(True)
+    data["reading_max_age"] = 0
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["beacon_a"]}]
+    data["floor"][0]["receivers"] = data["floor"][0]["receivers"][:1]
+    states(hass, "5", age=2)
+    run(save_bps_data(hass, data))
+    solve(hass, data)
+    run(bps.update_tracker_groups(hass))
+    group = bps.apitricords[-1]
+    assert group["group"] and group["outdoor"]["detection_only"]
+    assert group["outdoor"]["stale_after_s"] == 30
+    assert group["zone"] == group["nearest_zone"] == "unknown"
+    assert bps.get_position_history(hass).pending_count() == 0
+    now += 30
+    run(bps.update_tracker_groups(hass))
+    assert all(not row.get("group") for row in bps.apitricords)
+
+
 @pytest.mark.parametrize("timeout,expected", [(None, 300), (120, 120), (0, 300),
     (-1, 300), (float("inf"), 300)])
 def test_disabled_reading_gate_ordinary_fixes_age_by_last_solve(hass, monkeypatch, timeout, expected):
@@ -234,6 +340,366 @@ def test_no_environment_keeps_weak_jump_weight_and_single_solve():
     assert result["weighted"] == weighted
 
 
+@pytest.mark.parametrize("accuracy", [None, True, False, "2", {}, [], -1,
+                                      float("nan"), float("inf"), 1001, 10 ** 1000])
+def test_absent_or_malformed_receiver_accuracy_preserves_weights_and_fix(accuracy):
+    floor = layout(True)["floor"][0]
+    weighted = points(floor, liar=True)
+    baseline = solve_indoor(floor, weighted)
+    floor["receivers"][3]["distance_accuracy_m"] = accuracy
+    calls = []
+    def solver(pts, **kwargs):
+        calls.append(pts)
+        return bps.trilaterate(pts, **kwargs)
+    result = solve_indoor(floor, weighted, solver)
+    assert len(calls) == 1
+    assert result["fix"] == baseline["fix"]
+    assert result["weighted"] == baseline["weighted"]
+    diag = result["outdoor"]["receiver_diagnostics"][3]
+    assert diag["receiver_accuracy_m"] is None
+    assert diag["accuracy_weight"] == 1
+    assert diag["base_jump_weight"] == 1
+
+
+@pytest.mark.parametrize("slant,accuracy,expected", [(2, 0, 1), (2, 2, 0.5),
+    (4, 2, 0.8), (0.1, 0.5, 0.5), (0, 0.5, 0.5), (2, 1000, 0.05)])
+def test_accuracy_factor_matches_additive_range_error_variance(slant, accuracy, expected):
+    result = receiver_accuracy({"distance_accuracy_m": accuracy}, slant)
+    assert result["receiver_accuracy_m"] == accuracy
+    assert result["accuracy_weight"] == pytest.approx(expected)
+    json.dumps(result, allow_nan=False)
+
+
+def test_noisy_receiver_has_less_influence_than_accurate_receivers():
+    floor = layout(True)["floor"][0]
+    weighted = points(floor, liar=True)
+    baseline = solve_indoor(floor, weighted)
+    for receiver in floor["receivers"]:
+        receiver["distance_accuracy_m"] = 0
+    floor["receivers"][3]["distance_accuracy_m"] = 10
+    saved = copy.deepcopy(floor)
+    result = solve_indoor(floor, weighted)
+    assert floor == saved
+    assert math.dist(result["fix"], (50, 50)) < math.dist(baseline["fix"], (50, 50)) / 2
+    assert all(a[:3] == b[:3] and a[4] == b[4] for a, b in zip(result["weighted"], weighted))
+    diagnostic = result["outdoor"]["receiver_diagnostics"][3]
+    assert diagnostic["receiver_accuracy_m"] == 10
+    assert diagnostic["accuracy_weight"] == 0.05
+    assert diagnostic["reliability_weight"] == 0.05
+    assert abs(diagnostic["horizontal_residual_m"]) > 2, 'the conflicting range stays visible'
+    assert diagnostic["corrected_distance_m"] == floor["receivers"][3]["distance"]
+
+
+def test_accuracy_is_applied_once_in_both_solves_with_path_freshness_and_jump_trust():
+    floor = layout(True)["floor"][0]
+    weighted = points(floor)
+    weighted[0] = (*weighted[0][:3], 0.8, weighted[0][4])
+    floor["receivers"][0]["distance_accuracy_m"] = weighted[0][4] / 10
+    floor["receivers"][0]["_outdoor_reading"]["reading_age_s"] = 20
+    floor["environment"] = [{"id": "shop", "type": "building", "material": "metal", "points": [
+        {"x": x, "y": y} for x, y in [(10, 10), (40, 10), (40, 40), (10, 40)]]}]
+    calls = []
+    def solver(pts, **kwargs):
+        calls.append(copy.deepcopy(pts))
+        return (50, 50)
+    result = solve_indoor(floor, weighted, solver)
+    expected = 0.8 * 0.5 * 0.5 ** 2 * (1.5 - 20 / 30)
+    assert len(calls) == 2
+    assert calls[0][0][3] == 0.8 * 0.5
+    assert calls[1][0][3] == pytest.approx(expected)
+    assert result["weighted"][0][3] == pytest.approx(expected)
+    diagnostic = result["outdoor"]["receiver_diagnostics"][0]
+    assert diagnostic["base_jump_weight"] == 0.8
+    assert diagnostic["accuracy_weight"] == 0.5
+    assert diagnostic["environmental_weight"] == 0.25
+
+
+def test_accuracy_uses_measured_slant_not_height_projected_horizontal_range():
+    floor, weighted = indoor_case()
+    floor["receivers"][0]["distance_accuracy_m"] = 2
+    floor["receivers"][0]["height"] = 6
+    weighted[0] = (*weighted[0][:2], 5, 0.5, 20)
+    result = solve_indoor(floor, weighted)
+    diagnostic = result["outdoor"]["receiver_diagnostics"][0]
+    assert diagnostic["accuracy_weight"] == 0.5
+    assert diagnostic["base_jump_weight"] == 0.5
+    assert diagnostic["indoor_support_strength"] == 0.5
+
+
+@pytest.mark.parametrize("accuracy,expected_support", [(0.1, True), (3, False), (1000, False)])
+def test_noisy_close_reading_cannot_supply_authoritative_indoor_support(accuracy, expected_support):
+    floor, weighted = indoor_case()
+    floor["receivers"][0]["distance_accuracy_m"] = accuracy
+    result = solve_indoor(floor, weighted)
+    assert bool(result["outdoor"]["indoor_support_receivers"]) is expected_support
+    if not expected_support:
+        assert all(d["indoor_range_weight"] == 1 for d in result["outdoor"]["receiver_diagnostics"])
+
+
+def test_weak_jump_weights_are_not_inflated_by_accuracy_floor():
+    floor = layout(True)["floor"][0]
+    weighted = points(floor)
+    weighted[0] = (*weighted[0][:3], 0.001, weighted[0][4])
+    floor["receivers"][0]["distance_accuracy_m"] = 1000
+    result = solve_indoor(floor, weighted)
+    assert result["weighted"][0][3] == pytest.approx(0.001 * 0.05)
+
+
+@pytest.mark.parametrize("failure", ["geometry", "refinement"])
+def test_accuracy_weight_survives_geometry_fallback_and_refinement_failure(monkeypatch, failure):
+    import bps.outdoor_tracking as O
+    floor = layout(True)["floor"][0]
+    weighted = points(floor)
+    floor["receivers"][0]["distance_accuracy_m"] = weighted[0][4] / 10
+    floor["environment"] = [{"id": "shop", "type": "building", "material": "metal", "points": [
+        {"x": x, "y": y} for x, y in [(10, 10), (40, 10), (40, 40), (10, 40)]]}]
+    calls = []
+    def solver(pts, **kwargs):
+        calls.append(pts)
+        return (50, 50) if len(calls) == 1 else None
+    if failure == "geometry":
+        def fail(*args):
+            raise ArithmeticError("injected compilation failure")
+        monkeypatch.setattr(O, "compile_environment", fail)
+    result = solve_indoor(floor, weighted, solver)
+    assert result["weighted"][0][3] == 0.5
+    diagnostic = result["outdoor"]["receiver_diagnostics"][0]
+    assert diagnostic["accuracy_weight"] == 0.5
+    assert diagnostic["reliability_weight"] == 0.5
+    if failure == "geometry":
+        assert result["outdoor"]["environment_fallback"] is True
+    else:
+        assert diagnostic["status"] == "refinement_failed"
+
+
+def indoor_case(near_range=2.0, near_xy=(50, 50), near_weight=0.5):
+    """A short indoor range and three incompatible distant scanner ranges."""
+    floor = {"name": "Ground", "scale": 10, "receivers": [], "zones": [], "environment": [
+        {"id": "shop", "type": "building", "material": "metal", "points": [
+            {"x": x, "y": y} for x, y in [(0, 0), (100, 0), (100, 100), (0, 100)]]}]}
+    weighted = []
+    for i, (xy, distance) in enumerate(zip(
+            [near_xy, (400, 0), (400, 150), (300, 300)], [near_range, 7, 7, 7])):
+        x, y = xy
+        radius = distance * floor["scale"]
+        floor["receivers"].append({"entity_id": f"p{i}", "distance": distance,
+            "cords": {"x": x, "y": y, "r": radius}, "correction": 1.0,
+            "_outdoor_reading": {"measured_distance_m": distance, "reading_age_s": 0}})
+        weighted.append((x, y, radius, near_weight if i == 0 else 1.0, radius))
+    return floor, weighted
+
+
+def solve_indoor(floor, weighted, solver=bps.trilaterate, max_age=30):
+    return solve_outdoor(floor, weighted, (-100, -100, 500, 500), 10, 5,
+                         max_age, None, solver)
+
+
+@pytest.mark.parametrize("distance", [1.0, 2.0, 3.0])
+def test_fresh_close_indoor_receiver_softly_resists_far_inconsistent_ranges(distance):
+    floor, weighted = indoor_case(near_range=distance)
+    saved = copy.deepcopy(floor)
+    original = bps.trilaterate(weighted, bounds=(-100, -100, 500, 500), min_weight_radius=5)
+    calls = []
+    def solver(pts, **kwargs):
+        calls.append(pts)
+        return bps.trilaterate(pts, **kwargs)
+    result = solve_indoor(floor, weighted, solver)
+    info = result["outdoor"]
+    assert floor == saved
+    assert len(calls) == 2
+    assert info["indoor_support_building"] == "shop"
+    assert info["indoor_support_receivers"] == 1
+    assert info["indoor_support_strength"] == 1
+    assert info["indoor_support_applied"] is True
+    assert info["indoor_support_conflict"] is False
+    assert result["weighted"][0][3] == weighted[0][3], 'support preserves original jump trust'
+    assert all(a[:3] == b[:3] and a[4] == b[4] for a, b in zip(result["weighted"], weighted))
+    assert all(0.25 <= d["indoor_range_weight"] < 1 for d in info["receiver_diagnostics"][1:])
+    assert all(d["indoor_range_disagreement_m"] > 15 for d in info["receiver_diagnostics"][1:])
+    assert all(abs(d["horizontal_residual_m"]) > 15 for d in info["receiver_diagnostics"][1:])
+    assert math.dist(result["fix"], (50, 50)) <= math.dist(original, (50, 50))
+    if distance >= 2:
+        assert 0 < result["fix"][0] < 100 and 0 < result["fix"][1] < 100
+    assert result["fix"] != (50, 50), 'the beacon is never snapped onto its receiver'
+    json.dumps(result, allow_nan=False)
+
+
+def test_indoor_support_restores_only_own_building_and_preserves_path_evidence():
+    floor, weighted = indoor_case()
+    floor["environment"].extend([
+        {"id": "other", "type": "building", "material": "wood", "points": [
+            {"x": x, "y": y} for x, y in [(180, 0), (200, 0), (200, 100), (180, 100)]]},
+        {"id": "trees", "type": "dense_trees", "points": [
+            {"x": x, "y": y} for x, y in [(110, 0), (150, 0), (150, 100), (110, 100)]]},
+    ])
+    result = solve_indoor(floor, weighted, lambda *a, **kw: (350, 50))
+    diag = result["outdoor"]["receiver_diagnostics"][0]
+    assert diag["building_crossings"] == 3
+    assert diag["reflection_risk"] is True
+    assert diag["environmental_weight"] == pytest.approx(0.9 ** 2 * 0.75)
+    assert diag["reliability_weight"] == pytest.approx(0.5 * 0.9 ** 2 * 0.75)
+    assert diag["indoor_boundary_restoration"] > 0
+    assert diag["intersections"][0]["weight"] == 0.5, 'raw obstruction evidence is retained'
+    assert result["fix"] == (350, 50), 'mapped evidence cannot force a fix indoors'
+
+
+def test_indoor_restoration_preserves_fence_penalty_and_crossing_summary():
+    floor, weighted = indoor_case()
+    floor["environment"].append({"id": "fence", "type": "fence", "material": "metal",
+        "thickness": "thin", "points": [{"x": 150, "y": 0}, {"x": 150, "y": 100}]})
+    result = solve_indoor(floor, weighted, lambda *a, **kw: (180, 80))
+    diagnostic = result["outdoor"]["receiver_diagnostics"][0]
+    assert diagnostic["indoor_support_strength"] == 1
+    assert diagnostic["environmental_weight"] == 0.875
+    assert diagnostic["reliability_weight"] == 0.5 * 0.875
+    assert diagnostic["fence_crossings"] == 1
+    assert result["outdoor"]["fence_paths"] >= 1
+    assert result["outdoor"]["fence_crossings"] >= 1
+
+
+def test_fence_region_never_supplies_indoor_receiver_association():
+    floor, weighted = indoor_case()
+    floor["environment"][0].update(type="fence", thickness="solid")
+    result = solve_indoor(floor, weighted)
+    assert result["outdoor"]["indoor_support_receivers"] == 0
+    assert result["outdoor"]["receiver_diagnostics"][0]["indoor_building"] is None
+
+
+@pytest.mark.parametrize("xy,expected_strength", [((0, 50), 0), ((-1, 50), 0), ((1, 50), 0.04)])
+def test_boundary_receiver_is_not_strong_indoor_evidence(xy, expected_strength):
+    floor, weighted = indoor_case(near_xy=xy)
+    result = solve_indoor(floor, weighted, lambda *a, **kw: (180, 80))
+    diag = result["outdoor"]["receiver_diagnostics"][0]
+    assert diag["indoor_support_strength"] == pytest.approx(expected_strength)
+    if expected_strength == 0:
+        assert diag["indoor_building"] is None
+        assert all(d["indoor_range_weight"] == 1 for d in result["outdoor"]["receiver_diagnostics"])
+    else:
+        assert diag["indoor_boundary_restoration"] == pytest.approx(0.5 * expected_strength)
+
+
+@pytest.mark.parametrize("age,max_age", [(None, 30), (16, 30), (10, 10), (100, 0)])
+def test_stale_or_unknown_age_does_not_strengthen_indoor_association(age, max_age):
+    floor, weighted = indoor_case()
+    floor["receivers"][0]["_outdoor_reading"]["reading_age_s"] = age
+    result = solve_indoor(floor, weighted, max_age=max_age)
+    assert result["outdoor"]["indoor_support_receivers"] == 0
+    assert all(d.get("indoor_range_weight", 1) == 1 for d in result["outdoor"]["receiver_diagnostics"])
+
+
+@pytest.mark.parametrize("policy", ["normal", "deprioritize", "ignore"])
+def test_indoor_evidence_respects_manual_receiver_policy(policy):
+    floor, weighted = indoor_case()
+    floor["receivers"][0]["outdoor_policy"] = policy
+    result = solve_indoor(floor, weighted)
+    assert result["outdoor"]["indoor_support_receivers"] == 0
+
+
+@pytest.mark.parametrize("raw,slant,weight", [(9, 2, 1), (2, 9, 1), (2, 2, 0.01)])
+def test_height_projection_calibration_or_weak_jump_cannot_create_close_indoor_evidence(raw, slant, weight):
+    floor, weighted = indoor_case()
+    floor["receivers"][0]["height"] = 6  # Deliberately wrong units; never infer a vertical leg here.
+    floor["receivers"][0]["distance"] = slant
+    floor["receivers"][0]["_outdoor_reading"]["measured_distance_m"] = raw
+    weighted[0] = (*weighted[0][:2], 5, weight, slant * 10)
+    result = solve_indoor(floor, weighted)
+    assert result["outdoor"]["indoor_support_receivers"] == 0
+    assert all(d["indoor_range_weight"] == 1 for d in result["outdoor"]["receiver_diagnostics"])
+
+
+def test_other_floor_building_cannot_strengthen_this_floor(hass):
+    floor, _weighted = indoor_case()
+    upstairs = copy.deepcopy(floor)
+    upstairs["name"] = "Upstairs"
+    floor["environment"] = []
+    for rec in upstairs["receivers"]:
+        rec["entity_id"] = "upper_" + rec["entity_id"]
+    def state(eid):
+        receiver = next(rec for rec in floor["receivers"] if rec["entity_id"] in eid)
+        xy = receiver["cords"]["x"], receiver["cords"]["y"]
+        reading = 90 if "upper_" in eid else math.dist(xy, (70, 50)) / 10
+        return SimpleNamespace(state=str(reading), attributes={"unit_of_measurement": "m"},
+            last_updated=datetime.datetime.now(datetime.timezone.utc))
+    hass.states = SimpleNamespace(get=state)
+    result, _item = solve(hass, {"floor": [floor, upstairs], "outdoor_tracking": {"enabled": True}})
+    assert result[0]["floor"] == "Ground"
+    assert result[0]["outdoor"]["indoor_support_receivers"] == 0
+    assert all(d["indoor_building"] is None for d in result[0]["outdoor"]["receiver_diagnostics"])
+
+
+def test_conflicting_close_receivers_in_nearby_buildings_disable_indoor_support():
+    from bps.environment import measurement_reliability
+    floor, weighted = indoor_case()
+    floor["environment"][0]["points"] = [{"x": x, "y": y} for x, y in [(0, 0), (60, 0), (60, 100), (0, 100)]]
+    floor["environment"].append({"id": "next_door", "type": "building", "points": [
+        {"x": x, "y": y} for x, y in [(60, 0), (120, 0), (120, 100), (60, 100)]]})
+    floor["receivers"][1].update(distance=2, cords={"x": 70, "y": 50, "r": 20},
+                                _outdoor_reading={"measured_distance_m": 2, "reading_age_s": 0})
+    weighted[1] = (70, 50, 20, 1, 20)
+    fix = (180, 80)
+    result = solve_indoor(floor, weighted, lambda *a, **kw: fix)
+    quality = result["outdoor"]
+    assert quality["indoor_support_conflict"] is True
+    assert quality["confidence"] == "poor"
+    assert quality["indoor_support_receivers"] == 0
+    for index, diag in enumerate(quality["receiver_diagnostics"]):
+        ordinary = measurement_reliability(compile_environment(floor), weighted[index][:2], fix,
+            base_weight=weighted[index][3], age_s=0)
+        assert diag["reliability_weight"] == ordinary["reliability_weight"]
+        assert diag["indoor_range_weight"] == 1
+        assert diag["indoor_support_conflict"] is (index < 2)
+
+
+def test_incompatible_close_ranges_within_same_building_disable_support():
+    floor, weighted = indoor_case(near_range=1)
+    floor["receivers"][1].update(distance=1, cords={"x": 90, "y": 50, "r": 10},
+                                _outdoor_reading={"measured_distance_m": 1, "reading_age_s": 0})
+    weighted[1] = (90, 50, 10, 1, 10)
+    assert solve_indoor(floor, weighted)["outdoor"]["indoor_support_conflict"] is True
+
+
+def test_consistent_far_ranges_are_not_suppressed_by_indoor_support():
+    floor, weighted = indoor_case()
+    truth = (70, 50)
+    for index in range(1, len(weighted)):
+        pt = weighted[index]
+        radius = math.dist(pt[:2], truth)
+        weighted[index] = (*pt[:2], radius, pt[3], radius)
+        floor["receivers"][index]["distance"] = radius / 10
+        floor["receivers"][index]["_outdoor_reading"]["measured_distance_m"] = radius / 10
+    result = solve_indoor(floor, weighted)
+    assert all(d["indoor_range_weight"] == 1 for d in result["outdoor"]["receiver_diagnostics"])
+    assert result["fix"] == pytest.approx(truth, abs=1e-5)
+
+
+def test_indoor_refinement_failure_reports_original_weights():
+    floor, weighted = indoor_case()
+    calls = []
+    def solver(pts, **kwargs):
+        calls.append(pts)
+        return (180, 80) if len(calls) == 1 else None
+    result = solve_indoor(floor, weighted, solver)
+    assert result["fix"] == (180, 80)
+    assert result["weighted"] == weighted
+    assert result["outdoor"]["indoor_support_applied"] is False
+    assert all(d["reliability_weight"] == pt[3] and d["status"] == "refinement_failed"
+               for pt, d in zip(weighted, result["outdoor"]["receiver_diagnostics"]))
+
+
+def test_indoor_association_geometry_failure_is_neutral_and_poor(monkeypatch):
+    import bps.outdoor_tracking as O
+    floor, weighted = indoor_case()
+    def fail(*args):
+        raise ArithmeticError("injected clearance failure")
+    monkeypatch.setattr(O, "_boundary_clearance", fail)
+    result = solve_indoor(floor, weighted)
+    assert result["weighted"] == weighted
+    assert result["outdoor"]["confidence"] == "poor"
+    assert result["outdoor"]["environment_fallback"] is True
+    assert result["outdoor"]["indoor_support_receivers"] == 0
+    json.dumps(result, allow_nan=False)
+
+
 @pytest.mark.parametrize("failure", ["compilation", "path"])
 def test_geometry_failure_keeps_range_fix_policies_and_measurements(hass, monkeypatch, failure):
     from bps import environment as E, outdoor_tracking as O
@@ -307,6 +773,42 @@ def test_malformed_optional_fields_rejected_before_store_write(hass, tmp_path):
     assert response.status == 400
     assert hass._store_backing[STORAGE_KEY_LAYOUT] == old
     assert len(hass._store_saves) == 1
+
+
+@pytest.mark.parametrize("edit", [
+    lambda d: d.update(tracker_hardware={"beacon_a": {"notes": "x" * 257}}),
+    lambda d: d.update(tracker_hardware={"beacon_a": {"rssi_offset": -9}}),
+    lambda d: d["floor"][0]["receivers"][0].update(height_unit="yards"),
+    lambda d: d["floor"][0]["receivers"][0].update(distance_accuracy_m=True),
+    lambda d: d["floor"][0]["receivers"][0].update(distance_accuracy_m=float("nan")),
+    lambda d: d["floor"][0].update(environment=[{"id": "f", "name": "Fence",
+        "type": "fence", "material": "metal", "thickness": "wide",
+        "points": [{"x": 0, "y": 0}, {"x": 100, "y": 100}]}]),
+])
+def test_new_optional_fields_reject_atomically(hass, tmp_path, edit):
+    old = layout()
+    run(save_bps_data(hass, old))
+    bad = copy.deepcopy(old)
+    edit(bad)
+    response = run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, bad))
+    assert response.status == 400
+    assert hass._store_backing[STORAGE_KEY_LAYOUT] == old
+    assert len(hass._store_saves) == 1
+
+
+def test_two_point_fence_and_hardware_profiles_save_without_unit_migration(hass, tmp_path):
+    data = layout(True)
+    data["floor"][0]["environment"] = [{"id": "f", "name": "Fence",
+        "type": "fence", "material": "metal", "thickness": "thin",
+        "points": [{"x": 0, "y": 0}, {"x": 100, "y": 100}]}]
+    data["floor"][0]["receivers"][0].update(height=1.524, height_unit="ft",
+        distance_accuracy_m=2, hardware_model="Example scanner", antenna_notes="External omni")
+    data["floor"][0]["receivers"][1]["height"] = 5
+    data["tracker_hardware"] = {"beacon_a": {"hardware_model": "Example tag", "notes": "Collar"}}
+    response = run(bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, data))
+    assert response is None  # The write helper returns only an error response.
+    hass.data["bps"].pop("layout")
+    assert run(load_bps_data(hass)) == data
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), True, -1, "3"])

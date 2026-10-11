@@ -51,6 +51,36 @@ test('card polling holds short radius spikes while retaining raw diagnostics and
     }
 });
 
+test('card polling caps displayed uncertainty and exposes cap diagnostics without changing raw payload', async () => {
+    const c = card(), cv = canvas(); c._canvas = cv.value;
+    c._outdoorSettings = {enabled: true, show_uncertainty: true}; c._config.show_outdoor_diagnostics = true;
+    c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+    c._baseImage = {}; c._updateFloorStatus = () => {};
+    let status; c._setStatus = text => {status = text;};
+    c._redraw = () => {cv.calls.length = 0; c._drawMarkers();};
+    const row = {ent: 'beacon_a', floor: 'Property', cords: [200, 100], updated: Date.now() / 1000,
+        outdoor: {estimated_uncertainty_m: 120, display_radius_limit_m: 8}};
+    c._apiFetch = async () => ({ok: true, json: async () => [row]});
+    await c._pollOnce();
+    assert.deepEqual(cv.calls.filter(a => Array.isArray(a) && a[2] > 24).map(a => a[2]), [160]);
+    assert.equal(c._positions.get('beacon_a').payload.outdoor.estimated_uncertainty_m, 120);
+    assert.match(status, /capped for display.*displayed 8.0 m/);
+});
+
+test('card keeps outside-map icons visible without moving uncertainty and labels detection-only markers', () => {
+    const c = card(), cv = canvas(); c._canvas = cv.value; c._outdoorSettings.enabled = true;
+    c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+    const raw = {x: 2200, y: 500, label: 'Beacon A', outdoor: {estimated_uncertainty_m: 8}};
+    c._positions.set('beacon_a', raw); c._drawMarkers();
+    const arcs = cv.calls.filter(Array.isArray);
+    assert.deepEqual(arcs.map(a => a.slice(0, 3)), [[2200, 500, 160], [1974, 500, 24], [1974, 500, 20]]);
+    assert.ok(cv.calls.some(c => typeof c === 'string' && /Off map.*inferred/.test(c)));
+    assert.equal(raw.x, 2200);
+    raw.x = 300; raw.outdoor.detection_only = true; raw.outdoor.direction_known = false;
+    c._config.show_labels = false; cv.calls.length = 0; c._drawMarkers();
+    assert.ok(cv.calls.some(c => typeof c === 'string' && /Detected only.*direction unknown/.test(c)));
+});
+
 test('card loads floor scale/settings from authenticated existing layout endpoint', async () => {
     const c = card();
     let url;

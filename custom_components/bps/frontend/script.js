@@ -323,7 +323,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // A modal with one numeric input. Resolves to the entered number, to null
     // when the value is cleared (empty Save), or to undefined on cancel/Esc.
-    // Used for the receiver mount height.
+    // Receiver properties optionally add descriptive hardware fields.
     function bpsPromptNumber(message, opts = {}) {
         const { initial = "", placeholder = "", min = 0, max = 10, confirmText = "Save" } = opts;
         return new Promise(resolve => {
@@ -342,6 +342,60 @@ document.addEventListener('DOMContentLoaded', async () => {
             input.max = String(max);
             input.placeholder = placeholder;
             if (initial !== "" && Number.isFinite(initial)) input.value = String(initial);
+            let heightUnit = opts.receiverMetadata?.height_unit === 'ft' ? 'ft' : 'm';
+            const unitSelect = opts.receiverMetadata ? document.createElement('select') : null;
+            const metresPerUnit = unit => unit === 'ft' ? .3048 : 1;
+            const accuracyInput = opts.receiverMetadata ? document.createElement('input') : null;
+            const accuracyLabel = accuracyInput ? document.createElement('label') : null;
+            if (accuracyInput) {
+                accuracyInput.type = 'number'; accuracyInput.className = 'bps-modal-input'; accuracyInput.step = 'any';
+                accuracyInput.title = 'Expected distance error measured against a known-position test, in the selected units.';
+                accuracyLabel.textContent = 'Expected distance error (optional)'; accuracyLabel.appendChild(accuracyInput);
+                const initialAccuracy = opts.receiverMetadata.distance_accuracy_m;
+                if (Number.isFinite(initialAccuracy)) accuracyInput.value = String(Number((initialAccuracy / metresPerUnit(heightUnit)).toFixed(10)));
+            }
+            if (unitSelect) {
+                unitSelect.className = 'bps-modal-input'; unitSelect.title = 'Mount height unit';
+                for (const [value, label] of [['m', 'Metres'], ['ft', 'Feet']]) {
+                    const option = document.createElement('option'); option.value = value; option.textContent = label;
+                    unitSelect.appendChild(option);
+                }
+                unitSelect.value = heightUnit;
+                input.step = 'any';
+                if (initial !== '' && Number.isFinite(initial)) input.value = String(Number((initial / metresPerUnit(heightUnit)).toFixed(10)));
+                const refreshHeightUnit = () => {
+                    input.min = String(min / metresPerUnit(heightUnit)); input.max = String(max / metresPerUnit(heightUnit));
+                    input.placeholder = `Mount height ${heightUnit} (optional)`;
+                    accuracyInput.min = '0'; accuracyInput.max = String(1000 / metresPerUnit(heightUnit));
+                    accuracyInput.placeholder = `Expected distance error ${heightUnit} (optional)`;
+                };
+                refreshHeightUnit();
+                unitSelect.addEventListener('change', () => {
+                    const next = unitSelect.value;
+                    const fields = [input, accuracyInput];
+                    if (!['m', 'ft'].includes(next) || fields.some(field => field.validity.badInput
+                        || field.value.trim() !== '' && !Number.isFinite(Number(field.value)))) {
+                        unitSelect.value = heightUnit; bpsToast('Enter valid height and distance error values before changing units.'); return;
+                    }
+                    for (const field of fields) if (field.value.trim() !== '') field.value = String(Number((Number(field.value) * metresPerUnit(heightUnit) / metresPerUnit(next)).toFixed(10)));
+                    heightUnit = next; refreshHeightUnit();
+                });
+            }
+            const metadataInputs = [];
+            if (opts.receiverMetadata) {
+                for (const [key, label, maxLength] of [
+                    ['hardware_model', 'Hardware / model (optional)', 128],
+                    ['antenna_notes', 'Antenna notes (optional)', 256],
+                ]) {
+                    const field = document.createElement('input');
+                    field.type = 'text'; field.className = 'bps-modal-input';
+                    field.maxLength = maxLength; field.placeholder = label;
+                    field.value = typeof opts.receiverMetadata[key] === 'string' ? opts.receiverMetadata[key] : '';
+                    const wrapper = document.createElement('label');
+                    wrapper.textContent = label; wrapper.appendChild(field);
+                    metadataInputs.push({key, maxLength, field, wrapper});
+                }
+            }
             const row = document.createElement("div");
             row.className = "bps-modal-actions";
             const cancelBtn = document.createElement("button");
@@ -356,6 +410,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             row.appendChild(okBtn);
             dialog.appendChild(msg);
             dialog.appendChild(input);
+            if (unitSelect) dialog.appendChild(unitSelect);
+            metadataInputs.forEach(({wrapper}) => dialog.appendChild(wrapper));
+            if (accuracyLabel) dialog.appendChild(accuracyLabel);
             dialog.appendChild(row);
             overlay.appendChild(dialog);
             document.body.appendChild(overlay);
@@ -364,6 +421,24 @@ document.addEventListener('DOMContentLoaded', async () => {
                 overlay.remove();
                 document.removeEventListener("keydown", onKey);
                 resolve(val);
+            };
+            const finish = height => {
+                if (!opts.receiverMetadata) {close(height); return;}
+                const accuracyRaw = accuracyInput.value.trim();
+                const accuracy = accuracyRaw === '' ? null : Number(accuracyRaw) * metresPerUnit(heightUnit);
+                if (accuracyInput.validity.badInput || accuracy !== null && (!Number.isFinite(accuracy) || accuracy < 0 || accuracy > 1000)) {
+                    bpsToast('Expected distance error must be between 0 and 1000 metres.'); accuracyInput.focus(); return;
+                }
+                const properties = {height, height_unit: height === null && accuracy === null ? null : heightUnit,
+                    distance_accuracy_m: accuracy === null ? null : Number(accuracy.toFixed(10))};
+                for (const {key, maxLength, field} of metadataInputs) {
+                    const value = field.value.trim();
+                    if (value.length > maxLength) {
+                        bpsToast(`Enter at most ${maxLength} characters.`); field.focus(); return;
+                    }
+                    properties[key] = value || null;
+                }
+                close(properties);
             };
             const commit = () => {
                 // Unparsable content in a number input reads back as "" but
@@ -375,14 +450,15 @@ document.addEventListener('DOMContentLoaded', async () => {
                     return;                                 // keep the modal open
                 }
                 const raw = input.value.trim();
-                if (raw === "") { close(null); return; }   // cleared = unset
-                const v = parseFloat(raw);
+                if (raw === "") { finish(null); return; }   // cleared = unset
+                const converted = Number(raw) * (unitSelect ? metresPerUnit(heightUnit) : 1);
+                const v = Number.isFinite(converted) ? Number(converted.toFixed(10)) : converted;
                 if (!Number.isFinite(v) || v < min || v > max) {
-                    bpsToast(`Enter a number between ${min} and ${max}.`);
+                    bpsToast(`Enter a mount height between ${min} and ${max} metres (${min / metresPerUnit(heightUnit)}–${Number((max / metresPerUnit(heightUnit)).toFixed(2))} ${heightUnit}).`);
                     input.focus();
                     return;                                 // keep the modal open
                 }
-                close(v);
+                finish(v);
             };
             cancelBtn.addEventListener("click", () => close(undefined));
             okBtn.addEventListener("click", commit);
@@ -402,6 +478,45 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             document.addEventListener("keydown", onKey);
             input.focus();
+        });
+    }
+
+    function bpsPromptBeaconHardware(ent, profile = {}) {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div'); overlay.className = 'bps-modal-overlay';
+            const dialog = document.createElement('div'); dialog.className = 'bps-modal';
+            const message = document.createElement('div'); message.className = 'bps-modal-msg';
+            message.textContent = `Hardware and notes for beacon "${ent}". Save Floor Plan to keep these details.`;
+            dialog.appendChild(message);
+            const fields = [];
+            for (const [key, label, limit] of [['hardware_model', 'Beacon hardware / model (optional)', 128], ['notes', 'Beacon notes (optional)', 256]]) {
+                const input = document.createElement('input'); input.type = 'text'; input.className = 'bps-modal-input'; input.maxLength = limit;
+                input.value = typeof profile?.[key] === 'string' ? profile[key] : '';
+                const wrapper = document.createElement('label'); wrapper.textContent = label; wrapper.appendChild(input); dialog.appendChild(wrapper);
+                fields.push({key, limit, input});
+            }
+            const actions = document.createElement('div'); actions.className = 'bps-modal-actions';
+            const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'bps-btn bps-btn-outline'; cancel.textContent = 'Cancel';
+            const save = document.createElement('button'); save.type = 'button'; save.className = 'bps-btn bps-btn-primary'; save.textContent = 'Save';
+            actions.appendChild(cancel); actions.appendChild(save); dialog.appendChild(actions); overlay.appendChild(dialog); document.body.appendChild(overlay);
+            const close = value => {overlay.remove(); document.removeEventListener('keydown', onKey); resolve(value);};
+            const commit = () => {
+                const value = {};
+                for (const {key, limit, input} of fields) {
+                    const raw = input.value.trim();
+                    if (raw.length > limit) {bpsToast(`Enter at most ${limit} characters.`); input.focus(); return;}
+                    if (raw) value[key] = raw;
+                }
+                close(value);
+            };
+            cancel.addEventListener('click', () => close(undefined)); save.addEventListener('click', commit);
+            const openedAt = Date.now();
+            overlay.addEventListener('click', event => {if (event.target === overlay && Date.now() - openedAt > 300) close(undefined);});
+            function onKey(event) {
+                if (event.key === 'Escape') close(undefined);
+                else if (event.key === 'Enter') {if (document.activeElement === cancel) close(undefined); else commit();}
+            }
+            document.addEventListener('keydown', onKey); fields[0].input.focus();
         });
     }
 
@@ -699,7 +814,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const sameFloor = !result.floor || sameFloorName(result.floor, SelMapName);
                     lastTracks.set(entKey, {
                         x, y,
-                        circles: sameFloor ? result.radii : null,
+                        circles: sameFloor ? outdoor.distanceRadii(result, apiresponse, sameFloorName) : null,
                         offFloor: !sameFloor,
                         floor: result.floor,
                         ...outdoor.stabilizeUncertainty(result, lastTracks.get(entKey)),
@@ -832,10 +947,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             const src = trackerIconFor(entKey);
             const raw = getCachedImage(src);
             const fade = t.offFloor ? 0.35 : 1; // off-floor fix isn't real here
+            const marker = outdoor.markerPlacement(t, canvas.width, canvas.height, iconSize / 2 + 6);
+            if (marker.offMap) {
+                ctx.save(); ctx.globalAlpha = .6; ctx.strokeStyle = deviceColor(entKey);
+                ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.arc(marker.x, marker.y, iconSize / 2 + 4, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+            }
             if (raw) {
                 ctx.save();
                 ctx.globalAlpha = fade;
-                ctx.drawImage(raw, t.x - iconSize / 2, t.y - iconSize / 2, iconSize, iconSize);
+                ctx.drawImage(raw, marker.x - iconSize / 2, marker.y - iconSize / 2, iconSize, iconSize);
                 ctx.restore();
                 // A light wash of the device's colour over the glyph (10%) tints
                 // it for identification while leaving the icon itself readable.
@@ -843,15 +963,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (tinted) {
                     ctx.save();
                     ctx.globalAlpha = fade * 0.1;
-                    ctx.drawImage(tinted, t.x - iconSize / 2, t.y - iconSize / 2, iconSize, iconSize);
+                    ctx.drawImage(tinted, marker.x - iconSize / 2, marker.y - iconSize / 2, iconSize, iconSize);
                     ctx.restore();
                 }
             }
             // Name pill so each marker is identifiable on the map (colour matches
             // the legend); off-floor devices also get the red "on <floor>" pill.
-            drawLabelPill(t.group ? (t.name || entKey) : entKey, t.x, t.y + iconSize / 2 + 16, baseHue);
+            const status = outdoor.markerStatus(t.outdoor, marker.offMap);
+            drawLabelPill((t.group ? (t.name || entKey) : entKey) + (status ? ' · ' + status : ''), marker.x, marker.y + iconSize / 2 + 16, baseHue);
             if (t.offFloor && t.floor) {
-                drawLabelPill(`on ${t.floor}`, t.x, t.y + iconSize / 2 + 44, 0);
+                drawLabelPill(`on ${t.floor}`, marker.x, marker.y + iconSize / 2 + 44, 0);
             }
         });
     }
@@ -2850,6 +2971,25 @@ document.addEventListener('DOMContentLoaded', async () => {
             entSelector.value = "";
         });
 
+        document.getElementById('trackerHardwareProfile')?.addEventListener('click', async () => {
+            const ent = activeDevice;
+            if (!ent) {bpsToast('Add an individual beacon to track, then edit its hardware profile.'); return;}
+            const group = outdoor.settings(finalcords).enabled && outdoor.groups(finalcords).find(g => g.enabled && `bps_group_${g.id}` === ent);
+            if (group) {bpsToast(`Select an individual beacon to edit its hardware: ${group.beacons.join(', ')}.`); return;}
+            if (!/^[a-z0-9_]{1,64}$/.test(ent)) {bpsToast('This beacon ID cannot store a hardware profile.'); return;}
+            const store = finalcords.tracker_hardware;
+            const value = await bpsPromptBeaconHardware(ent, store && typeof store === 'object' ? store[ent] : undefined);
+            if (value === undefined) return;
+            if (Object.keys(value).length) {
+                if (!finalcords.tracker_hardware || typeof finalcords.tracker_hardware !== 'object' || Array.isArray(finalcords.tracker_hardware)) finalcords.tracker_hardware = {};
+                Object.defineProperty(finalcords.tracker_hardware, ent, {value, writable: true, configurable: true, enumerable: true});
+            } else if (finalcords.tracker_hardware && typeof finalcords.tracker_hardware === 'object') {
+                delete finalcords.tracker_hardware[ent];
+                if (!Object.keys(finalcords.tracker_hardware).length) delete finalcords.tracker_hardware;
+            }
+            savebuttondiv.appendChild(saveButton); bpsToast(`Hardware details for "${ent}" updated — Save Floor Plan to keep them.`);
+        });
+
         if (trackerIconSelector) {
             trackerIconSelector.addEventListener("change", () => {
                 if (!activeDevice) {
@@ -3082,19 +3222,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             const rec = floor && (floor.receivers || []).find(r => r && r.entity_id === recId);
             if (!rec) return;
             bpsPromptNumber(
-                `Mount height of "${recId}" above this floor, in metres (empty = unknown). `
+                `Receiver properties for "${recId}". Mount height above this floor (empty = unknown); select metres or feet. Heights are saved in metres. `
                 + `Used to remove the vertical leg from its distances and to judge calibration `
                 + `against the true 3D distance — recalibrate after changing it.`,
-                { initial: Number.isFinite(rec.height) ? rec.height : "", placeholder: "e.g. 2.2" }
+                { initial: Number.isFinite(rec.height) ? rec.height : "", placeholder: "Mount height m (optional)", receiverMetadata: rec }
             ).then(val => {
                 if (val === undefined) return;                       // cancelled
-                if (val === null) delete rec.height; else rec.height = val;
+                const heightChanged = rec.height !== (val.height === null ? undefined : val.height);
+                for (const key of ['height', 'height_unit', 'hardware_model', 'antenna_notes', 'distance_accuracy_m']) {
+                    if (val[key] === null) delete rec[key]; else rec[key] = val[key];
+                }
                 savebuttondiv.appendChild(saveButton);               // reveal Save Floor Plan
                 clearCanvas();
                 drawElements();                                      // re-renders the sidebar badge
-                bpsToast(val === null
-                    ? `Height of "${recId}" cleared — Save Floor Plan to keep it, then recalibrate.`
-                    : `Height of "${recId}" set to ${val} m — Save Floor Plan to keep it, then recalibrate.`);
+                bpsToast(`Properties of "${recId}" updated — Save Floor Plan to keep them.${heightChanged ? ' Recalibrate after changing mount height.' : ''}`);
             });
             return;
         }
@@ -3507,8 +3648,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!mapname.value) { bpsToast("Please enter a floor name!"); return false; }
         SelMapName = mapname.value;
         const isSub = !!(editTarget && editTarget.kind === 'subzone');
-        if (zonePoints.length < 3) {
-            bpsToast((isSub ? "A sub-zone" : "A zone") + " needs at least three corners.");
+        const isFence = editingFence();
+        if (zonePoints.length < (isFence ? 2 : 3)) {
+            bpsToast(isFence ? 'A fence needs at least two points.' : (isSub ? "A sub-zone" : "A zone") + " needs at least three corners.");
             return false;
         }
         const nameEl = document.getElementById('zoneName');
@@ -3525,6 +3667,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     name, type: document.getElementById('environmentType').value,
                     material: document.getElementById('environmentMaterial').value,
                     points: cords,
+                    ...(isFence ? {thickness: document.getElementById('environmentThickness').value || 'solid'} : {}),
                     ...(document.getElementById('environmentType').value === 'building'
                         && environmentWallMaterials.some(m => m !== null)
                         ? {wall_materials: [...environmentWallMaterials]} : {}),
@@ -3777,13 +3920,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
         }
-        if (zonePoints.length >= 3 && pointInPolygon(pos.x, pos.y, zonePoints)) {
+        const onFence = editingFence() && zonePoints.slice(1).some((point, i) => {
+            const closest = projectPointToSegment(pos, zonePoints[i], point);
+            return Math.hypot(pos.x - closest.x, pos.y - closest.y) <= 10 / (view.zoom || 1);
+        });
+        if (onFence || !editingFence() && zonePoints.length >= 3 && pointInPolygon(pos.x, pos.y, zonePoints)) {
             draggingZone = true;
             dragLast = pos;
             return;
         }
-        if (zonePoints.length >= MAX_ZONE_POINTS) {
-            bpsToast(`A zone or sub-zone can have at most ${MAX_ZONE_POINTS} corners.`);
+        const maxPoints = editTarget?.kind === 'environment' ? 256 : MAX_ZONE_POINTS;
+        if (zonePoints.length >= maxPoints) {
+            bpsToast(`This shape can have at most ${maxPoints} points.`);
             return;
         }
         if (editTarget?.kind === 'environment') {
@@ -3944,7 +4092,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         const shapeColor = editTarget && editTarget.kind === 'environment' ? '#8d6e63'
             : (editTarget && editTarget.kind === 'subzone') ? (editTarget.color || "#3f51b5") : "red";
-        if (zonePoints.length >= 3) {
+        if (!editingFence() && zonePoints.length >= 3) {
             ctx.closePath();
             ctx.save();
             ctx.globalAlpha = 0.12; // shows where the shape can be dragged
@@ -3952,9 +4100,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             ctx.fill();
             ctx.restore();
         }
-        ctx.strokeStyle = shapeColor;
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = editingFence() ? outdoor.fenceStyle({material: document.getElementById('environmentMaterial').value}).color : shapeColor;
+        ctx.lineWidth = editingFence() ? (document.getElementById('environmentThickness').value === 'thin' ? 2 : 5) / (view.zoom || 1) : 2;
+        if (editingFence()) ctx.setLineDash(document.getElementById('environmentThickness').value === 'thin' ? [5 / (view.zoom || 1), 3 / (view.zoom || 1)] : []);
         ctx.stroke();
+        if (editingFence()) ctx.setLineDash([]);
 
         if (editTarget?.kind === 'environment' && document.getElementById('environmentType').value === 'building') {
             ctx.save(); ctx.font = `${12 / view.zoom}px sans-serif`; ctx.fillStyle = '#111';
@@ -4404,7 +4554,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         let best = null, bestDist = Infinity;
         lastTracks.forEach((t, entKey) => {
             if (focusedDevice && entKey !== focusedDevice) return;
-            const d = Math.hypot(t.x - pos.x, t.y - pos.y);
+            const marker = outdoor.markerPlacement(t, canvas.width, canvas.height, mapIconSize() / 2 + 6);
+            const d = Math.hypot(marker.x - pos.x, marker.y - pos.y);
             if (d <= hitRadius && d < bestDist) { bestDist = d; best = entKey; }
         });
         return best;
@@ -5313,7 +5464,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 + `<span title="${escHtml(r.entity_id)}"${off ? ' style="color:#d32f2f"' : ''}>${escHtml(label)}</span>`
                 + `<span class="bps-zone-actions">`
                 + hBadge
-                + `<button class="bps-icon-btn" title="Set mount height (m)" data-type="recheight" data-id="${escHtml(r.entity_id)}">${rulerSvg}</button>`
+                + `<button class="bps-icon-btn" title="Receiver properties: mount height, hardware and antenna" data-type="recheight" data-id="${escHtml(r.entity_id)}">${rulerSvg}</button>`
                 + `<button class="bps-icon-btn" title="Remove receiver" data-type="removerec" data-id="${escHtml(r.entity_id)}">${trashSvg}</button>`
                 + `</span></li>`;
         };
@@ -6047,7 +6198,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     function renderOutdoorDiagnostics(row) {
         const el = document.getElementById('outdoorDiagnosticText');
         el.hidden = !outdoor.settings(finalcords).enabled || !document.getElementById('outdoorDiagnostics').checked;
-        el.textContent = el.hidden ? '' : outdoor.diagnosticsText(row) || 'Start tracking and select a device to see diagnostics.';
+        const track = row && lastTracks.get(row.ent);
+        const displayRow = track && track.payload === row ? {...row, outdoor: track.outdoor} : row;
+        el.textContent = el.hidden ? '' : outdoor.diagnosticsText(displayRow) || 'Start tracking and select a device to see diagnostics.';
     }
     function drawGroupBeaconPositions(position, color, trackerKey, iconSize) {
         const group = outdoor.groups(finalcords).find(g => `bps_group_${g.id}` === trackerKey);
@@ -6103,12 +6256,27 @@ document.addEventListener('DOMContentLoaded', async () => {
             node.append(label, select);
         });
     }
+    function editingFence() {
+        return editTarget?.kind === 'environment' && document.getElementById('environmentType').value === 'fence';
+    }
+    function syncEnvironmentControls() {
+        document.getElementById('environmentFenceControls').hidden = document.getElementById('environmentType').value !== 'fence';
+    }
     document.getElementById('environmentType').addEventListener('change', () => {
+        syncEnvironmentControls();
         if (editTarget?.kind === 'environment') drawZonePreview();
     });
+    for (const id of ['environmentMaterial', 'environmentThickness']) {
+        document.getElementById(id).addEventListener('change', () => {
+            if (editTarget?.kind === 'environment') drawZonePreview();
+        });
+    }
     function beginEnvironmentEdit(polygon = null) {
         if (!outdoor.settings(finalcords).enabled || !currentFloor() || !checkCanvasImage()) {
             bpsToast('Enable Outdoor Tracking and select a saved floor first.'); return;
+        }
+        if (polygon && !outdoor.validEnvironmentPoints(polygon)) {
+            bpsToast('This environment shape has invalid points. Delete it or draw a replacement.'); return;
         }
         removeListeners(); buttonreset();
         zonePoints = polygon ? polygon.points.map(p => ({x: p.x, y: p.y})) : [];
@@ -6120,10 +6288,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.getElementById('environmentType').value = polygon.type;
             document.getElementById('environmentMaterial').value = polygon.material || 'unknown';
         }
+        document.getElementById('environmentThickness').value = polygon?.thickness || 'solid';
+        syncEnvironmentControls();
         attachZoneHandlers(); drawAreaButton.dataset.active = 'true';
         drawZonePreview();
         document.getElementById('zoneName').value = polygon ? polygon.name : '';
-        messdiv.textContent = 'Draw corners, drag a corner or the whole shape, right-click to delete a corner. Choose type/material in Outdoor settings, name the polygon, then press ✓ Save. Save Floor Plan to persist.';
+        messdiv.textContent = 'Click to draw points, drag a point or the whole shape (a fence segment), right-click to delete a point. Choose type/material and fence thickness in Outdoor settings. Areas need three corners; fences need two points and stay open. Name it, then press ✓ Save. Save Floor Plan to persist.';
     }
     function enableOutdoorFromTool() {
         if (!outdoor.settings(finalcords).enabled) {
@@ -6152,11 +6322,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('addTrees').addEventListener('click', () => {
         startEnvironmentTool('dense_trees');
     });
+    document.getElementById('addFence').addEventListener('click', () => {
+        startEnvironmentTool('fence');
+    });
     function drawEnvironmentPolygons(floor) {
         if (!outdoor.settings(finalcords).enabled) return;
         for (const p of outdoor.environment(floor)) {
-            if (!outdoor.validPolygon(p.points)) continue;
+            if (!outdoor.validEnvironmentPoints(p)) continue;
             if (editTarget && editTarget.kind === 'environment' && editTarget.id === p.id) continue;
+            if (p.type === 'fence') { outdoor.drawFence(ctx, p, view.zoom || 1); continue; }
             ctx.save();
             ctx.beginPath(); ctx.moveTo(p.points[0].x, p.points[0].y);
             p.points.slice(1).forEach(point => ctx.lineTo(point.x, point.y)); ctx.closePath();
@@ -6176,11 +6350,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         for (const polygon of outdoor.environment(floor)) {
             const row = document.createElement('div');
             const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'bps-btn bps-btn-outline';
-            edit.textContent = `${polygon.name} (${polygon.type}${polygon.type === 'building' ? ', ' + polygon.material : ''})`;
-            edit.disabled = !outdoor.validPolygon(polygon.points);
+            edit.textContent = `${polygon.name} (${polygon.type}${['building', 'fence'].includes(polygon.type) ? ', ' + polygon.material : ''}${polygon.type === 'fence' ? ', ' + (polygon.thickness || 'solid') : ''})`;
+            edit.disabled = !outdoor.validEnvironmentPoints(polygon);
             edit.addEventListener('click', () => beginEnvironmentEdit(polygon));
             const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'bps-btn bps-btn-outline';
-            remove.textContent = '×'; remove.title = 'Delete environmental polygon';
+            remove.textContent = '×'; remove.title = 'Delete environment shape';
             remove.addEventListener('click', () => {
                 floor.environment = floor.environment.filter(p => p.id !== polygon.id);
                 if (editTarget && editTarget.kind === 'environment' && editTarget.id === polygon.id) cancelShapeEdit();
@@ -6716,8 +6890,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
+    if (globalThis.BPSBermudaCalibration) globalThis.BPSBermudaCalibration.init(bpsFetch);
     if (globalThis.BPSDiagnostics) globalThis.BPSDiagnostics.init(bpsFetch, () => {
-        const keys = ['outdoor_tracking', 'tracker_groups', 'tracker_height', 'tracker_heights',
+        const keys = ['outdoor_tracking', 'tracker_groups', 'tracker_height', 'tracker_heights', 'tracker_hardware',
             'tracker_ref_offsets', 'reading_max_age', 'position_timeout', 'history_enabled', 'history_max_age',
             'history_min_interval', 'history_min_move_m', 'history_max_points', 'history_heartbeat'];
         const editor = Object.fromEntries(keys.filter(key => finalcords[key] !== undefined).map(key => [key, finalcords[key]]));

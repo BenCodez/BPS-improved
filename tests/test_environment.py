@@ -22,6 +22,94 @@ def compiled(*regions):
     return compile_environment({"environment": list(regions)})
 
 
+def fence(points=((0, -10), (0, 10)), material="metal", thickness="solid", identifier="f"):
+    return {"id": identifier, "type": "fence", "material": material,
+            "thickness": thickness, "points": [{"x": x, "y": y} for x, y in points]}
+
+
+@pytest.mark.parametrize("material,solid,thin", [
+    ("metal", 0.5, 0.875), ("heavy", 0.65, 0.9125),
+    ("wood", 0.9, 0.975), ("light", 0.9, 0.975), ("unknown", 0.8, 0.95),
+])
+def test_fence_material_and_thickness_only_penalize_crossings(material, solid, thin):
+    for thickness, expected in [("solid", solid), ("thin", thin)]:
+        info = path_reliability(compiled(fence(material=material, thickness=thickness)), (-5, 0), (5, 0))
+        assert info["environmental_weight"] == pytest.approx(expected)
+        assert info["classification"] == "fence"
+        assert info["fence_paths"] == info["fence_crossings"] == 1
+        assert info["building_paths"] == info["building_crossings"] == 0
+        assert info["receiver_inside_building"] is False
+        assert info["reflection_risk"] is (material == "metal")
+        assert info["intersections"][0]["crossing_points"] == [[0, 0]]
+        assert path_reliability(compiled(fence(material=material, thickness=thickness)), (-5, -5), (-1, 5))["environmental_weight"] == 1
+
+
+@pytest.mark.parametrize("start,end,crossings", [
+    ((-5, 0), (5, 0), 1), ((5, 0), (-5, 0), 1),
+    ((-5, 10), (5, 10), 0), ((-5, -10), (5, -10), 0),
+    ((0, 0), (5, 0), 0), ((-5, 0), (0, 0), 0),
+    ((0, -5), (0, 5), 0), ((0, 0), (0, 0), 0),
+])
+def test_open_fence_endpoints_touches_and_collinear_travel_are_neutral(start, end, crossings):
+    info = path_reliability(compiled(fence()), start, end)
+    assert info["fence_crossings"] == crossings
+    assert info["environmental_weight"] == 0.5 ** crossings
+
+
+@pytest.mark.parametrize("points,start,end,count", [
+    (((0, 0), (10, 0), (10, 10)), (4, 6), (6, 4), 0),  # Would cross phantom closing diagonal.
+    (((0, 0), (10, 0), (10, 10)), (4, 4), (6, 6), 0),  # No area interior.
+    (((0, -5), (0, 0), (0, 5)), (-5, 0), (5, 0), 1),
+    (((-5, -5), (0, 0), (5, -5)), (-5, 0), (5, 0), 0),  # Tangent vertex.
+    (((0, -5), (0, 5), (10, 5), (10, -5)), (-5, 0), (15, 0), 2),
+    (((0, -5), (0, 0), (10, 0), (10, 5)), (-5, 0), (15, 0), 0),
+])
+def test_fence_polyline_has_no_implicit_closure_or_filled_containment(points, start, end, count):
+    geometry = compiled(fence(points))
+    assert len(geometry.regions[0].edges) == len(points) - 1
+    info = path_reliability(geometry, start, end)
+    assert info["fence_crossings"] == count
+    assert info["environmental_weight"] == 0.5 ** count
+    assert info["receiver_inside_building"] is False
+
+
+@pytest.mark.parametrize("points", [
+    ((0, 0),), ((0, 0), (0, 0)), ((0, 0), (5, 0), (0, 0)),
+    ((0, 0), (5, 0), (3, 0)), ((0, 0), (5, 5), (0, 5), (5, 0)),
+])
+def test_invalid_open_fences_are_omitted(points):
+    assert not compiled(fence(points)).regions
+    assert normalize_environment([fence(points)]) == []
+
+
+def test_fence_normalization_cache_and_safe_defaults():
+    record = fence()
+    record.pop("thickness")
+    record["wall_materials"] = ["wood", "heavy"]
+    snapshot = compiled(record)
+    normalized = normalize_environment([record])[0]
+    assert normalized["thickness"] == "solid"
+    assert normalized["material"] == "metal"
+    assert "wall_materials" not in normalized
+    assert snapshot is compiled(copy.deepcopy(record))
+    record["thickness"] = "thin"
+    assert snapshot is not compiled(record)
+    for value in [None, {}, False, "wire"]:
+        record["thickness"] = value
+        assert normalize_environment([record])[0]["thickness"] == "solid"
+    record["points"] *= MAX_ENVIRONMENT_VERTICES
+    assert not compiled(record).regions
+
+
+def test_fence_trust_combines_with_policy_freshness_and_building():
+    geometry = compiled(fence(points=((-5, 5), (15, 5))), rectangle())
+    auto = measurement_reliability(geometry, (5, -5), (5, 15), age_s=20, max_age_s=30)
+    assert auto["environmental_weight"] == pytest.approx(0.5 * 0.8 ** 2)
+    assert auto["reliability_weight"] == pytest.approx(0.5 * 0.8 ** 2 * (1.5 - 20 / 30))
+    assert measurement_reliability(geometry, (5, -5), (5, 15), policy="normal")["reliability_weight"] == 1
+    assert measurement_reliability(geometry, (5, -5), (5, 15), age_s=30)["excluded"] is True
+
+
 @pytest.mark.parametrize("start,end,crossings", [
     ((-5, -5), (-1, -1), 0), ((5, 5), (15, 5), 1),
     ((-5, 5), (15, 5), 2), ((-5, 5), (5, -5), 0),
