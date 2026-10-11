@@ -1277,7 +1277,9 @@ async def update_receiver_liveness(hass):
         name = matching.get(slug, {}).get("name")
         mac = matching.get(slug, {}).get("scanner_mac")
         age = dom.get("rl_mac_ages", {}).get(mac) if len(sources.owners_by_mac.get(mac, ())) <= 1 else None
-        if age is None and len(sources.owners_by_mac.get(mac, ())) <= 1 and matching.get(slug, {}).get("liveness_name_unique", True):
+        if age is None and not mac and matching.get(slug, {}).get("liveness_name_unique", True):
+            # Name-only ages have no hardware proof. A proven MAC must use its
+            # own age or current connectivity/readings, even after dump failure.
             age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS

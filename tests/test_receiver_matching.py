@@ -89,7 +89,8 @@ def test_online_renamed_scanner_uses_proven_name_without_rewriting_layout(hass, 
     entries, states, devices, add = configure(hass, monkeypatch)
     add("sensor.tag_distance_to_former_112233", None, disabled="user")
     devices["scanner"] = NS(_is_scanner=True, address=MAC, name="Workshop 112233")
-    hass.data["bps"].update(rl_ages={"workshop_112233": 0}, rl_anchor_wall=bps.time.time(), rl_newest=1)
+    bps._refresh_dump_ages(hass, hass.data["bps"], {
+        MAC: {"_is_scanner": True, "address": MAC, "name": "Workshop 112233", "last_seen": 1}})
     asyncio.run(bps.update_receiver_liveness(hass))
     assert hass.data["bps"]["rl_offline"] == [] and hass.data["bps"]["rl_unknown"] == []
     content = json.dumps(hass.data["bps"]["layout"])
