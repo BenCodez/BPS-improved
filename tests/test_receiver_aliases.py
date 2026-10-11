@@ -103,6 +103,36 @@ def test_invalid_alias_source_cannot_displace_trusted_exact_source(hass, monkeyp
     assert data["floor"][0]["receivers"][0]["distance"] == 6
 
 
+@pytest.mark.parametrize("outdoor", [False, True])
+@pytest.mark.parametrize("identity", ["same", "different", "unknown"])
+def test_disabled_exact_sensor_still_anchors_tracker_identity_without_contributing_readings(hass, monkeypatch, outdoor, identity):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch, outdoor=outdoor)
+    entries[old].disabled_by = "user"
+    states[old].state = "99"
+    states[old].last_updated = timestamp(999)
+    if identity == "different":
+        entries[new].unique_id = "another-synthetic-tag_" + MAC + "_range"
+    elif identity == "unknown":
+        entries[old].unique_id = "legacy-unknown-tracker"
+    rec = data["floor"][0]["receivers"][0]
+    rec["distance"], rec["cords"]["r"] = 99, 999
+    resolver = ReceiverSources(hass)
+    source, state = resolver.source("tag", rec)
+    assert (state is states[new]) is (identity == "same")
+    assert state is not states[old]
+    hass.data["bps"]["_diagnostics"] = NS(active=True, sources={"tag"}, members={})
+    asyncio.run(bps.update_receiver_radii(hass, {"entity": "tag", "data": data}))
+    if identity == "same":
+        assert source == new and rec["distance"] == 8
+        assert rec["_diagnostic_reading"]["entity_id"] == new
+        assert rec["_diagnostic_reading"]["observed"] == 998
+    else:
+        assert "distance" not in rec and "r" not in rec["cords"]
+        assert "_diagnostic_reading" not in rec
+    selected = bps._scanner_linking(hass, json.dumps(data))["placed"][0]["selected_sources"]
+    assert selected == ({"tag": new} if identity == "same" else {})
+
+
 def test_future_or_stale_only_source_cannot_keep_previous_distance(hass, monkeypatch):
     data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
     rec = data["floor"][0]["receivers"][0]

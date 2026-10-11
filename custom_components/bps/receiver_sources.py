@@ -30,13 +30,17 @@ class ReceiverSources:
         for ent in getattr(self.registry, "entities", {}).values():
             eid = ent.entity_id
             uid = getattr(ent, "unique_id", "") or ""
-            if ent.platform != "bermuda" or not eid.startswith("sensor.") or "_distance_to_" not in eid or uid.endswith("_range_raw") or getattr(ent, "disabled_by", None) is not None:
+            if ent.platform != "bermuda" or not eid.startswith("sensor.") or "_distance_to_" not in eid or uid.endswith("_range_raw"):
                 continue
             tracker, slug = eid.removeprefix("sensor.").split("_distance_to_", 1)
             match = _RANGE_MAC.search(uid)
+            # Disabled exact entities remain identity evidence for the beacon,
+            # but never contribute a reading or expand the source inventory.
+            self.tracker_ids[eid] = uid[:match.start()] if match else None
+            if getattr(ent, "disabled_by", None) is not None:
+                continue
             owner = getattr(ent, "config_entry_id", None)
             key = (owner, match[1].lower()) if match and isinstance(owner, str) and owner else None
-            self.tracker_ids[eid] = uid[:match.start()] if match else None
             self.readings.setdefault((tracker, key or slug), []).append(eid)
 
     @staticmethod
@@ -124,6 +128,8 @@ class ReceiverSources:
         tracker_id = self.tracker_ids.get(direct)
         if tracker_id:
             candidates = [eid for eid in candidates if self.tracker_ids.get(eid) == tracker_id]
+        elif direct in self.tracker_ids:
+            candidates = [eid for eid in candidates if eid == direct]
         else:
             identities = {self.tracker_ids.get(eid) for eid in candidates}
             if len(identities) > 1 or None in identities:
