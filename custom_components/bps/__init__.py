@@ -720,6 +720,7 @@ async def update_tracked_entities(hass):
             layout = get_bps_data(hass)
             if num_points < 3 and not outdoor_settings(layout)["enabled"]:
                 await update_tracker_groups(hass)
+                await _capture_recent_tracking(hass)
                 _LOGGER.info("There are not enough trackers with available data to track, sleep 10 seconds")
                 await asyncio.sleep(10)
                 continue  # Skip and start over
