@@ -34,6 +34,7 @@ import re
 import time
 from collections import deque
 from .receiver_sources import ReceiverSources
+from .bermuda_diagnostics import MAC
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -315,24 +316,34 @@ def _floor_auto_snapshot(cal, floor_name, *, raw_samples=False):
     return snapshot, history
 
 
-def _equivalent_updates(hass, floor, updates):
+def _equivalent_updates(hass, floor, updates, *, identities=None):
     """Expand from a pre-mutation snapshot, never repair conflicting aliases."""
     sources = ReceiverSources(hass)
     bindings = sources.floor_bindings(floor)
     proven = {}
+    direct = set()
     placed = {str(rec.get("entity_id")) for rec in floor.get("receivers", [])}
-    # A manual result may still use the old slug after an explicit rematch.
-    # Only current full MAC + owner proof can carry that result to a new alias;
-    # absent or ambiguous inventory evidence must never guess a replacement.
+    def captured(slug):
+        row = (identities or {}).get(slug, {})
+        mac, owner = row.get("scanner_mac"), row.get("scanner_config_entry_id")
+        return (owner, mac.lower()) if isinstance(owner, str) and owner and isinstance(mac, str) and MAC.fullmatch(mac) else None
+    # A current alias cannot prove which hardware produced an old solve. Only
+    # the solve's captured owner/MAC may migrate a missing key to another slug.
     for slug, correction in updates.items():
         if slug in placed:
             continue
-        binding = sources.binding({"entity_id": slug})
-        if binding["status"] == "matched" and binding["identity"]:
-            proven.setdefault(binding["identity"], set()).add(correction)
+        identity = captured(slug)
+        if identity in sources.by_identity:
+            proven.setdefault(identity, set()).add(correction)
     for rec, binding in zip(floor.get("receivers", []), bindings):
         slug = str(rec.get("entity_id"))
-        if binding["status"] in ("matched", "duplicate_scanner_alias") and binding["identity"] and slug in updates:
+        if slug not in updates or binding["status"] not in ("matched", "unmatched", "duplicate_scanner_alias"):
+            continue
+        identity = captured(slug)
+        if identity is not None and identity != binding["identity"]:
+            continue
+        direct.add(slug)
+        if binding["identity"]:
             proven.setdefault(binding["identity"], set()).add(updates[slug])
     expanded = {}
     for rec, binding in zip(floor.get("receivers", []), bindings):
@@ -342,7 +353,7 @@ def _equivalent_updates(hass, floor, updates):
         values = proven.get(binding["identity"], set())
         if len(values) == 1:
             expanded[slug] = next(iter(values))
-        elif not values and slug in updates:
+        elif not values and slug in direct:
             expanded[slug] = updates[slug]
     return expanded
 
@@ -782,6 +793,8 @@ def solve(cal: dict, floor_name: str):
         "bidirectional_pairs": len(diff_rows),
         "low_confidence": low_confidence,
         "receivers": corrections,
+        "receiver_identities": {slug: {key: cal["receivers"][slug].get(key)
+            for key in ("scanner_mac", "scanner_config_entry_id")} for slug in corrections},
         "rx_bias_db_equident": {
             # The equivalent Bermuda "Calibration 2" rssi_offset (attenuation 3).
             slug: round(-30.0 * math.log10(corrections[slug]), 1)
@@ -1203,7 +1216,7 @@ async def _apply_result_locked(hass, cal: dict, result: dict) -> int:
         raise ValueError(f'Floor "{result["floor"]}" no longer exists.')
 
     updated = 0
-    corrections = _equivalent_updates(hass, floor, result["receivers"])
+    corrections = _equivalent_updates(hass, floor, result["receivers"], identities=result.get("receiver_identities"))
     if not corrections:
         raise ValueError("No eligible receiver placements remain; match conflicting placements before applying.")
     for receiver in floor.get("receivers", []):

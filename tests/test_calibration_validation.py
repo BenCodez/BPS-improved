@@ -201,9 +201,11 @@ def test_tracking_comparison_uses_corrections_apply_saves_after_proven_rematch(h
         return json.dumps(data).encode()
     hass.data['bps'] = {'layout': current,
         '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
-        'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS, 'solved_at': 'solve-date'}}}}
+        'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS, 'solved_at': 'solve-date',
+            'receiver_identities': {'r0': {'scanner_mac': 'aa:bb:cc:11:22:33', 'scanner_config_entry_id': 'entry'}}}}}}
     result = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
-    applied = calibration._equivalent_updates(hass, current['floor'][0], FACTORS)
+    proof = hass.data['bps']['calibration']['results']['Yard']['receiver_identities']
+    applied = calibration._equivalent_updates(hass, current['floor'][0], FACTORS, identities=proof)
     assert result['candidate_corrections'] == applied == {'r0_current': .5, 'r1': 2., 'r2': 1., 'r3': 1.}
     assert result['candidate_solved_at'] == 'solve-date'
     assert result['verdict'] == 'improves'

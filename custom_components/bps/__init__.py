@@ -2908,7 +2908,8 @@ async def _calibration_tracking_check(hass, floor_name):
         raise ValueError("Solve calibration for the selected floor first")
     # Freeze candidate and geometry before awaiting export/executor work.
     floor = copy.deepcopy(floor)
-    corrections = _equivalent_updates(hass, floor, copy.deepcopy(result["receivers"]))
+    corrections = _equivalent_updates(hass, floor, copy.deepcopy(result["receivers"]),
+                                     identities=result.get("receiver_identities"))
     current_layout = copy.deepcopy(layout)
     eligible_receivers = set(_build_receiver_map(current_layout, floor["name"], hass=hass))
     baseline_corrections = {receiver.get("entity_id"): receiver.get("correction", 1)
