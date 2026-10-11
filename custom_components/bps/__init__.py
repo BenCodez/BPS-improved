@@ -1023,19 +1023,29 @@ def _refresh_dump_ages(hass, dom, devices):
     prev_newest = dom.get("rl_newest")
     now = time.time()
     if not (prev_newest is not None and prev_newest - 60 < newest <= prev_newest):
-        ages = {}
-        for dev in devices.values():
+        ages, mac_ages, repeated_names, seen_names = {}, {}, set(), set()
+        for address, dev in devices.items():
             if not isinstance(dev, dict) or dev.get("_is_scanner") is not True:
                 continue
             slug = slugify(str(dev.get("name") or ""))
             if not slug:
                 continue
+            if slug in seen_names:
+                repeated_names.add(slug)
+            seen_names.add(slug)
             ls = dev.get("last_seen")
             if isinstance(ls, (int, float)) and not isinstance(ls, bool) and math.isfinite(ls):
-                ages[slug] = max(0.0, newest - ls)
+                age = max(0.0, newest - ls)
+                ages[slug] = age
+                mac = dev.get("address", address)
+                if isinstance(mac, str) and bermuda_diagnostics.MAC.fullmatch(mac):
+                    mac_ages[mac.lower()] = age
+        for slug in repeated_names:
+            ages.pop(slug, None)
         dom["rl_newest"] = newest
         dom["rl_anchor_wall"] = now
         dom["rl_ages"] = ages
+        dom["rl_mac_ages"] = mac_ages
 
 
 def _build_device_availability(hass):
@@ -1132,7 +1142,10 @@ async def update_receiver_liveness(hass):
         if matching.get(slug, {}).get("identity_ambiguous"):
             return None
         name = matching.get(slug, {}).get("name")
-        age = ages.get(slug, ages.get(slugify(name)) if name else None)
+        mac = matching.get(slug, {}).get("scanner_mac")
+        age = dom.get("rl_mac_ages", {}).get(mac)
+        if age is None:
+            age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS
         st = hass.states.get(f"binary_sensor.{slug}_status")

@@ -377,3 +377,26 @@ test('receiver status remains unknown without distance contact, respects confirm
     c._hass.entities = {'sensor.other_distance_to_old_slug': {platform: 'esphome'}};
     assert.equal(c._computeReceiverStatuses().get('old_slug'), null);
 });
+
+test('duplicate friendly names resolve liveness by MAC or remain unknown regardless of dump order', async () => {
+    for (const hasAddress of [true, false]) for (const reverse of [true, false]) {
+        const c = card(); c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+        c._receivers = [{entity_id: 'old_a'}, {entity_id: 'old_b'}];
+        c._receiverMatching = new Map([['old_a', {name: 'Workshop', scanner_mac: 'aa:bb:cc:11:22:33'}],
+            ['old_b', {name: 'Workshop', scanner_mac: 'aa:bb:cc:44:55:66'}]]);
+        const rows = [['a', {_is_scanner: true, name: 'Workshop', last_seen: 100}],
+            ['b', {_is_scanner: true, name: 'Workshop', last_seen: 1}]];
+        if (hasAddress) {rows[0][1].address = 'aa:bb:cc:11:22:33'; rows[1][1].address = 'aa:bb:cc:44:55:66';}
+        c._hass.callWS = async () => ({response: Object.fromEntries(reverse ? rows.reverse() : rows)});
+        await c._refreshBermudaScanners();
+        assert.equal(c._bermudaScanners.has('workshop'), false);
+        const statuses = c._computeReceiverStatuses();
+        assert.equal(statuses.get('old_a'), hasAddress ? true : null);
+        assert.equal(statuses.get('old_b'), hasAddress ? false : null);
+    }
+    const c = card(); c._config.show_receivers = true;
+    c._hass.callWS = async () => ({response: {a: {_is_scanner: true, name: 'Workshop', last_seen: 100},
+        b: {_is_scanner: true, name: 'Workshop', last_seen: null}}});
+    await c._refreshBermudaScanners();
+    assert.equal(c._bermudaScanners.has('workshop'), false, 'missing clock must not borrow a same-name scanner age');
+});

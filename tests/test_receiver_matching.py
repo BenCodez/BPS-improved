@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+import pytest
 from types import SimpleNamespace as NS
 
 import bps
@@ -147,3 +148,33 @@ def test_matching_suggestion_uses_full_mac_and_rejects_contradictory_token(hass,
     assert bps._scanner_diagnostics(hass, content)["unmatched_receivers"][0]["suggested"] == "workshop"
     content = content.replace(MAC, "dd:ee:ff:11:22:33")
     assert bps._scanner_diagnostics(hass, content)["unmatched_receivers"][0]["suggested"] is None
+
+
+@pytest.mark.parametrize("has_address", [True, False])
+@pytest.mark.parametrize("reverse", [True, False])
+def test_shared_friendly_names_use_mac_ages_or_remain_unknown(hass, monkeypatch, has_address, reverse):
+    entries, states, devices, add = configure(hass, monkeypatch)
+    second_mac = "aa:bb:cc:44:55:66"
+    for slug, mac in (("old_a_112233", MAC), ("old_b_445566", second_mac)):
+        add(f"sensor.tag_distance_to_{slug}", uid="synthetic-tracker_" + mac + "_range")
+        devices[slug] = NS(_is_scanner=True, address=mac, name="Workshop")
+    dump = [("a", {"_is_scanner": True, "name": "Workshop", "last_seen": 100}),
+            ("b", {"_is_scanner": True, "name": "Workshop", "last_seen": 1})]
+    if has_address:
+        dump[0][1]["address"] = MAC
+        dump[1][1]["address"] = second_mac
+    async def call(*args, **kwargs):
+        return dict(reversed(dump) if reverse else dump)
+    hass.services.async_call = call
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "workshop" not in hass.data["bps"]["rl_ages"]
+    assert hass.data["bps"]["rl_offline"] == (["old_b_445566"] if has_address else [])
+    assert hass.data["bps"]["rl_unknown"] == ([] if has_address else ["old_a_112233", "old_b_445566"])
+
+
+def test_shared_name_with_missing_clock_does_not_borrow_other_scanner_age(hass, monkeypatch):
+    configure(hass, monkeypatch)
+    dom = hass.data["bps"]
+    bps._refresh_dump_ages(hass, dom, {"a": {"_is_scanner": True, "name": "Workshop", "last_seen": 100},
+                                    "b": {"_is_scanner": True, "name": "Workshop", "last_seen": None}})
+    assert dom["rl_ages"] == {} and dom["rl_mac_ages"] == {}

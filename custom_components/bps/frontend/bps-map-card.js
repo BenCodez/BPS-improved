@@ -442,16 +442,23 @@ class BpsMapCard extends HTMLElement {
         return;
       }
       this._bermudaNewest = newest;
-      const bySlug = new Map();
-      for (const dev of Object.values(devices)) {
+      const bySlug = new Map(), byMac = new Map(), repeatedNames = new Set(), seenNames = new Set();
+      for (const [address, dev] of Object.entries(devices)) {
         if (!dev || (dev._is_scanner !== true && dev.is_scanner !== true)) continue;
         const slug = BpsMapCard.haSlugify(dev.name);
         if (!slug) continue;
+        if (seenNames.has(slug)) repeatedNames.add(slug);
+        seenNames.add(slug);
         if (typeof dev.last_seen === "number" && Number.isFinite(dev.last_seen)) {
-          bySlug.set(slug, Math.max(0, newest - dev.last_seen));
+          const age = Math.max(0, newest - dev.last_seen);
+          bySlug.set(slug, age);
+          const mac = dev.address ?? address;
+          if (typeof mac === "string" && /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(mac)) byMac.set(mac.toLowerCase(), age);
         }
       }
+      for (const slug of repeatedNames) bySlug.delete(slug);
       this._bermudaScanners = bySlug;
+      this._bermudaScannerMacAges = byMac;
       this._bermudaDumpAt = now;
     } catch (e) {
       // Bermuda missing, too old for service response data, or a transient
@@ -550,8 +557,9 @@ class BpsMapCard extends HTMLElement {
       // fetched, so add the wall time elapsed since.
       if (this._bermudaScanners) {
         const identity = this._receiverMatching?.get(id);
-        const ageAtDump = this._bermudaScanners.get(id) ?? (identity && !identity.identity_ambiguous
-          ? this._bermudaScanners.get(BpsMapCard.haSlugify(identity.name)) : null);
+        const ageAtDump = identity?.identity_ambiguous ? null :
+          this._bermudaScannerMacAges?.get(identity?.scanner_mac) ?? this._bermudaScanners.get(id) ??
+          (identity ? this._bermudaScanners.get(BpsMapCard.haSlugify(identity.name)) : null);
         if (ageAtDump != null) {
           const age = ageAtDump + (Date.now() - this._bermudaDumpAt) / 1000;
           statuses.set(id, age <= this._config.receiver_timeout);
