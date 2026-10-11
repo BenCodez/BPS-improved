@@ -199,3 +199,39 @@ def test_scanner_absent_from_dump_cannot_borrow_shared_name_age(hass, monkeypatc
     states["binary_sensor.old_a_112233_status"] = NS(state="on", attributes={"device_class": "connectivity"})
     asyncio.run(bps.update_receiver_liveness(hass))
     assert hass.data["bps"]["rl_offline"] == ["old_b_445566"] and hass.data["bps"]["rl_unknown"] == []
+
+
+@pytest.mark.parametrize("shared_mac", [False, True])
+@pytest.mark.parametrize("last_seen", [1, 100])
+def test_runtime_only_scanner_cannot_lend_name_or_ownerless_mac_liveness(hass, monkeypatch, shared_mac, last_seen):
+    from bps.receiver_sources import ReceiverSources
+    from bps.calibration import _build_receiver_map, _match_scanners
+    entries, states, devices, add = configure(hass, monkeypatch)
+    other_mac = MAC if shared_mac else "dd:ee:ff:44:55:66"
+    add("sensor.tag_distance_to_old_112233")
+    devices["a"] = NS(_is_scanner=True, address=MAC, name="Workshop")
+    other_devices = {"b": NS(_is_scanner=True, address=other_mac, name="Workshop")}
+    first = hass.config_entries.async_entries("bermuda")[0]
+    second = NS(entry_id="another-owner", runtime_data=NS(coordinator=NS(devices=other_devices)))
+    hass.config_entries.async_entries = lambda _domain: [first, second]
+    matching = inventory(hass)
+    assert len(matching["options"]) == 1
+    assert matching["options"][0]["liveness_name_unique"] is False
+    assert matching["mac_owners"][MAC] == (["another-owner", "entry"] if shared_mac else ["entry"])
+    resolver = ReceiverSources(hass)
+    assert len(resolver.owners_by_mac[MAC]) == (2 if shared_mac else 1)
+    assert resolver.binding({"entity_id": "old_112233", "scanner_mac": MAC})["status"] == "matched"
+    assert resolver.binding({"entity_id": "removed_name", "scanner_mac": MAC})["status"] == ("scanner_identity_unavailable" if shared_mac else "matched")
+    assert resolver.binding({"entity_id": "removed_name", "scanner_mac": MAC, "scanner_config_entry_id": "entry"})["status"] == "matched"
+    payload = {other_mac: {"_is_scanner": True, "address": other_mac, "name": "Workshop", "last_seen": last_seen},
+               "tag": {"last_seen": 100}}
+    async def call(*args, **kwargs):
+        return payload
+    hass.services.async_call = call
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert hass.data["bps"]["rl_offline"] == []
+    assert hass.data["bps"]["rl_unknown"] == ["old_112233"]
+    if shared_mac:
+        receivers = _build_receiver_map(hass.data["bps"]["layout"], hass=hass)
+        assert receivers["old_112233"]["scanner_owner_unique"] is False
+        assert _match_scanners({"receivers": receivers}, payload) == {}, 'ownerless calibration dump cannot claim another owner'

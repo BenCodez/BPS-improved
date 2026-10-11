@@ -536,7 +536,7 @@ class BpsMapCard extends HTMLElement {
       return statuses;
     }
     const heuristic = [];
-    const ownersByMac = new Map();
+    const ownersByMac = new Map([...(this._receiverMacOwners || [])].map(([mac, owners]) => [mac, new Set(owners)]));
     for (const option of this._receiverMatching?.values() || []) {
       if (option.identity_ambiguous || !option.scanner_mac || option.config_entry_ids?.length !== 1) continue;
       const owners = ownersByMac.get(option.scanner_mac) || new Set();
@@ -734,6 +734,7 @@ class BpsMapCard extends HTMLElement {
     const coords = JSON.parse(data.coordinates);
     this._knownBeaconKeys = new Set(Array.isArray(data.entities) ? data.entities : []);
     this._receiverMatching = new Map((data.receiver_matching?.options || []).map(option => [option.entity_id, option]));
+    this._receiverMacOwners = new Map(Object.entries(data.receiver_matching?.mac_owners || {}));
     for (const alias of data.scanner_diagnostics?.alias_receivers || []) {
       const option = [...this._receiverMatching.values()].find(row => row.scanner_mac === alias.scanner_mac
         && row.config_entry_ids?.length === 1 && row.config_entry_ids[0] === alias.config_entry_id);

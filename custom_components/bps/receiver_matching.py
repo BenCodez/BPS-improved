@@ -76,6 +76,13 @@ def inventory(hass):
             target = row(slugify(next(iter(names))))
             target["identities"].add(identity)
             target["names"].update(names)
+    mac_owners = {}
+    for owner, mac in runtime:
+        mac_owners.setdefault(mac, set()).add(owner)
+    for target in rows.values():
+        for owner, mac in target["identities"]:
+            if isinstance(owner, str) and owner:
+                mac_owners.setdefault(mac, set()).add(owner)
     options = []
     for slug, target in sorted(rows.items()):
         if not slug:
@@ -100,12 +107,14 @@ def inventory(hass):
             if option["scanner_mac"] and not option["identity_ambiguous"] and not other["identity_ambiguous"]
             and option["scanner_mac"] == other["scanner_mac"]
             and option["config_entry_ids"] == other["config_entry_ids"])
-    name_identities = {}
+    name_identities = {name: {((owner,), mac) for owner, mac in identities}
+                       for name, identities in runtime_name_ids.items()}
     for option in options:
         name = slugify(option["name"])
         identity = (tuple(option["config_entry_ids"]), option["scanner_mac"] or option["entity_id"])
         name_identities.setdefault(name, set()).add(identity)
     for option in options:
         option["liveness_name_unique"] = len(name_identities[slugify(option["name"])]) == 1
-    revision = hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()
-    return {"read_only": True, "revision": revision, "options": options}
+    mac_owners = {mac: sorted(owners) for mac, owners in sorted(mac_owners.items())}
+    revision = hashlib.sha256(json.dumps({"options": options, "mac_owners": mac_owners}, sort_keys=True).encode()).hexdigest()
+    return {"read_only": True, "revision": revision, "options": options, "mac_owners": mac_owners}

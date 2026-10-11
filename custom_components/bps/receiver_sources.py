@@ -21,6 +21,7 @@ class ReceiverSources:
         self.matching = inventory(hass) if self.registry is not None else {"options": []}
         self.options = {o["entity_id"]: o for o in self.matching["options"]}
         self.by_identity, self.owners_by_mac, self.readings, self.tracker_ids = {}, {}, {}, {}
+        self.owners_by_mac.update({mac: set(owners) for mac, owners in self.matching.get("mac_owners", {}).items()})
         for option in self.options.values():
             key = self.option_identity(option)
             if key:
@@ -58,9 +59,11 @@ class ReceiverSources:
                 return {"identity": None, "status": "scanner_identity_conflict", "aliases": []}
             if owner:
                 key = (owner, mac)
+            elif exact:
+                key = exact
             else:
                 keys = [key for key in self.by_identity if key[1] == mac]
-                key = keys[0] if len(keys) == 1 else None
+                key = keys[0] if len(keys) == 1 and len(self.owners_by_mac.get(mac, ())) == 1 else None
             if key is None or key not in self.by_identity:
                 return {"identity": None, "status": "scanner_identity_unavailable", "aliases": []}
         else:

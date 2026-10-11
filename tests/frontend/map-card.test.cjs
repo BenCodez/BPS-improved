@@ -466,3 +466,23 @@ test('saved identity conflicts cannot borrow automatic liveness from a reused sc
         assert.equal(c._computeReceiverStatuses().get('station'), age === 0);
     }
 });
+
+test('card loads all runtime owner evidence and excludes omitted scanners from name liveness', async () => {
+    for (const sharedMac of [false, true]) for (const age of [0, 90]) {
+        const c = card(); c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+        const mac = 'aa:bb:cc:11:22:33';
+        const otherMac = sharedMac ? mac : 'dd:ee:ff:44:55:66';
+        const matching = {options: [{entity_id: 'old_station', name: 'Workshop', scanner_mac: mac,
+            config_entry_ids: ['owner-a'], liveness_name_unique: false}],
+            mac_owners: {[mac]: sharedMac ? ['owner-a', 'owner-b'] : ['owner-a']}};
+        c._apiFetch = async () => ({ok: true, json: async () => ({receiver_matching: matching, coordinates: JSON.stringify({
+            floor: [{name: 'Property', scale: 20, receivers: [{entity_id: 'old_station', cords: {x: 1, y: 2}}], zones: []}]})})});
+        c._refreshBermudaScanners = async () => {
+            c._bermudaScanners = new Map([['workshop', age]]);
+            c._bermudaScannerMacAges = new Map([[otherMac, age]]); c._bermudaDumpAt = Date.now();
+        };
+        c._resolveMapUrl = async () => 'synthetic.png'; c._loadFloorImage = async () => {c._baseImage = {};};
+        await c._loadFloorResources(1);
+        assert.equal(c._receiverStatuses.get('old_station'), null);
+    }
+});
