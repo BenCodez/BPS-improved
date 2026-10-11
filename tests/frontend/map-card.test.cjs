@@ -622,6 +622,45 @@ function nextInventory(c, {mac = 'aa:bb:cc:11:22:33', owner = 'owner-a', slug = 
         liveness_name_unique: true, distance_sensors: [source], disabled_sensors: []}], mac_owners: {[mac]: [owner]}};
 }
 
+test('real floor loading keeps malformed saved identity fields unknown instead of inferring current hardware', async () => {
+    const cases = [['entity_id', ['old_station']], ['entity_id', {bad: true}],
+        ['scanner_mac', ['aa:bb:cc:11:22:33']], ['scanner_mac', {bad: true}],
+        ['scanner_config_entry_id', ['owner-a']], ['scanner_config_entry_id', {bad: true}],
+        ['scanner_config_entry_id', 1]];
+    for (const [field, value] of cases) {
+        const c = fallbackCard('old_station'), rec = {...c._receivers[0], [field]: value, cords: {x: 1, y: 2}};
+        const matching = {options: [...c._receiverMatching.values()], mac_owners: {'aa:bb:cc:11:22:33': ['owner-a']}};
+        c._apiFetch = async path => ({ok: true, json: async () => path === '/api/bps/read_text'
+            ? {receiver_matching: matching, coordinates: JSON.stringify({floor: [{name: 'Property', scale: 20, receivers: [rec], zones: []}]})}
+            : {matching}});
+        c._hass.callWS = async () => ({response: {'aa:bb:cc:11:22:33': {
+            _is_scanner: true, address: 'aa:bb:cc:11:22:33', name: 'Current station', last_seen: 100}}});
+        c._resolveMapUrl = async () => 'synthetic.png'; c._loadFloorImage = async () => {c._baseImage = {};};
+        await c._loadFloorResources(1);
+        const id = c._receivers[0].entity_id;
+        assert.equal(c._currentReceiverOption(id), null, field);
+        assert.equal(c._receiverStatuses.get(id), null, `${field}: fresh dump`);
+        for (const age of [0, 100]) for (const override of [undefined, false, 'heuristic']) {
+            c._bermudaScannerMacAges.set('aa:bb:cc:11:22:33', age);
+            c._config.receiver_status[id] = override;
+            assert.equal(c._computeReceiverStatuses().get(id), null, `${field}/${age}/${override}`);
+        }
+        if (typeof id === 'string') {
+            c._config.receiver_status[id] = 'binary_sensor.explicit_status';
+            c._hass.states['binary_sensor.explicit_status'] = {state: 'on'};
+            assert.equal(c._computeReceiverStatuses().get(id), true, 'explicit user status stays authoritative');
+        }
+    }
+});
+
+test('malformed field edits cannot use a previously captured valid automatic binding', async () => {
+    for (const field of ['scanner_mac', 'scanner_config_entry_id']) {
+        const c = await loadedIdentityCard();
+        c._receivers[0][field] = {bad: true};
+        assert.equal(c._computeReceiverStatuses().get('old_station'), null, field);
+    }
+});
+
 test('real card refresh keeps saved and inferred binding identity through same-name MAC or owner replacement', async () => {
     for (const legacy of [false, true]) for (const replacement of ['mac', 'owner']) {
         const c = await loadedIdentityCard({legacy});

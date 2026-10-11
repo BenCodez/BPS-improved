@@ -565,10 +565,17 @@ class BpsMapCard extends HTMLElement {
     return !["", "unavailable", "unknown", "none", "off", "false", "not_home", "offline", "disconnected"].includes(s);
   }
 
+  static validReceiverIdentityFields(rec) {
+    return typeof rec?.entity_id === "string" && rec.entity_id.length > 0
+      && (rec.scanner_mac == null || typeof rec.scanner_mac === "string")
+      && (rec.scanner_config_entry_id == null || typeof rec.scanner_config_entry_id === "string");
+  }
+
   _captureReceiverBindings() {
     // Preserve inferred legacy identity until a config/floor reload. A reused
     // entity slug must not silently rebind a placement to replacement hardware.
     this._receiverBindings = new Map(this._receivers.map(rec => {
+      if (!BpsMapCard.validReceiverIdentityFields(rec)) return [rec?.entity_id, {invalid: true}];
       const option = this._receiverMatching?.get(rec.entity_id);
       const savedMac = typeof rec.scanner_mac === "string" && /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(rec.scanner_mac)
         ? rec.scanner_mac.toLowerCase() : null;
@@ -580,9 +587,11 @@ class BpsMapCard extends HTMLElement {
   }
 
   _currentReceiverOption(id) {
+    if (typeof id !== "string" || !id) return null;
     const direct = this._receiverMatching?.get(id);
     if (!this._receiverBindings) return direct; // Older/no-layout callers.
     const binding = this._receiverBindings.get(id);
+    if (binding?.invalid) return null;
     if (!binding) return direct?.identity_ambiguous ? null : direct;
     const matches = option => !option?.identity_ambiguous && option?.scanner_mac === binding.scanner_mac
       && option.config_entry_ids?.length === 1 && option.config_entry_ids[0] === binding.owner;
@@ -637,6 +646,10 @@ class BpsMapCard extends HTMLElement {
     };
     for (const rec of this._receivers) {
       const id = rec.entity_id;
+      if (typeof id !== "string" || !id) {
+        statuses.set(id, null);
+        continue;
+      }
       const statusEntity = this._config.receiver_status[id];
       if (statusEntity && statusEntity !== "heuristic") {
         const value = states[statusEntity]?.state;
@@ -644,7 +657,8 @@ class BpsMapCard extends HTMLElement {
         continue;
       }
       const identity = this._currentReceiverOption(id);
-      if (this._receiverInventoryCurrent === false || this._receiverBindings && !identity) {
+      if (!BpsMapCard.validReceiverIdentityFields(rec)
+        || this._receiverInventoryCurrent === false || this._receiverBindings && !identity) {
         statuses.set(id, null);
         continue;
       }
