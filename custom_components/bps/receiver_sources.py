@@ -47,10 +47,16 @@ class ReceiverSources:
         return (owners[0], option["scanner_mac"]) if len(owners) == 1 else None
 
     def binding(self, receiver):
+        if not isinstance(receiver, dict):
+            return {"identity": None, "status": "invalid_scanner_identity", "aliases": []}
         slug = receiver.get("entity_id", "")
+        mac, owner = receiver.get("scanner_mac"), receiver.get("scanner_config_entry_id")
+        if (not isinstance(slug, str) or not slug
+                or mac is not None and not isinstance(mac, str)
+                or owner is not None and not isinstance(owner, str)):
+            return {"identity": None, "status": "invalid_scanner_identity", "aliases": []}
         option = self.options.get(slug)
         exact = self.option_identity(option)
-        mac, owner = receiver.get("scanner_mac"), receiver.get("scanner_config_entry_id")
         if option and option.get("identity_ambiguous"):
             return {"identity": None, "status": "ambiguous_scanner_identity", "aliases": []}
         if isinstance(mac, str) and MAC.fullmatch(mac):
@@ -72,7 +78,10 @@ class ReceiverSources:
                 "aliases": sorted(self.by_identity.get(key, {slug}))}
 
     def floor_bindings(self, floor):
-        bindings = [self.binding(rec) for rec in floor.get("receivers", [])]
+        receivers = floor.get("receivers", [])
+        if not isinstance(receivers, list):
+            return []
+        bindings = [self.binding(rec) for rec in receivers]
         groups = {}
         for index, binding in enumerate(bindings):
             if binding["identity"]:
@@ -82,8 +91,10 @@ class ReceiverSources:
                 continue
             signatures = []
             for index in indices:
-                rec = floor["receivers"][index]
-                signatures.append((rec.get("cords", {}).get("x"), rec.get("cords", {}).get("y"),
+                rec = receivers[index]
+                cords = rec.get("cords")
+                cords = cords if isinstance(cords, dict) else {}
+                signatures.append((cords.get("x"), cords.get("y"),
                     rec.get("height"), rec.get("correction", 1), rec.get("outdoor_policy", "auto"), rec.get("distance_accuracy_m")))
             conflict = any(signature != signatures[0] for signature in signatures[1:])
             for index in indices if conflict else indices[1:]:

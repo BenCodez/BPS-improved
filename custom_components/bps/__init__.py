@@ -983,7 +983,8 @@ def _scanner_linking(hass, coordinates_json):
                         owned.add(source)
                 sensors = [sensor for sensor in sensors if sensor["entity_id"] in owned]
             reporting = _reporting(sensors)
-            matched = next((options[alias] for alias in binding["aliases"] if alias in options), options.get(slug))
+            matched = next((options[alias] for alias in binding["aliases"] if alias in options),
+                           options.get(slug) if isinstance(slug, str) else None)
             if sources.blocked(binding):
                 status = "conflict"
             elif slug in hass.data.get(DOMAIN, {}).get("rl_offline", []):
@@ -1178,9 +1179,13 @@ async def update_receiver_liveness(hass):
     bindings = {slug: sources.binding({"entity_id": slug}) for slug in matching}
     layout = get_bps_data(hass) or {}
     for floor in layout.get("floor", []):
+        if not isinstance(floor, dict):
+            continue
         for rec, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
+            if not isinstance(rec, dict) or not isinstance(rec.get("entity_id"), str) or not rec["entity_id"]:
+                continue
             bindings[rec["entity_id"]] = binding
-            if binding["status"] in ("scanner_identity_conflict", "scanner_identity_unavailable", "ambiguous_scanner_identity"):
+            if binding["status"] in ("scanner_identity_conflict", "scanner_identity_unavailable", "ambiguous_scanner_identity", "invalid_scanner_identity"):
                 identity_conflicts.add(rec["entity_id"])
                 receivers.add(rec["entity_id"])
             if not sources.blocked(binding) and binding["identity"]:
