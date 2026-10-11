@@ -4,6 +4,36 @@
     function init(apiFetch) {
         const el = name => document.getElementById('diagnostic' + name);
         if (!el('Start')) return;
+        let reportBusy = false;
+        function selectReport() {
+            el('ReportText').focus();
+            el('ReportText').select();
+        }
+        el('SelectReport').addEventListener('click', selectReport);
+        el('CopyAll').addEventListener('click', async () => {
+            if (reportBusy) return;
+            reportBusy = true; el('CopyAll').disabled = true;
+            el('ReportStatus').textContent = 'Collecting full diagnostics…';
+            try {
+                const response = await apiFetch('/api/bps/diagnostics?report=1');
+                const body = await response.json();
+                if (!response.ok) throw new Error(body.error || `Diagnostic request failed (${response.status})`);
+                if (typeof body.text !== 'string' || !body.text.trim()) throw new Error('The diagnostic report was empty. Try again.');
+                el('ReportText').value = body.text;
+                el('ReportPanel').hidden = false;
+                try {
+                    await root.navigator.clipboard.writeText(body.text);
+                    el('ReportStatus').textContent = 'Full diagnostics copied. Paste them into your support message.';
+                } catch (_) {
+                    selectReport();
+                    el('ReportStatus').textContent = 'Report ready. Press Ctrl+C / Cmd+C, or touch and hold the selected text to copy.';
+                }
+            } catch (error) {
+                el('ReportStatus').textContent = `Could not refresh diagnostics: ${error.message}${el('ReportText').value ? ' The previous report below is unchanged.' : ''}`;
+            } finally {
+                reportBusy = false; el('CopyAll').disabled = false;
+            }
+        });
         let status = {active: false, available: false}, timer = null, busy = false;
         function controls() {
             ['Start', 'Stop', 'Download', 'Clear', 'Mark', 'Release', 'Note', 'Refresh'].forEach(name => {

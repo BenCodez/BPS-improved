@@ -59,6 +59,59 @@ def test_snapshot_contains_raw_units_corrected_ranges_staleness_and_missing(hass
     assert result["context"]["layout"]["floor"][0]["receivers"][0]["correction"] == 2
 
 
+def test_full_report_covers_all_trackers_and_saved_groups_without_recording_limits(hass, monkeypatch):
+    data, states = configure(hass, monkeypatch)
+    keys = ["tag", "tag2"] + [f"tag{i}" for i in range(3, 24)]
+    allowed = [f"sensor.{key}_distance_to_proxy" for key in keys]
+    monkeypatch.setattr(bps, "_bermuda_distance_sensor_ids", lambda _h: allowed)
+    for eid in allowed:
+        states[eid] = state("4")
+        states[eid].entity_id = eid
+    hass.states.async_all = lambda _domain: list(states.values())
+    data["floor"][0]["environment"] = [{"type": "building", "material": "wood", "wall_materials": ["metal", "wood", "wood"], "points": []}]
+    hass.data["bps"]["calibration"] = {"mode": "auto", "auto_status": {"Yard": {"reason": "Waiting for fresh evidence"}}}
+    hass.data["bps"]["apitricords"] = [{"ent": "tag", "cords": [4, 5], "outdoor": {"estimated_uncertainty_m": 3}},
+        {"ent": "bps_group_dog", "beacon_positions": [{"ent": "tag", "cords": [4, 5]}]}]
+    # A running recording must not restrict the report to historical membership.
+    rec = diag.get_recording(hass, bps._diagnostic_snapshot)
+    rec.active, rec.members, rec.targets = True, {"bps_group_dog": ("old_tag",)}, ["bps_group_dog"]
+    before_layout = copy.deepcopy(data)
+    before_status = copy.deepcopy(rec.status())
+    report = bps._diagnostic_report_snapshot(hass, 105)
+    assert {row["tracker"] for row in report["readings"]} == set(keys)
+    assert report["context"]["target_members"]["bps_group_dog"] == ["tag", "tag2"]
+    assert {p["ent"] for p in report["positions"]} == {"tag", "bps_group_dog"}
+    assert report["calibration_status"]["auto_status"]["Yard"]["reason"] == "Waiting for fresh evidence"
+    text = diag.format_report(report)
+    assert '"bps_version"' in text and '"wall_materials"' in text and '"measured_distance_m"' in text
+    assert "private.png" not in text and "data:private" not in text
+    assert data == before_layout and rec.status() == before_status
+    assert not hass._store_saves and rec.task is None
+    data["floor"][0]["receivers"][0]["correction"] = 9
+    assert report["context"]["layout"]["floor"][0]["receivers"][0]["correction"] == 2
+
+
+def test_live_report_api_is_read_only_on_fresh_install_and_reports_oversize(hass, monkeypatch):
+    async def scenario():
+        configure(hass, monkeypatch)
+        hass.states.async_all = lambda _domain: []
+        hass.data["bps"].pop("layout")
+        api = diag.BPSDiagnosticsAPI(bps._diagnostic_snapshot, bps._diagnostic_inventory, bps._diagnostic_report_snapshot)
+        req = SimpleNamespace(app={"hass": hass}, query={"report": "1"})
+        monkeypatch.setattr(diag.web, "Response", lambda **kw: SimpleNamespace(**kw))
+        response = await api.get(req)
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.content_type == "application/json"
+        text = json.loads(response.body)["text"]
+        assert '"positions": []' in text and '"calibration_status"' in text
+        assert "_diagnostics" not in hass.data["bps"]
+        monkeypatch.setattr(diag, "MAX_REPORT_BYTES", 10)
+        error = await api.get(req)
+        assert error.status == 400 and "exceeds 4 MiB" in error.json_body["error"]
+        assert "_diagnostics" not in hass.data["bps"] and not hass._store_saves
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("value,expected", [("unavailable", "unavailable"), ("unknown", "unknown"),
     ("nan", "invalid"), ("inf", "invalid"), ("-2", "invalid"), ("garbage", "invalid")])
 def test_bad_sensor_states_do_not_prevent_capture(hass, monkeypatch, value, expected):
