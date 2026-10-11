@@ -697,6 +697,8 @@ scanner and reports the conflict in **Debugging → Receivers** and full diagnos
 Resolve the conflicting placement before relying on it. Distinct physical scanners
 at the same location remain independent. Receiver calibration uses the same
 identity evidence and deduplicates physical scanner observations.
+Applying a correction keeps equivalent same-floor aliases synchronized. Automatic
+calibration uses each floor's own geometry when a scanner is shared between floors.
 
 The chooser checks the inventory again before applying and rejects stale choices,
 a changed floor or placement, ambiguous identities and another binding to the

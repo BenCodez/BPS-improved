@@ -270,6 +270,73 @@ def _build_receiver_map(coords, floor_name=None, *, hass=None) -> dict:
     return receivers
 
 
+def _set_auto_receivers(hass, cal, coords):
+    """Separate floor geometry from the shared physical observation keys."""
+    floors = {floor.get("name"): _build_receiver_map({"floor": [floor]}, hass=hass)
+              for floor in coords.get("floor", [])}
+    claims = {}
+    for receivers in floors.values():
+        for slug, row in receivers.items():
+            identity = ("physical", row["scanner_config_entry_id"], row["scanner_mac"]) if row.get("scanner_mac") else ("exact", slug)
+            claims.setdefault(slug, set()).add(identity)
+    # A reused label with contradictory hardware proof cannot route samples.
+    ambiguous = {slug for slug, identities in claims.items() if len(identities) != 1}
+    union, canonical, routes = {}, {}, {}
+    for name, receivers in floors.items():
+        for slug in ambiguous:
+            receivers.pop(slug, None)
+        routes[name] = {}
+        for slug, row in receivers.items():
+            identity = next(iter(claims[slug]))
+            sample_slug = canonical.setdefault(identity, slug)
+            union.setdefault(sample_slug, row)
+            routes[name][slug] = sample_slug
+    cal["receivers"] = union
+    if cal.get("_auto_floor_receivers") != floors or cal.get("_auto_routes") != routes:
+        cal.pop("_auto_sources", None)
+    cal["_auto_floor_receivers"] = floors
+    cal["_auto_routes"] = routes
+    cal["_auto_ambiguous_slugs"] = ambiguous
+
+
+def _floor_auto_snapshot(cal, floor_name, *, raw_samples=False):
+    floor_name = next((name for name in cal["_auto_floor_receivers"]
+                       if _normalize(name) == _normalize(floor_name)), floor_name)
+    receivers = copy.deepcopy(cal["_auto_floor_receivers"].get(floor_name, {}))
+    routes = cal["_auto_routes"].get(floor_name, {})
+    inverse = {canonical: slug for slug, canonical in routes.items()}
+    snapshot = {"receivers": receivers, "matched_placed": {
+        inverse[s]: stamp for s, stamp in (cal.get("matched_placed") or {}).items() if s in inverse}}
+    history = {}
+    for pair, rows in cal.get("samples" if raw_samples else "_auto_samples", {}).items():
+        tx, rx = pair.split("|", 1)
+        if tx in inverse and rx in inverse:
+            history[f"{inverse[tx]}|{inverse[rx]}"] = list(rows)
+    return snapshot, history
+
+
+def _equivalent_updates(hass, floor, updates):
+    """Expand from a pre-mutation snapshot, never repair conflicting aliases."""
+    sources = ReceiverSources(hass)
+    bindings = sources.floor_bindings(floor)
+    proven = {}
+    for rec, binding in zip(floor.get("receivers", []), bindings):
+        slug = str(rec.get("entity_id"))
+        if binding["status"] in ("matched", "duplicate_scanner_alias") and binding["identity"] and slug in updates:
+            proven.setdefault(binding["identity"], set()).add(updates[slug])
+    expanded = {}
+    for rec, binding in zip(floor.get("receivers", []), bindings):
+        if binding["status"] not in ("matched", "unmatched", "duplicate_scanner_alias"):
+            continue
+        slug = str(rec.get("entity_id"))
+        values = proven.get(binding["identity"], set())
+        if len(values) == 1:
+            expanded[slug] = next(iter(values))
+        elif not values and slug in updates:
+            expanded[slug] = updates[slug]
+    return expanded
+
+
 def _match_scanners(cal: dict, devices: dict) -> dict:
     """Map scanner MAC -> placed receiver slug (issue #63).
 
@@ -399,9 +466,14 @@ def _ingest_dump(cal: dict, devices: dict) -> None:
             cal["_auto_samples"] = {}
             cal["_advert_stamps"] = {}
         cal["_bermuda_source"] = source
-    elif previous is not None:
+        if cal.get("_auto_floor_receivers"):
+            cal["_auto_sources"] = {name: source_snapshot(receivers, devices,
+                _match_scanners({"receivers": receivers}, devices))
+                for name, receivers in cal["_auto_floor_receivers"].items()}
+    else:
         # Incomplete evidence cannot certify new samples against the old model.
         cal.pop("_bermuda_source", None)
+        cal.pop("_auto_sources", None)
 
     # Monotonic "now": the freshest advert stamp in the payload.
     newest = 0.0
@@ -468,16 +540,19 @@ def _ingest_dump(cal: dict, devices: dict) -> None:
 def _refresh_auto_history(cal):
     """Receiver geometry/identity changes invalidate old reference samples."""
     receivers = cal.get("receivers", {})
+    floors = cal.get("_auto_floor_receivers", {})
+    geometry = {"floors": floors, "routes": cal.get("_auto_routes")} if len(floors) > 1 else receivers
     previous = cal.get("_auto_geometry")
-    if previous == receivers:
+    if previous == geometry:
         return
     if previous is not None:
-        unchanged = {s for s in receivers if receivers[s] == previous.get(s)}
+        unchanged = {s for s in receivers if receivers[s] == previous.get(s)} if geometry is receivers else set()
         cal["samples"] = {k: v for k, v in cal["samples"].items()
                           if all(s in unchanged for s in k.split("|", 1))}
-    cal["_auto_geometry"] = copy.deepcopy(receivers)
+    cal["_auto_geometry"] = copy.deepcopy(geometry)
     cal["_auto_samples"] = {}
     cal["_advert_stamps"] = {}
+    cal.pop("_auto_sources", None)
 
 
 def _true_distance_m(cal: dict, slug_a: str, slug_b: str):
@@ -518,7 +593,14 @@ def solve_snapshot(cal: dict) -> dict:
 
 async def async_solve(hass, cal: dict, floor_name: str):
     """solve() off the event loop, against a snapshot taken on it."""
-    snap = solve_snapshot(cal)
+    if cal.get("_auto_floor_receivers"):
+        snap, samples = _floor_auto_snapshot(cal, floor_name, raw_samples=True)
+        snap["samples"] = samples
+        name = next((name for name in cal["_auto_floor_receivers"]
+                     if _normalize(name) == _normalize(floor_name)), floor_name)
+        snap["_bermuda_source"] = copy.deepcopy(cal.get("_auto_sources", {}).get(name))
+    else:
+        snap = solve_snapshot(cal)
     return await hass.async_add_executor_job(solve, snap, floor_name)
 
 
@@ -811,7 +893,7 @@ async def _auto_solve_and_apply(hass, cal: dict) -> None:
     coords = await _read_coords(hass)
     if not coords:
         return
-    cal["receivers"] = _build_receiver_map(coords, hass=hass)
+    _set_auto_receivers(hass, cal, coords)
     cal["all_placed_slugs"] = _all_placed_slugs(coords)
     try:
         _ingest_dump(cal, await _dump_devices(hass))
@@ -832,7 +914,7 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
     if not coords:
         return
     # Floors and receivers may have been edited since the last cycle.
-    cal["receivers"] = _build_receiver_map(coords, hass=hass)
+    _set_auto_receivers(hass, cal, coords)
     cal["all_placed_slugs"] = _all_placed_slugs(coords)
     _refresh_auto_history(cal)
 
@@ -846,19 +928,18 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
             del statuses[name]
     for floor in coords.get("floor", []):
         floor_name = floor.get("name")
-        on_floor = [s for s, r in cal["receivers"].items() if _normalize(r["floor"]) == _normalize(floor_name)]
+        snapshot, history = _floor_auto_snapshot(cal, floor_name)
+        on_floor = set(snapshot["receivers"])
         if len(on_floor) < 4:
-            statuses[floor_name] = {"state": "skipped", "reason": "Place at least four connected receivers for automatic updates"}
+            ambiguous = sorted(set(str(r.get("entity_id")) for r in floor.get("receivers", [])) & cal["_auto_ambiguous_slugs"])
+            reason = "Conflicting hardware identities share these scanner labels: " + ", ".join(ambiguous) + ". Match each placement to its correct scanner." if ambiguous else "Place at least four connected receivers for automatic updates"
+            statuses[floor_name] = {"state": "skipped", "reason": reason}
             continue
-        snapshot = {"receivers": {s: copy.deepcopy(cal["receivers"][s]) for s in on_floor},
-                    "matched_placed": dict(cal.get("matched_placed") or {})}
-        history = {k: list(v) for k, v in cal.get("_auto_samples", {}).items()
-                   if all(s in snapshot["receivers"] for s in k.split("|", 1))}
         # The live layout is authoritative, including manual applies/resets.
         # Persisted cal['applied'] is just historical metadata.
         current = {str(r.get("entity_id")): r.get("correction", 1.)
                    for r in floor.get("receivers", []) if str(r.get("entity_id")) in on_floor}
-        result_source = source_for_floor(cal.get("_bermuda_source"), floor_name)
+        result_source = source_for_floor(cal.get("_auto_sources", {}).get(floor_name), floor_name)
         result, updates, decision = await hass.async_add_executor_job(
             assess_update, snapshot, history, current, floor_name, time.time(), solve, _true_distance_m)
         if not updates:
@@ -869,6 +950,13 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
             cal["last_solved_at"] = result["solved_at"]
         if not updates:
             continue
+        updates = _equivalent_updates(hass, floor, updates)
+        current = _equivalent_updates(hass, floor, current)
+        if not updates:
+            decision.update(state="skipped", updated_receivers=0,
+                            reason="Receiver identities or equivalent placements changed; match conflicting placements before applying")
+            statuses[floor_name] = decision
+            continue
         if tracking_recording is not None:
             # Deferred import: __init__ imports this module before defining its
             # live solver, so it cannot be imported at module initialization.
@@ -877,7 +965,7 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
             try:
                 report = await hass.async_add_executor_job(compare_tracking_export,
                     tracking_recording, floor_name, {**current, **updates},
-                    copy.deepcopy(floor), trilaterate, current, copy.deepcopy(coords))
+                    copy.deepcopy(floor), trilaterate, current, copy.deepcopy(coords), set(on_floor))
             except ValueError as error:
                 decision.update(state="skipped", updated_receivers=0,
                                 reason=f"Tracking validation could not run: {error}")
@@ -959,6 +1047,8 @@ async def start_calibration(hass, floor_name: str, duration: int) -> dict:
             "error": None,
         }
     )
+    for key in ("_auto_floor_receivers", "_auto_routes", "_auto_sources", "_auto_ambiguous_slugs", "_auto_geometry"):
+        cal.pop(key, None)
     cal["task"] = hass.async_create_task(_sample_loop(hass, cal))
     return cal
 
@@ -1009,10 +1099,13 @@ async def set_auto_calibration(hass, enabled: bool) -> None:
                 "error": None,
             }
         )
+        _set_auto_receivers(hass, cal, coords)
+        cal.pop("_auto_sources", None)
         # Persisted raw windows keep the matrix warm, but independent evidence
         # must be observed afresh after restart or a new automatic session.
         cal["_auto_samples"] = {}
-        cal["_auto_geometry"] = copy.deepcopy(cal["receivers"])
+        cal.pop("_auto_geometry", None)
+        _refresh_auto_history(cal)
         cal["_advert_stamps"] = {}
         cal["auto_status"] = {}
         cal["task"] = hass.async_create_task(_auto_loop(hass, cal))
@@ -1045,7 +1138,10 @@ def refresh_receivers_from_coords(hass, coordinates_json) -> None:
             # end the run with a misleading "0 usable pairs / check iBeacon"
             # error instead of a coherent (if now moot) report.
             return
-        cal["receivers"] = new_map
+        if cal.get("mode") == "auto":
+            _set_auto_receivers(hass, cal, coords)
+        else:
+            cal["receivers"] = new_map
         _refresh_auto_history(cal)
         cal["all_placed_slugs"] = _all_placed_slugs(coords)
     except Exception as e:
@@ -1097,8 +1193,11 @@ async def _apply_result_locked(hass, cal: dict, result: dict) -> int:
         raise ValueError(f'Floor "{result["floor"]}" no longer exists.')
 
     updated = 0
+    corrections = _equivalent_updates(hass, floor, result["receivers"])
+    if not corrections:
+        raise ValueError("No eligible receiver placements remain; match conflicting placements before applying.")
     for receiver in floor.get("receivers", []):
-        correction = result["receivers"].get(str(receiver.get("entity_id")))
+        correction = corrections.get(str(receiver.get("entity_id")))
         if correction is not None:
             receiver["correction"] = correction
             updated += 1
@@ -1109,9 +1208,8 @@ async def _apply_result_locked(hass, cal: dict, result: dict) -> int:
         "error_factor_before": result["error_factor_before"],
         "error_factor_after": result["error_factor_after"],
     }
-    cal["applied"][floor.get("name")] = dict(result["receivers"])
-
     await save_bps_data(hass, coords)
+    cal["applied"][floor.get("name")] = corrections
     return updated
 
 

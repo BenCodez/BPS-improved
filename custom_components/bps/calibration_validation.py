@@ -50,14 +50,19 @@ def metrics(values):
     return {"samples": len(values), "median_m": percentile(.5), "p95_m": percentile(.95)}
 
 
-def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_s=30.0):
+def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_s=30.0,
+           eligible_receivers=None):
     candidate = copy.deepcopy(floor)
     rows = {r["receiver"]: r for r in readings}
-    weighted, selected = [], []
+    weighted, selected, seen = [], [], set()
     for receiver in candidate.get("receivers", []):
-        row = rows.get(receiver.get("entity_id"))
+        slug = receiver.get("entity_id")
+        if eligible_receivers is not None and (slug not in eligible_receivers or slug in seen):
+            continue
+        row = rows.get(slug)
         if row is None:
             continue
+        seen.add(slug)
         factor = corrections.get(receiver["entity_id"], row.get("receiver_correction", 1.0))
         slant = row["measured_distance_m"] * factor * row.get("tracker_distance_factor", 1.0)
         horizontal = slant
@@ -100,7 +105,7 @@ def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_
 
 
 def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
-                     baseline_corrections=None, current_layout=None):
+                     baseline_corrections=None, current_layout=None, eligible_receivers=None):
     if not corrections or any(not number(v) or not .2 <= v <= 5 for v in corrections.values()):
         raise ValueError("No valid calibration corrections for this floor")
     if bundle.get("format") != "bps-diagnostics-v1":
@@ -136,11 +141,18 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
             gate = reading_max_age(layout, context.get("defaults", {}).get("reading_max_age_s", 30))
             rows = [r for r in frame.get("readings", []) if r.get("tracker") == target
                 and r.get("floor") == floor_name and r.get("status") == "current"
+                and (eligible_receivers is None or r.get("receiver") in eligible_receivers)
                 and not (layout.get("outdoor_tracking", {}).get("enabled") is True and r.get("ignored"))
                 and not r.get("assumed_unit_m")
                 and number(r.get("measured_distance_m")) and r["measured_distance_m"] >= 0
                 and number(r.get("observed")) and max(truth["time"], context_since) <= r["observed"] <= frame["time"]
                 and (not gate or frame["time"] - r["observed"] < gate)]
+            if eligible_receivers is not None:
+                unique = {}
+                for row in rows:
+                    if row["observed"] >= unique.get(row["receiver"], {}).get("observed", -math.inf):
+                        unique[row["receiver"]] = row
+                rows = list(unique.values())
             signature = (target, frame["context_id"], tuple(sorted((r["receiver"], r["observed"]) for r in rows)))
             if len(rows) < 3 or signature in seen or not any(r["receiver"] in corrections for r in rows):
                 continue
@@ -152,8 +164,8 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
     if eligible > MAX_REPLAYS:
         samples = [samples[round(i * (eligible - 1) / (MAX_REPLAYS - 1))] for i in range(MAX_REPLAYS)]
     for target, truth, now, floor, rows, layout, scale, gate in samples:
-        baseline = replay(floor, rows, baseline_corrections or {}, scale, layout, now, solver, max_age_s=gate)
-        proposed = replay(floor, rows, corrections, scale, layout, now, solver, max_age_s=gate)
+        baseline = replay(floor, rows, baseline_corrections or {}, scale, layout, now, solver, max_age_s=gate, eligible_receivers=eligible_receivers)
+        proposed = replay(floor, rows, corrections, scale, layout, now, solver, max_age_s=gate, eligible_receivers=eligible_receivers)
         stats = reports.setdefault(target, {"baseline": [], "candidate": [], "candidate_failures": 0})
         if baseline is None:
             continue
@@ -187,7 +199,7 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
 
 
 def compare_tracking_export(payload, floor_name, corrections, current_floor, solver,
-                            baseline_corrections=None, current_layout=None):
+                            baseline_corrections=None, current_layout=None, eligible_receivers=None):
     """Decode and compare a potentially 16 MiB recording in the executor."""
     return compare_tracking(json.loads(payload), floor_name, corrections, current_floor, solver,
-                            baseline_corrections, current_layout)
+                            baseline_corrections, current_layout, eligible_receivers)
