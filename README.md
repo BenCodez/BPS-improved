@@ -667,6 +667,9 @@ the list — with a "Custom name…" option for receivers Bermuda hasn't seen ye
 
 Receivers already placed on the **selected floor** are hidden from the list.
 The same scanner can have a placement on another floor.
+Save checks a fresh Bermuda inventory. If scanner identities changed while the
+panel was open, review the refreshed choice and save again; the marker, height
+and other inputs are retained.
 
 ![Placing a receiver: pick its name from the list of receivers Bermuda reports](img/screenshots/receiver-picker.png)
 
@@ -1223,28 +1226,31 @@ it is offline/unavailable**. The decision is made per receiver, first match
 wins:
 
 1. **`receiver_status` mapping** (if given): the mapped entity decides — an
-   offline-like state (`off`, `unavailable`, `unknown`, `none`, `false`,
-   `not_home`, `offline`, `disconnected`, or empty) shows red, anything else
-   black. Any entity of the device works (e.g. an uptime sensor). Map a receiver
+   offline-like state (`off`, `none`, `false`, `not_home`, `offline`, or
+   `disconnected`) shows red; missing, `unknown`, `unavailable` or empty states
+   show Unknown. Other states show online. Any entity of the device works
+   (e.g. an uptime sensor). Map a receiver
    to `false` (or `heuristic`) to skip tiers 2–4 and force the distance
    heuristic.
 2. **Bermuda scanner liveness** (automatic): the card asks Bermuda
-   (`bermuda.dump_devices`) and matches scanners to receivers by name. A
+   (`bermuda.dump_devices`) and resolves proven scanner identities and aliases. A
    receiver is working while its scanner heard *any* advertisement within
    `receiver_timeout` seconds (default 30, min 10). This is the strongest tier —
    it catches a proxy whose BLE scanning died while its network stayed up.
 3. **`binary_sensor.<receiver>_status`** with device class `connectivity` — the
-   conventional ESPHome `status` sensor.
+   conventional ESPHome `status` sensor. Unknown or unavailable automatic status
+   falls through to the following tiers.
 4. **Device availability** (automatic): the HA device whose name matches the
    receiver is online while any of its entities isn't `unavailable`. A
    connectivity-class entity of that device is authoritative.
-5. **Bermuda distance sensors** (fallback): working while at least one
-   `sensor.*_distance_to_<receiver>` reports a distance (Bermuda holds the last
-   reading ~30 s), so a dead — or unreachable — proxy turns red after about half
-   a minute.
+5. **Bermuda distance sensors** (fallback): a fresh, enabled, filtered reading
+   proves the receiver is online. Missing or stale contact leaves it Unknown;
+   it does not prove that the scanner is offline.
 
 Tiers 2–4 need no configuration and match by the receiver name you used in the
-panel (normally the proxy's HA device name). If a receiver shows red while the
+panel (normally the proxy's HA device name), including uniquely proven aliases.
+Conflicting or unavailable saved scanner identities remain Unknown until matched.
+If a receiver shows red while the
 device is online, map it explicitly in `receiver_status`.
 
 The full card guide (all options, per-floor behavior, labels/icons/zones,

@@ -543,6 +543,37 @@ class BpsMapCard extends HTMLElement {
       owners.add(option.config_entry_ids[0]);
       ownersByMac.set(option.scanner_mac, owners);
     }
+    const sameIdentity = (a, b) => a?.scanner_mac && !a.identity_ambiguous && !b?.identity_ambiguous
+      && a.config_entry_ids?.length === 1 && b?.config_entry_ids?.length === 1
+      && a.scanner_mac === b.scanner_mac && a.config_entry_ids[0] === b.config_entry_ids[0];
+    const distanceSources = (id, identity) => {
+      const candidates = new Set();
+      const options = [...(this._receiverMatching?.values() || [])].filter(option => sameIdentity(identity, option));
+      if (!options.length && identity) options.push(identity);
+      let hasInventory = false;
+      for (const option of options) {
+        if (!Array.isArray(option.distance_sensors)) continue;
+        hasInventory = true;
+        for (const eid of option.distance_sensors) {
+          if (!option.disabled_sensors?.includes(eid)) candidates.add(eid);
+        }
+      }
+      // Older read_text responses can still use the exact legacy entity. Alias
+      // expansion requires the inventory's filtered, enabled source list.
+      if (!hasInventory) {
+        for (const eid of Object.keys(states)) {
+          if (eid.startsWith("sensor.") && eid.split("_distance_to_")[1] === id) candidates.add(eid);
+        }
+      }
+      return [...candidates].filter(eid => {
+        const owned = this._hass?.entities?.[eid];
+        if (owned && (owned.platform && owned.platform !== "bermuda" || owned.disabled_by != null || owned.unique_id?.endsWith("_range_raw"))) return false;
+        if (!hasInventory && this._hass?.entities && !owned) return false;
+        if (identity?.config_entry_ids?.length === 1 && owned?.config_entry_id != null
+          && owned.config_entry_id !== identity.config_entry_ids[0]) return false;
+        return true;
+      });
+    };
     for (const rec of this._receivers) {
       const id = rec.entity_id;
       const statusEntity = this._config.receiver_status[id];
@@ -564,7 +595,7 @@ class BpsMapCard extends HTMLElement {
         // platform only reports API connectivity, so a proxy whose BLE stack
         // has wedged still reads "on"; this forces the distance heuristic.
         statuses.set(id, null);
-        heuristic.push({ id, suffix: `_distance_to_${id}` });
+        heuristic.push({ id, sources: distanceSources(id, identity) });
         continue;
       }
       // Bermuda's own scanner liveness: last advertisement heard within
@@ -587,34 +618,56 @@ class BpsMapCard extends HTMLElement {
       // unavailable" would report a dead proxy as online. Require the
       // connectivity device_class so an unrelated entity that merely shares
       // the binary_sensor.<id>_status slug does not hijack the status.
-      const autoStatus = states[`binary_sensor.${id}_status`];
-      if (autoStatus && autoStatus.attributes?.device_class === "connectivity") {
-        statuses.set(id, autoStatus.state == null || ["", "unknown", "unavailable"].includes(autoStatus.state) ? null : BpsMapCard.stateLooksOnline(autoStatus.state));
-        continue;
+      const aliases = new Set([id]);
+      if (identity?.liveness_name_unique !== false && (ownersByMac.get(identity?.scanner_mac)?.size || 0) === 1) {
+        for (const [alias, option] of this._receiverMatching || []) {
+          if (sameIdentity(identity, option)) {
+            aliases.add(alias);
+            if (option.entity_id) aliases.add(option.entity_id);
+          }
+        }
+        if (sameIdentity(identity, identity)) aliases.add(BpsMapCard.haSlugify(identity.name));
       }
-      // The receiver's HA device: online while any of its entities has a
-      // state other than unavailable.
-      const deviceOnline = this._deviceOnlineBySlug(id);
-      if (deviceOnline != null) {
-        statuses.set(id, deviceOnline);
+      let resolved = null;
+      for (const alias of aliases) {
+        const autoStatus = states[`binary_sensor.${alias}_status`];
+        if (autoStatus?.attributes?.device_class === "connectivity" && autoStatus.state != null
+          && !["", "unknown", "unavailable"].includes(autoStatus.state)) {
+          resolved = BpsMapCard.stateLooksOnline(autoStatus.state);
+          break;
+        }
+      }
+      // Unknown automatic connectivity carries no decision: try the proven
+      // receiver device and fresh distances. Explicit user selections above
+      // remain authoritative even when they are unknown or unavailable.
+      if (resolved == null) {
+        for (const alias of aliases) {
+          resolved = this._deviceOnlineBySlug(alias);
+          if (resolved != null) break;
+        }
+      }
+      if (resolved != null) {
+        statuses.set(id, resolved);
         continue;
       }
       statuses.set(id, null);
-      heuristic.push({ id, suffix: `_distance_to_${id}` });
+      heuristic.push({ id, sources: distanceSources(id, identity) });
     }
     if (heuristic.length > 0) {
       // A receiver is working when at least one tracker got a distance
       // reading through it within Bermuda's ~30 s distance timeout.
-      for (const entityId of Object.keys(states)) {
-        if (!entityId.startsWith("sensor.") || !entityId.includes("_distance_to_")) continue;
-        const owned = this._hass?.entities?.[entityId];
-        if (owned?.platform && owned.platform !== "bermuda") continue;
-        const st = states[entityId]?.state;
-        if (st == null || st === "unknown" || st === "unavailable") continue;
-        for (const { id, suffix } of heuristic) {
-          if (!statuses.get(id) && entityId.endsWith(suffix)) {
-            statuses.set(id, true);
-          }
+      const now = Date.now();
+      const maxAge = this._receiverReadingMaxAge ?? 30;
+      for (const {id, sources} of heuristic) {
+        for (const entityId of sources) {
+          const source = states[entityId];
+          const value = source?.state;
+          if (value == null || String(value).trim() === "" || !Number.isFinite(Number(value)) || Number(value) < 0) continue;
+          const stamp = source.last_updated || source.last_changed;
+          const observed = Date.parse(stamp);
+          if (!Number.isFinite(observed) || observed > now || maxAge > 0 && now - observed > maxAge * 1000) continue;
+          statuses.set(id, true);
+          break;
         }
       }
     }
@@ -732,6 +785,8 @@ class BpsMapCard extends HTMLElement {
       return;
     }
     const coords = JSON.parse(data.coordinates);
+    this._receiverReadingMaxAge = typeof coords.reading_max_age === "number" && Number.isFinite(coords.reading_max_age)
+      && coords.reading_max_age >= 0 ? coords.reading_max_age : 30;
     this._knownBeaconKeys = new Set(Array.isArray(data.entities) ? data.entities : []);
     this._receiverMatching = new Map((data.receiver_matching?.options || []).map(option => [option.entity_id, option]));
     this._receiverMacOwners = new Map(Object.entries(data.receiver_matching?.mac_owners || {}));

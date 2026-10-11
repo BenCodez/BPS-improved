@@ -119,6 +119,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const adjustSubZonesButton = document.createElement('button');
     let img = new Image();
     let tmpcords = null;
+    let receiverPlacementSession = 0;
+    let receiverPlacementSaving = false;
+    let placementKnownReceivers = new Set();
     let finalcords = {
         floor: [] // Array to manage multiple floors
       };
@@ -3163,6 +3166,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     //Reset all buttons
     function buttonreset(){
+        receiverPlacementSession++;
         cancelAdjust(); // starting any other tool drops an open adjust preview
         // Clear the value too (not just hide) so a distance typed then abandoned
         // doesn't survive into the next Set Scale session and get saved by accident.
@@ -3780,7 +3784,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             drawElements();
         }
     }
-    function saveReceiver() {
+    async function saveReceiver() {
+        if (receiverPlacementSaving || addDeviceButton.dataset.active !== 'true') return;
         if (!mapname.value) { bpsToast("Floor name must be set."); return; }
         SelMapName = mapname.value;
         receiverName = getPickedReceiverName();
@@ -3792,17 +3797,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             bpsToast("Select a receiver from the list (or pick Custom name… and type one).");
             return;
         }
-        const newReceiver = { entity_id: receiverName, cords: tmpcords };
-        const option = receiverMatching.options.find(o => o.entity_id === receiverName);
+        const newReceiver = { entity_id: receiverName, cords: {...tmpcords} };
         const floor = finalcords.floor.find(f => sameFloorName(f.name, SelMapName));
-        if ((floor?.receivers || []).some(rec => sameReceiverIdentity(rec, newReceiver, receiverMatching.options))) {
-            bpsToast("This scanner is already placed on this floor. Move or match its existing placement instead.");
-            return;
-        }
-        if (option?.scanner_mac && !option.identity_ambiguous) {
-            newReceiver.scanner_mac = option.scanner_mac;
-            if (option.config_entry_ids?.length === 1) newReceiver.scanner_config_entry_id = option.config_entry_ids[0];
-        }
         // Optional mount height (m). Empty = unknown: distances stay slant
         // ranges and calibration truth stays 2D, exactly as before.
         // badInput = unparsable content reading back as "": reject it rather
@@ -3820,16 +3816,58 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             newReceiver.height = h;
         }
-        // Committing: drop the placement click listener up front. On a duplicate
-        // name addDataToFloor itself toasts + resets the UI and returns false, so
-        // removing here (not only in the success branch) avoids stranding the
-        // listener while the tool already looks inactive.
-        removeListeners();
-        if (addDataToFloor(finalcords, SelMapName, "receivers", newReceiver)) {
-            buttonreset();
-            clearCanvas();
-            drawElements();
-        }
+        // A pending inventory request owns this exact placement draft. Cancel,
+        // restart, navigation, moving the marker or editing inputs invalidates it.
+        const session = receiverPlacementSession, draft = finalcords, cords = tmpcords;
+        const floorName = mapname.value, selectedFloor = SelMapName;
+        const inputSnapshot = () => JSON.stringify([receiverSelect?.value, receiverCustomInput?.value,
+            receiverSearchInput?.value, receiverHeightInput?.value, receiverHeightInput?.validity.badInput]);
+        const inputs = inputSnapshot(), revision = receiverMatching.revision;
+        receiverPlacementSaving = true;
+        try {
+            const fresh = await freshReceiverMatching();
+            if (session !== receiverPlacementSession || addDeviceButton.dataset.active !== 'true') return;
+            if (finalcords !== draft || tmpcords !== cords || mapname.value !== floorName || SelMapName !== selectedFloor
+                || finalcords.floor.find(f => sameFloorName(f.name, selectedFloor)) !== floor || inputSnapshot() !== inputs) {
+                bpsToast("The floor or placement changed. Review the receiver and save again.");
+                return;
+            }
+            fresh.options.forEach(option => placementKnownReceivers.add(option.entity_id));
+            receiverMatching = fresh;
+            receiverOptions = fresh.options.map(option => option.entity_id);
+            receiverInventoryLoaded = true;
+            if (fresh.revision !== revision) {
+                populateReceiverSelect(true);
+                bpsToast("Bermuda receiver inventory changed. Review the receiver choice and save again.");
+                return;
+            }
+            const option = fresh.options.find(o => o.entity_id === receiverName);
+            if (option?.identity_ambiguous || option?.selectable === false
+                || !option && (receiverSelect.value !== CUSTOM_RECEIVER_OPTION || placementKnownReceivers.has(receiverName))) {
+                bpsToast("Choose an available Bermuda receiver. Unknown names must use Custom name….");
+                return;
+            }
+            if ((floor?.receivers || []).some(rec => sameReceiverIdentity(rec, newReceiver, fresh.options))) {
+                bpsToast("This scanner is already placed on this floor. Move or match its existing placement instead.");
+                return;
+            }
+            if (option?.scanner_mac) {
+                newReceiver.scanner_mac = option.scanner_mac;
+                if (option.config_entry_ids?.length === 1) newReceiver.scanner_config_entry_id = option.config_entry_ids[0];
+            }
+            // Committing: drop the placement click listener up front. On a duplicate
+            // name addDataToFloor itself toasts + resets the UI and returns false, so
+            // removing here (not only in the success branch) avoids stranding the
+            // listener while the tool already looks inactive.
+            removeListeners();
+            if (addDataToFloor(finalcords, SelMapName, "receivers", newReceiver)) {
+                buttonreset();
+                clearCanvas();
+                drawElements();
+            }
+        } catch (error) {
+            if (session === receiverPlacementSession && addDeviceButton.dataset.active === 'true') bpsToast(error.message);
+        } finally { receiverPlacementSaving = false; }
     }
     function saveActiveTool() {
         if (drawAreaButton.dataset.active === 'true' || drawSubZoneButton.dataset.active === 'true') {
@@ -3837,7 +3875,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else if (SetScaleButton.dataset.active === 'true') {
             saveScale();
         } else if (addDeviceButton.dataset.active === 'true') {
-            saveReceiver();
+            return saveReceiver();
         }
     }
     if (saveToolBtn) saveToolBtn.addEventListener('click', saveActiveTool);
@@ -4294,7 +4332,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Render the receiver <option>s, filtered by the search query. Keeps the
     // placeholder and "Custom name…" entries, and preserves the current pick
     // when it still matches the filter.
-    function renderReceiverOptions(query = "") {
+    function renderReceiverOptions(query = "", preserveSelection = false) {
         if (!receiverSelect) return;
         const q = query.trim().toLowerCase();
         const prev = receiverSelect.value;
@@ -4317,6 +4355,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         custom.value = CUSTOM_RECEIVER_OPTION;
         custom.textContent = "Custom name…";
         receiverSelect.appendChild(custom);
+        // Keep a stale pick visible for review after a fresh inventory rejects
+        // Save, even when it became unavailable or a same-floor duplicate.
+        if (preserveSelection && prev && ![...receiverSelect.options].some(o => o.value === prev)) {
+            const stale = document.createElement('option');
+            stale.value = prev;
+            stale.textContent = receiverMatching.options.find(o => o.entity_id === prev)?.label || prev;
+            stale.disabled = true;
+            receiverSelect.appendChild(stale);
+        }
         if ([...receiverSelect.options].some(o => o.value === prev)) {
             receiverSelect.value = prev;
         } else {
@@ -4325,7 +4372,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    function populateReceiverSelect() {
+    function populateReceiverSelect(preserveInput = false) {
         // A scanner may be placed on other floors. Hide same-floor bindings.
         const placedHere = [];
         if (Array.isArray(finalcords.floor)) {
@@ -4335,6 +4382,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         availableReceiverNames = receiverOptions.filter(name => !placedHere.some(rec =>
             sameReceiverIdentity(rec, {entity_id: name}, receiverMatching.options)));
+        if (preserveInput) {
+            renderReceiverOptions(receiverSearchInput?.value || "", true);
+            return;
+        }
         if (receiverSearchInput) receiverSearchInput.value = "";
         renderReceiverOptions("");
         if (receiverCustomInput) {
@@ -4350,6 +4401,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         removeListeners();
         receiverName = "";
         buttonreset();
+        placementKnownReceivers = new Set(receiverMatching.options.map(option => option.entity_id));
 
         // A new placement session must not inherit coordinates or a
         // picked name from the previous one.

@@ -486,3 +486,110 @@ test('card loads all runtime owner evidence and excludes omitted scanners from n
         assert.equal(c._receiverStatuses.get('old_station'), null);
     }
 });
+
+function fallbackCard(saved = 'old_station') {
+    const c = card(); c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+    const mac = 'aa:bb:cc:11:22:33';
+    c._receivers = [{entity_id: saved, scanner_mac: mac, scanner_config_entry_id: 'owner-a'}];
+    c._receiverMatching = new Map(['old_station', 'current_station'].map(id => [id,
+        {entity_id: id, name: 'Current station', scanner_mac: mac, config_entry_ids: ['owner-a'],
+            liveness_name_unique: true, distance_sensors: [`sensor.tag_distance_to_${id}`], disabled_sensors: []}]));
+    c._hass.entities = {};
+    for (const id of ['old_station', 'current_station']) {
+        const eid = `sensor.tag_distance_to_${id}`;
+        c._hass.entities[eid] = {platform: 'bermuda', config_entry_id: 'owner-a'};
+        c._hass.states[eid] = {state: 'unavailable', last_updated: new Date(Date.now() - 1000).toISOString()};
+    }
+    return c;
+}
+
+test('automatic unknown connectivity falls through while explicit status remains authoritative', () => {
+    for (const unknown of ['unknown', 'unavailable']) for (const evidence of ['distance', 'device']) {
+        const c = fallbackCard();
+        c._hass.states['binary_sensor.old_station_status'] = {state: unknown, attributes: {device_class: 'connectivity'}};
+        if (evidence === 'distance') c._hass.states['sensor.tag_distance_to_old_station'].state = '4';
+        else {
+            c._hass.devices = {station: {id: 'station', name: 'Old station'}};
+            c._hass.entities['sensor.device_temperature'] = {device_id: 'station'};
+            c._hass.states['sensor.device_temperature'] = {state: '20'};
+        }
+        assert.equal(c._computeReceiverStatuses().get('old_station'), true, `${unknown} uses ${evidence}`);
+        c._hass.states['binary_sensor.old_station_status'].state = 'off';
+        assert.equal(c._computeReceiverStatuses().get('old_station'), false, 'automatic off wins over distance');
+        c._hass.states['binary_sensor.old_station_status'].state = unknown;
+        c._config.receiver_status.old_station = 'binary_sensor.old_station_status';
+        assert.equal(c._computeReceiverStatuses().get('old_station'), null, 'explicit unknown is authoritative');
+    }
+});
+
+test('both proven receiver aliases use connectivity, device and filtered distance fallback without dump ages', () => {
+    for (const saved of ['old_station', 'current_station']) for (const evidence of ['connectivity_on', 'connectivity_off', 'device', 'distance']) {
+        const c = fallbackCard(saved), other = saved === 'old_station' ? 'current_station' : 'old_station';
+        if (evidence.startsWith('connectivity')) {
+            c._hass.states[`binary_sensor.${other}_status`] = {state: evidence.endsWith('off') ? 'off' : 'on', attributes: {device_class: 'connectivity'}};
+            c._hass.states[`sensor.tag_distance_to_${other}`].state = '4';
+        } else if (evidence === 'device') {
+            c._hass.devices = {station: {id: 'station', name: other.replace('_', ' ')}};
+            c._hass.entities['sensor.device_temperature'] = {device_id: 'station'};
+            c._hass.states['sensor.device_temperature'] = {state: '20'};
+        } else c._hass.states[`sensor.tag_distance_to_${other}`].state = '4';
+        assert.equal(c._computeReceiverStatuses().get(saved), evidence !== 'connectivity_off', `${saved} uses ${evidence}`);
+    }
+});
+
+test('alias distance proof rejects raw disabled foreign wrong-owner and invalid or stale clocks', () => {
+    for (const invalid of ['raw', 'disabled', 'foreign', 'owner', 'stale', 'future', 'missing_clock', 'nan', 'negative']) {
+        const c = fallbackCard(), eid = 'sensor.tag_distance_to_current_station';
+        const source = c._hass.states[eid]; source.state = '4';
+        if (invalid === 'raw') {c._receiverMatching.get('current_station').distance_sensors = []; c._hass.entities[eid].unique_id = 'synthetic_range_raw';}
+        else if (invalid === 'disabled') c._receiverMatching.get('current_station').disabled_sensors = [eid];
+        else if (invalid === 'foreign') c._hass.entities[eid].platform = 'esphome';
+        else if (invalid === 'owner') c._hass.entities[eid].config_entry_id = 'owner-b';
+        else if (invalid === 'stale') source.last_updated = new Date(Date.now() - 90000).toISOString();
+        else if (invalid === 'future') source.last_updated = new Date(Date.now() + 90000).toISOString();
+        else if (invalid === 'missing_clock') delete source.last_updated;
+        else if (invalid === 'nan') source.state = 'NaN';
+        else if (invalid === 'negative') source.state = '-1';
+        assert.equal(c._computeReceiverStatuses().get('old_station'), null, invalid);
+    }
+});
+
+test('shared runtime names and all-owner evidence block alias connectivity and device borrowing', () => {
+    for (const shared of ['name', 'mac_owner']) {
+        const c = fallbackCard();
+        if (shared === 'name') for (const option of c._receiverMatching.values()) option.liveness_name_unique = false;
+        else c._receiverMacOwners = new Map([['aa:bb:cc:11:22:33', ['owner-a', 'owner-b']]]);
+        c._hass.states['binary_sensor.current_station_status'] = {state: 'on', attributes: {device_class: 'connectivity'}};
+        c._hass.devices = {station: {id: 'station', name: 'Current station'}};
+        c._hass.entities['sensor.device_temperature'] = {device_id: 'station'};
+        c._hass.states['sensor.device_temperature'] = {state: '20'};
+        assert.equal(c._computeReceiverStatuses().get('old_station'), null, shared);
+    }
+});
+
+test('saved alias omitted from registry resolves current sources after read_text inventory load', async () => {
+    const c = fallbackCard(), current = c._receiverMatching.get('current_station');
+    const matching = {options: [current], mac_owners: {'aa:bb:cc:11:22:33': ['owner-a']}};
+    c._apiFetch = async () => ({ok: true, json: async () => ({receiver_matching: matching,
+        scanner_diagnostics: {alias_receivers: [{entity_id: 'old_station', scanner_mac: current.scanner_mac, config_entry_id: 'owner-a'}]},
+        coordinates: JSON.stringify({floor: [{name: 'Property', scale: 20, receivers: [{...c._receivers[0], cords: {x: 1, y: 2}}], zones: []}]})})});
+    c._hass.states['sensor.tag_distance_to_current_station'].state = '4';
+    delete c._hass.states['sensor.tag_distance_to_old_station']; delete c._hass.entities['sensor.tag_distance_to_old_station'];
+    c._refreshBermudaScanners = async () => {};
+    c._resolveMapUrl = async () => 'synthetic.png'; c._loadFloorImage = async () => {c._baseImage = {};};
+    await c._loadFloorResources(1);
+    assert.equal(c._receiverStatuses.get('old_station'), true);
+    c._receivers[0].scanner_config_entry_id = 'missing-owner';
+    assert.equal(c._computeReceiverStatuses().get('old_station'), null, 'unavailable saved identity cannot borrow fallback');
+});
+
+
+test('inventory-proven filtered distance survives partial or absent frontend registry metadata', () => {
+    for (const metadata of ['partial', 'absent']) {
+        const c = fallbackCard(), eid = 'sensor.tag_distance_to_current_station';
+        c._hass.states[eid].state = '4';
+        if (metadata === 'partial') c._hass.entities[eid] = {device_id: 'synthetic-station'};
+        else delete c._hass.entities[eid];
+        assert.equal(c._computeReceiverStatuses().get('old_station'), true, metadata);
+    }
+});

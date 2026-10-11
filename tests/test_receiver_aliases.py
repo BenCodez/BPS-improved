@@ -353,3 +353,87 @@ def test_liveness_never_borrows_evidence_from_a_conflicting_saved_scanner_identi
     asyncio.run(bps.update_receiver_liveness(hass))
     assert "old_station" not in hass.data["bps"]["rl_unknown"]
     assert ("old_station" in hass.data["bps"]["rl_offline"]) is (last_seen == 1)
+
+
+@pytest.mark.parametrize("saved_name", ["old_station", "current_station"])
+@pytest.mark.parametrize("evidence", ["connectivity_on", "connectivity_off", "device", "distance"])
+def test_liveness_without_dump_resolves_both_proven_aliases(hass, monkeypatch, saved_name, evidence):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    rec = data["floor"][0]["receivers"][0]; rec["entity_id"] = saved_name
+    hass.data["bps"]["layout"] = data
+    other = "current_station" if saved_name == "old_station" else "old_station"
+    if evidence != "distance":
+        states[old].state = states[new].state = "unavailable"
+    if evidence.startswith("connectivity"):
+        states[f"binary_sensor.{other}_status"] = NS(state="off" if evidence.endswith("off") else "on",
+            attributes={"device_class": "connectivity"})
+        states[new if other == "current_station" else old].state = "4"
+    elif evidence == "device":
+        monkeypatch.setattr(bps.dr, "async_get", lambda _: NS(devices={"station": NS(
+            id="station", name=other, name_by_user=None)}))
+        add("sensor.synthetic_device", "ready", platform="esphome")
+        entries["sensor.synthetic_device"].device_id = "station"
+    else:
+        states[old if saved_name == "current_station" else new].state = "4"
+        states[new if saved_name == "current_station" else old].state = "unavailable"
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert saved_name not in hass.data["bps"]["rl_unknown"]
+    assert (saved_name in hass.data["bps"]["rl_offline"]) is (evidence == "connectivity_off")
+
+
+@pytest.mark.parametrize("auto_state", ["unknown", "unavailable"])
+def test_unknown_automatic_connectivity_falls_through_to_fresh_alias_distance(hass, monkeypatch, auto_state):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    states["binary_sensor.old_station_status"] = NS(state=auto_state, attributes={"device_class": "connectivity"})
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "old_station" not in hass.data["bps"]["rl_unknown"]
+    states["binary_sensor.old_station_status"].state = "off"
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "old_station" in hass.data["bps"]["rl_offline"]
+
+
+@pytest.mark.parametrize("invalid", ["raw", "disabled", "foreign", "stale", "future", "missing_clock", "nan", "negative", "owner"])
+def test_liveness_distance_requires_enabled_owned_fresh_filtered_alias(hass, monkeypatch, invalid):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    if invalid == "raw": entries[new].unique_id += "_raw"
+    elif invalid == "disabled": entries[new].disabled_by = "user"
+    elif invalid == "foreign": entries[new].platform = "esphome"
+    elif invalid == "stale": states[new].last_updated = timestamp(900)
+    elif invalid == "future": states[new].last_updated = timestamp(1005)
+    elif invalid == "missing_clock": del states[new].last_updated
+    elif invalid == "nan": states[new].state = "NaN"
+    elif invalid == "negative": states[new].state = "-1"
+    elif invalid == "owner": entries[new].config_entry_id = "another-owner"
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "old_station" in hass.data["bps"]["rl_unknown"]
+    assert "old_station" not in hass.data["bps"]["rl_offline"]
+
+
+def test_saved_alias_without_old_registry_source_uses_current_fallback(hass, monkeypatch):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    del entries[old]; del states[old]
+    rec = data["floor"][0]["receivers"][0]; rec.update(scanner_mac=MAC, scanner_config_entry_id="entry")
+    hass.data["bps"]["layout"] = data
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "old_station" not in hass.data["bps"]["rl_unknown"]
+    rec["scanner_config_entry_id"] = "missing-owner"
+    states["binary_sensor.current_station_status"] = NS(state="on", attributes={"device_class": "connectivity"})
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "old_station" in hass.data["bps"]["rl_unknown"]
+
+
+@pytest.mark.parametrize("shared", ["name", "mac_owner"])
+def test_liveness_shared_runtime_identity_does_not_borrow_alias_connectivity_or_device(hass, monkeypatch, shared):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    states[old].state = states[new].state = "unavailable"
+    other_mac = MAC if shared == "mac_owner" else "dd:ee:ff:44:55:66"
+    other_name = "Other station" if shared == "mac_owner" else "Current station"
+    other_coordinator = NS(devices={"other": NS(_is_scanner=True, address=other_mac, name=other_name)})
+    configs = hass.config_entries.async_entries("bermuda") + [NS(entry_id="other-owner", runtime_data=NS(coordinator=other_coordinator))]
+    hass.config_entries.async_entries = lambda _: configs
+    states["binary_sensor.current_station_status"] = NS(state="on", attributes={"device_class": "connectivity"})
+    monkeypatch.setattr(bps.dr, "async_get", lambda _: NS(devices={"station": NS(
+        id="station", name="Current station", name_by_user=None)}))
+    add("sensor.synthetic_device", "ready", platform="esphome"); entries["sensor.synthetic_device"].device_id = "station"
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "old_station" in hass.data["bps"]["rl_unknown"]

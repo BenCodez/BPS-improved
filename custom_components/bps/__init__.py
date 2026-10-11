@@ -1160,13 +1160,16 @@ async def update_receiver_liveness(hass):
     ages = dom.get("rl_ages", {})
     elapsed = max(0.0, time.time() - dom["rl_anchor_wall"]) if dom.get("rl_anchor_wall") else 0.0
 
-    receivers, with_reading = _scanner_slugs_and_readings(hass)
+    receivers, _ = _scanner_slugs_and_readings(hass)
     matching = {row["entity_id"]: row for row in receiver_inventory(hass)["options"]}
     receivers.update(matching)
     sources = ReceiverSources(hass)
     identity_conflicts = set()
-    for floor in (get_bps_data(hass) or {}).get("floor", []):
+    bindings = {slug: sources.binding({"entity_id": slug}) for slug in matching}
+    layout = get_bps_data(hass) or {}
+    for floor in layout.get("floor", []):
         for rec, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
+            bindings[rec["entity_id"]] = binding
             if binding["status"] in ("scanner_identity_conflict", "scanner_identity_unavailable", "ambiguous_scanner_identity"):
                 identity_conflicts.add(rec["entity_id"])
                 receivers.add(rec["entity_id"])
@@ -1175,8 +1178,6 @@ async def update_receiver_liveness(hass):
                 if alias:
                     matching[rec["entity_id"]] = alias
                     receivers.add(rec["entity_id"])
-                    if any(name in with_reading for name in binding["aliases"]):
-                        with_reading.add(rec["entity_id"])
     slug_to_device, device_entities = _build_device_availability(hass)
 
     def device_online(slug):
@@ -1203,6 +1204,47 @@ async def update_receiver_liveness(hass):
                 return True
         return False if saw_state else None
 
+    def evidence_slugs(slug):
+        # Connectivity/device names carry no owner identity themselves. Expand
+        # only a proven owner/MAC whose runtime name and MAC owner are unique.
+        binding = bindings.get(slug, {})
+        option = matching.get(slug, {})
+        key = binding.get("identity")
+        names = [slug]
+        if key and option.get("liveness_name_unique", True) and len(sources.owners_by_mac.get(key[1], ())) == 1:
+            names.extend(binding.get("aliases", []))
+            if option.get("name"):
+                names.append(slugify(option["name"]))
+        return list(dict.fromkeys(names))
+
+    def live_distance(slug):
+        binding = bindings.get(slug, {})
+        key = binding.get("identity")
+        options = [option for option in sources.options.values()
+                   if sources.option_identity(option) == key] if key else [sources.options.get(slug, {})]
+        candidates = {eid for option in options for eid in option.get("distance_sensors", [])
+                      if eid not in option.get("disabled_sensors", [])}
+        now, max_age = time.time(), _reading_max_age(layout)
+        for eid in candidates:
+            entry = sources.registry.entities.get(eid) if sources.registry is not None else None
+            if entry is None or entry.platform != "bermuda" or getattr(entry, "disabled_by", None) is not None:
+                continue
+            if key and getattr(entry, "config_entry_id", None) != key[0]:
+                continue
+            state = hass.states.get(eid)
+            if state is None:
+                continue
+            try:
+                value = float(state.state)
+                stamp = getattr(state, "last_updated", None) or getattr(state, "last_changed", None)
+                observed = stamp.timestamp()
+                if math.isfinite(value) and value >= 0 and math.isfinite(observed) and observed <= now \
+                        and (max_age == 0 or now - observed <= max_age):
+                    return True
+            except (TypeError, ValueError, AttributeError, OSError, OverflowError):
+                continue
+        return False
+
     def is_online(slug):
         if slug in identity_conflicts or matching.get(slug, {}).get("identity_ambiguous"):
             return None
@@ -1213,14 +1255,17 @@ async def update_receiver_liveness(hass):
             age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS
-        st = hass.states.get(f"binary_sensor.{slug}_status")
-        if st and st.attributes.get("device_class") == "connectivity" and st.state not in (None, "", "unknown", "unavailable"):
-            return _state_looks_online(st.state)
-        resolved = device_online(slug)
-        if resolved is not None:
-            return resolved
-        # Distance readings prove online; absence of BLE contact proves nothing.
-        return True if slug in with_reading else None
+        aliases = evidence_slugs(slug)
+        for alias in aliases:
+            st = hass.states.get(f"binary_sensor.{alias}_status")
+            if st and st.attributes.get("device_class") == "connectivity" and st.state not in (None, "", "unknown", "unavailable"):
+                return _state_looks_online(st.state)
+        for alias in aliases:
+            resolved = device_online(alias)
+            if resolved is not None:
+                return resolved
+        # Fresh filtered distances prove online; absence of contact proves nothing.
+        return True if live_distance(slug) else None
 
     resolved = {s: is_online(s) for s in receivers}
     dom["rl_offline"] = sorted(s for s, status in resolved.items() if status is False)
