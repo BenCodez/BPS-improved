@@ -1,5 +1,6 @@
 """Read-only, bounded Bermuda telemetry. Never exports arbitrary entry data."""
 from collections.abc import Mapping
+from enum import Enum
 import math
 import re
 import sys
@@ -24,6 +25,8 @@ MAC = re.compile(r"^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
 
 
 def scalar(value):
+    if isinstance(value, Enum):
+        value = value.value
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):

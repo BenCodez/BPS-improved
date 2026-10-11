@@ -1,11 +1,22 @@
 """Real Bermuda schema, registry ownership, secret boundaries and fallback."""
 import datetime
+from enum import Enum
 import json
 import sys
 from types import SimpleNamespace as NS
 
 import bps
 from bps import bermuda_diagnostics as module
+
+
+class ConfigEntryState(Enum):
+    LOADED = "loaded"
+    SETUP_RETRY = "setup_retry"
+    SETUP_ERROR = "setup_error"
+
+
+class RegistryEntryDisabler(Enum):
+    INTEGRATION = "integration"
 
 
 def fixture(hass, monkeypatch):
@@ -19,7 +30,7 @@ def fixture(hass, monkeypatch):
             states[eid] = NS(entity_id=eid, state=value, attributes={"unit_of_measurement": "m", "secret": secret},
                             last_updated=datetime.datetime.fromtimestamp(100, datetime.timezone.utc))
     add("sensor.tag_distance_to_proxy", secret + "_aa:bb:cc:dd:ee:ff_range")
-    add("sensor.renamed_raw_range", secret + "_aa:bb:cc:dd:ee:ff_range_raw", value=None, disabled="integration")
+    add("sensor.renamed_raw_range", secret + "_aa:bb:cc:dd:ee:ff_range_raw", value=None, disabled=RegistryEntryDisabler.INTEGRATION)
     add("number.renamed_calibration", secret + "_ref_power", value="-70")
     add("sensor.tag_rssi", secret + "_rssi", value="-80")
     add("sensor.unrelated_distance_to_proxy", "fake_range", platform="esphome")
@@ -37,7 +48,7 @@ def fixture(hass, monkeypatch):
                "update_interval": 3, "rssi_offsets": {"aa:bb:cc:dd:ee:ff": -3, secret: 9},
                "configured_devices": [secret], "token": secret}
     coordinator = NS(options=options, devices={secret: device}, sensor_interval=3, last_update_success=True)
-    entry = NS(entry_id="bermuda-entry", title="Bermuda", state="loaded", options=options,
+    entry = NS(entry_id="bermuda-entry", title="Bermuda", state=ConfigEntryState.LOADED, options=options,
                data={"token": secret}, runtime_data=NS(coordinator=coordinator))
     hass.config_entries = NS(async_entries=lambda domain: [entry] if domain == "bermuda" else [])
     monkeypatch.setattr(module.time, "monotonic", lambda: 500)
@@ -49,6 +60,7 @@ def test_settings_entities_and_per_receiver_rssi_are_detached_and_secret_free(ha
     report = module.snapshot(hass, 110)
     assert report["available"]
     settings = report["entries"][0]
+    assert settings["state"] == "loaded"
     assert settings["configured_settings"]["ref_power"] == -60
     assert settings["effective_settings"]["attenuation"] == 2.1
     assert settings["sensor_update_interval_s"] == 3
@@ -78,6 +90,19 @@ def test_absent_runtime_keeps_config_and_states_and_reports_missing_rssi(hass, m
     assert report["warnings"]
     hass.data["bermuda"] = {entry.entry_id: {"coordinator": coordinator}}
     assert module.snapshot(hass, 110)["entries"][0]["runtime_available"]
+
+
+def test_config_entry_lifecycle_states_survive_serialization(hass, monkeypatch):
+    entry, *_ = fixture(hass, monkeypatch)
+    entry.runtime_data = None
+    for state in ConfigEntryState:
+        entry.state = state
+        report = module.snapshot(hass, 110)
+        assert report["entries"][0]["state"] == state.value
+        assert not report["entries"][0]["runtime_available"]
+        json.dumps(report, allow_nan=False)
+    entry.state = "loaded"
+    assert module.snapshot(hass, 110)["entries"][0]["state"] == "loaded"
 
 
 def test_no_bermuda_and_collection_limits_are_explicit(hass, monkeypatch):
