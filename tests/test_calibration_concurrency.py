@@ -46,6 +46,29 @@ async def prepare(hass):
     return layout, cal
 
 
+@pytest.mark.parametrize("saved_error", [None, "Previous diagnostic"])
+@pytest.mark.parametrize("precondition", ["missing_recording", "missing_solution"])
+def test_tracking_validation_http_error_reports_current_failure(hass, saved_error, precondition):
+    async def scenario():
+        layout, cal = await prepare(hass)
+        cal["error"] = saved_error
+        if precondition == "missing_solution":
+            hass.data["bps"]["_diagnostics"] = SimpleNamespace(frames=[1])
+            cal["results"] = {}
+            expected = "Solve calibration for the selected floor first"
+        else:
+            expected = "Record Diagnostics at two measured stationary locations first"
+        before = copy.deepcopy((layout, C._status_payload(cal)))
+        api = C.BPSCalibrationAPI(bps._calibration_tracking_check)
+        response = await api.post(request(hass, "validate_tracking"))
+        assert response.status == 400
+        assert response.json_body["error"] == expected
+        assert response.json_body == {**before[1], "error": expected}
+        assert (layout, C._status_payload(cal)) == before
+
+    run(scenario())
+
+
 def test_concurrent_manual_api_solve_is_rejected_without_queueing(hass):
     async def scenario():
         _layout, cal = await prepare(hass)

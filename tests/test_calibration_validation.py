@@ -61,6 +61,37 @@ def test_bad_corrections_make_tracking_worse_and_one_location_is_inconclusive():
     assert compare(data, floor)['verdict'] == 'inconclusive'
 
 
+@pytest.mark.parametrize('setting,value', [
+    ('tracker_ref_offsets', {'tag': 9.0309}), ('tracker_height', 2.),
+    ('tracker_heights', {'tag': 2.}), ('reading_max_age', 10.),
+    ('position_timeout', 10.), ('tracker_groups', [{'id': 'new', 'beacons': ['tag']}]),
+    ('outdoor_tracking', {'enabled': False}),
+])
+def test_auto_replay_drops_recordings_with_changed_tracking_settings(setting, value):
+    data, floor = recording()
+    current = copy.deepcopy(data['contexts']['c']['layout'])
+    current[setting] = value
+    result = compare_tracking(data, 'Yard', FACTORS, floor, bps.trilaterate,
+                              {s: 1. for s in FACTORS}, current)
+    assert result['verdict'] == 'inconclusive'
+    assert result['eligible_samples'] == 0
+    assert result['baseline']['samples'] == 0
+
+
+def test_auto_replay_baseline_uses_live_corrections_and_scanner_relink_invalidates_recording():
+    data, floor = recording()
+    result = compare_tracking(data, 'Yard', FACTORS, floor, bps.trilaterate,
+                              FACTORS, data['contexts']['c']['layout'])
+    assert result['verdict'] == 'inconclusive'
+    assert result['baseline']['median_m'] < .01
+    assert result['candidate']['median_m'] == result['baseline']['median_m']
+    current = copy.deepcopy(floor)
+    current['receivers'][0]['scanner_uid'] = 'replacement-hardware'
+    result = compare_tracking(data, 'Yard', FACTORS, current, bps.trilaterate,
+                              FACTORS, data['contexts']['c']['layout'])
+    assert result['eligible_samples'] == 0
+
+
 def test_cached_readings_do_not_inflate_samples_and_geometry_changes_excluded():
     data, floor = recording()
     data['frames'].extend(copy.deepcopy(data['frames'][-1:]) * 20)

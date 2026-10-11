@@ -43,6 +43,8 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.util import slugify
 from scipy.optimize import least_squares
 
+from .calibration_auto import assess_update, WINDOW_S as AUTO_HISTORY_WINDOW
+
 _LOGGER = logging.getLogger(__name__)
 
 # Layout + calibration state now live in HA's Store (see storage.py). The
@@ -65,7 +67,6 @@ MAX_CONSECUTIVE_FAILURES = 6
 AUTO_SAMPLE_INTERVAL = 30  # seconds between dumps in continuous mode
 AUTO_SOLVE_INTERVAL = 900  # seconds between re-solves in continuous mode
 AUTO_MIN_WINDOW = 300  # seconds of data before the first auto solve
-APPLY_EPSILON = 0.01  # relative correction change worth persisting
 DUMP_DEVICES_TIMEOUT_S = 10  # cap on a single bermuda.dump_devices call
 SAMPLES_MAXLEN = 720  # rolling window per pair (6 h at the auto interval)
 STATE_SAMPLES_PER_PAIR = 200  # samples persisted per pair (enough for a solve)
@@ -222,6 +223,7 @@ def get_calibration_state(hass) -> dict:
             "last_solved_at": None,
             "error": None,
             "task": None,
+            "auto_status": {},  # floor -> last apply/skip reason
         },
     )
 
@@ -351,6 +353,7 @@ def _ingest_dump(cal: dict, devices: dict) -> None:
     """Extract fresh probe-to-probe raw distances from a dump_devices payload."""
     if not isinstance(devices, dict):
         return
+    _refresh_auto_history(cal)
 
     # Scanner MAC -> receiver slug, restricted to receivers on this floor.
     scanner_slug_by_mac = _match_scanners(cal, devices)
@@ -363,9 +366,21 @@ def _ingest_dump(cal: dict, devices: dict) -> None:
             continue
         for advert in adverts.values():
             stamp = advert.get("stamp") if isinstance(advert, dict) else None
-            if isinstance(stamp, (int, float)) and stamp > newest:
+            if isinstance(stamp, (int, float)) and math.isfinite(stamp) and stamp > newest:
                 newest = stamp
 
+    # A Bermuda restart can reset its monotonic advert stamps. Discard the
+    # independent history before accepting observations from the new clock.
+    previous_clock = cal.get("_advert_clock", 0.)
+    if newest and newest < previous_clock:
+        cal.pop("_advert_stamps", None)
+        cal.pop("_auto_samples", None)
+    if newest:
+        cal["_advert_clock"] = newest
+    stamps = cal.setdefault("_advert_stamps", {})
+    history = cal.setdefault("_auto_samples", {})
+    now = time.time()
+    observations = {}
     # The beacon advertises from the scanner's own MAC, so the transmitter's
     # measurements live on the scanner devices themselves.
     for dev in devices.values():
@@ -384,14 +399,40 @@ def _ingest_dump(cal: dict, devices: dict) -> None:
             if rx_slug is None or rx_slug == tx_slug:
                 continue
             stamp = advert.get("stamp")
-            if not isinstance(stamp, (int, float)) or newest - stamp > STALE_ADVERT_SECS:
+            if (not isinstance(stamp, (int, float)) or not math.isfinite(stamp)
+                    or newest - stamp > STALE_ADVERT_SECS):
                 continue
             distance = advert.get("rssi_distance_raw")
-            if not isinstance(distance, (int, float)) or distance <= 0:
+            if not isinstance(distance, (int, float)) or not math.isfinite(distance) or distance <= 0:
                 continue
-            cal["samples"].setdefault(f"{tx_slug}|{rx_slug}", deque(maxlen=SAMPLES_MAXLEN)).append(
-                float(distance)
-            )
+            key = f"{tx_slug}|{rx_slug}"
+            if stamp > observations.get(key, (-math.inf, 0))[0]:
+                observations[key] = (stamp, float(distance))
+    for key, (stamp, distance) in observations.items():
+        if stamp <= stamps.get(key, -math.inf):
+            continue  # polling the same cached advert is not new evidence
+        stamps[key] = stamp
+        cal["samples"].setdefault(key, deque(maxlen=SAMPLES_MAXLEN)).append(distance)
+        if cal.get("mode") == "auto":
+            rows = history.setdefault(key, deque(maxlen=SAMPLES_MAXLEN))
+            rows.append((now, distance))
+            while rows and rows[0][0] < now - AUTO_HISTORY_WINDOW:
+                rows.popleft()
+
+
+def _refresh_auto_history(cal):
+    """Receiver geometry/identity changes invalidate old reference samples."""
+    receivers = cal.get("receivers", {})
+    previous = cal.get("_auto_geometry")
+    if previous == receivers:
+        return
+    if previous is not None:
+        unchanged = {s for s in receivers if receivers[s] == previous.get(s)}
+        cal["samples"] = {k: v for k, v in cal["samples"].items()
+                          if all(s in unchanged for s in k.split("|", 1))}
+    cal["_auto_geometry"] = copy.deepcopy(receivers)
+    cal["_auto_samples"] = {}
+    cal["_advert_stamps"] = {}
 
 
 def _true_distance_m(cal: dict, slug_a: str, slug_b: str):
@@ -729,11 +770,15 @@ async def _auto_solve_and_apply(hass, cal: dict) -> None:
         _ingest_dump(cal, await _dump_devices(hass))
     except Exception as e:
         _LOGGER.debug("Pre-solve dump failed; missing-receiver buckets may lag one cycle: %s", e)
+    # Export outside the layout lock. Replay is optional: measured recordings
+    # add a veto against actual beacon-position regressions, not a prerequisite.
+    recording = hass.data.get(DOMAIN, {}).get("_diagnostics")
+    tracking_recording = await recording.export() if recording and recording.frames else None
     async with BPS_FILE_LOCK:
-        await _auto_solve_and_apply_locked(hass, cal)
+        await _auto_solve_and_apply_locked(hass, cal, tracking_recording)
 
 
-async def _auto_solve_and_apply_locked(hass, cal: dict) -> None:
+async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None) -> None:
     # Re-read inside the lock so a concurrent writer is not clobbered; the
     # wrapper's pre-lock read was only to refresh the matching state.
     coords = await _read_coords(hass)
@@ -742,30 +787,62 @@ async def _auto_solve_and_apply_locked(hass, cal: dict) -> None:
     # Floors and receivers may have been edited since the last cycle.
     cal["receivers"] = _build_receiver_map(coords)
     cal["all_placed_slugs"] = _all_placed_slugs(coords)
+    _refresh_auto_history(cal)
 
     changed = False
+    applied = {}
+    accepted = {}
+    statuses = cal.setdefault("auto_status", {})
+    current_floors = {f.get("name") for f in coords.get("floor", [])}
+    for name in list(statuses):
+        if name not in current_floors:
+            del statuses[name]
     for floor in coords.get("floor", []):
         floor_name = floor.get("name")
         on_floor = [s for s, r in cal["receivers"].items() if _normalize(r["floor"]) == _normalize(floor_name)]
-        if len(on_floor) < 3:
+        if len(on_floor) < 4:
+            statuses[floor_name] = {"state": "skipped", "reason": "Place at least four connected receivers for automatic updates"}
             continue
-        try:
-            result = await async_solve(hass, cal, floor_name)
-        except ValueError:
-            continue  # not enough pairs on this floor yet
-        cal["results"][floor_name] = result
-        cal["last_solved_at"] = result["solved_at"]
-
-        previous = cal["applied"].get(floor_name, {})
-        deltas = [
-            abs(result["receivers"][slug] / previous.get(slug, 1.0) - 1.0)
-            for slug in result["receivers"]
-        ]
-        if previous and deltas and max(deltas) < APPLY_EPSILON:
-            continue  # nothing moved enough to rewrite the file
-
+        snapshot = {"receivers": {s: copy.deepcopy(cal["receivers"][s]) for s in on_floor},
+                    "matched_placed": dict(cal.get("matched_placed") or {})}
+        history = {k: list(v) for k, v in cal.get("_auto_samples", {}).items()
+                   if all(s in snapshot["receivers"] for s in k.split("|", 1))}
+        # The live layout is authoritative, including manual applies/resets.
+        # Persisted cal['applied'] is just historical metadata.
+        current = {str(r.get("entity_id")): r.get("correction", 1.)
+                   for r in floor.get("receivers", []) if str(r.get("entity_id")) in on_floor}
+        result, updates, decision = await hass.async_add_executor_job(
+            assess_update, snapshot, history, current, floor_name, time.time(), solve, _true_distance_m)
+        if not updates:
+            statuses[floor_name] = decision
+        if result is not None:
+            cal["results"][floor_name] = result
+            cal["last_solved_at"] = result["solved_at"]
+        if not updates:
+            continue
+        if tracking_recording is not None:
+            # Deferred import: __init__ imports this module before defining its
+            # live solver, so it cannot be imported at module initialization.
+            from . import trilaterate
+            from .calibration_validation import compare_tracking_export
+            try:
+                report = await hass.async_add_executor_job(compare_tracking_export,
+                    tracking_recording, floor_name, {**current, **updates},
+                    copy.deepcopy(floor), trilaterate, current, copy.deepcopy(coords))
+            except ValueError as error:
+                decision.update(state="skipped", updated_receivers=0,
+                                reason=f"Tracking validation could not run: {error}")
+                statuses[floor_name] = decision
+                continue
+            decision["tracking_validation"] = {k: report[k] for k in
+                ("verdict", "baseline", "candidate", "locations", "candidate_failures")}
+            if report["verdict"] == "worse":
+                decision.update(state="skipped", updated_receivers=0,
+                                reason="Measured beacon tracking would worsen; keeping current corrections")
+                statuses[floor_name] = decision
+                continue
         for receiver in floor.get("receivers", []):
-            correction = result["receivers"].get(str(receiver.get("entity_id")))
+            correction = updates.get(str(receiver.get("entity_id")))
             if correction is not None:
                 receiver["correction"] = correction
         floor["calibration"] = {
@@ -774,12 +851,21 @@ async def _auto_solve_and_apply_locked(hass, cal: dict) -> None:
             "pairs_used": result["pairs_used"],
             "error_factor_before": result["error_factor_before"],
             "error_factor_after": result["error_factor_after"],
+            "auto_decision": decision,
         }
-        cal["applied"][floor_name] = dict(result["receivers"])
+        applied[floor_name] = {**current, **updates}
+        accepted[floor_name] = decision
         changed = True
 
     if changed:
-        await save_bps_data(hass, coords)
+        try:
+            await save_bps_data(hass, coords)
+        except BaseException:
+            for name in applied:
+                statuses[name] = {"state": "skipped", "reason": "Update was not saved; current corrections retained"}
+            raise
+        cal["applied"].update(applied)
+        statuses.update(accepted)
         _LOGGER.info("Auto-calibration updated receiver corrections")
 
 
@@ -857,8 +943,8 @@ async def set_auto_calibration(hass, enabled: bool) -> None:
 
     await _stop_task(cal)
     if enabled:
-        # Deliberately keeps cal["samples"]: a restored or still-warm window
-        # means the first solve after enabling has history to work with.
+        # Keep raw samples/results for the existing matrix. Automatic updates
+        # nevertheless require fresh independent evidence from this session.
         cal.update(
             {
                 "state": "sampling",
@@ -873,6 +959,12 @@ async def set_auto_calibration(hass, enabled: bool) -> None:
                 "error": None,
             }
         )
+        # Persisted raw windows keep the matrix warm, but independent evidence
+        # must be observed afresh after restart or a new automatic session.
+        cal["_auto_samples"] = {}
+        cal["_auto_geometry"] = copy.deepcopy(cal["receivers"])
+        cal["_advert_stamps"] = {}
+        cal["auto_status"] = {}
         cal["task"] = hass.async_create_task(_auto_loop(hass, cal))
     else:
         cal["state"] = "idle"
@@ -904,6 +996,7 @@ def refresh_receivers_from_coords(hass, coordinates_json) -> None:
             # error instead of a coherent (if now moot) report.
             return
         cal["receivers"] = new_map
+        _refresh_auto_history(cal)
         cal["all_placed_slugs"] = _all_placed_slugs(coords)
     except Exception as e:
         # A save must never fail because of calibration bookkeeping.
@@ -1003,6 +1096,7 @@ def _status_payload(cal: dict) -> dict:
         "last_solved_at": cal["last_solved_at"],
         "pair_counts": pair_counts,
         "receiver_count": len(cal["receivers"]),
+        "auto_status": cal.get("auto_status", {}),
     }
     if cal["mode"] == "manual" and cal["state"] == "sampling" and cal["ends_at"]:
         payload["seconds_left"] = max(0, int(cal["ends_at"] - time.time()))
@@ -1120,6 +1214,6 @@ class BPSCalibrationAPI(HomeAssistantView):
             else:
                 return web.json_response({"error": f"Unknown action {action!r}"}, status=400)
         except ValueError as e:
-            return web.json_response({"error": str(e), **_status_payload(cal)}, status=400)
+            return web.json_response({**_status_payload(cal), "error": str(e)}, status=400)
 
         return web.json_response(_status_payload(cal))

@@ -702,7 +702,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         circles: sameFloor ? result.radii : null,
                         offFloor: !sameFloor,
                         floor: result.floor,
-                        outdoor: result.outdoor,
+                        ...outdoor.stabilizeUncertainty(result, lastTracks.get(entKey)),
                         group: result.group,
                         name: result.name,
                         beacon_positions: result.beacon_positions,
@@ -6288,6 +6288,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const calibManualControls = document.getElementById('calibManualControls');
     let calibTimer = null;
     let calibLastResults = {};
+    let calibLastStatus = null;
 
     // Calibration-tab callers key off the Floor-name box (mapname.value); the
     // map overlay passes SelMapName instead, so mid-rename typing can't detach
@@ -6329,6 +6330,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 ...Object.keys(result.receivers || {}),
                 ...(result.missing_unmatched || []),
                 ...(result.missing_no_data || []),
+                ...(result.auto_excluded_receivers || []),
             ]);
             placedSince = [...placedNow].filter(s => !inReport.has(s)).sort();
         }
@@ -6340,7 +6342,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const missingCount = miss.missUnmatched.length + miss.missNoData.length;
         calibStatus.textContent =
             `Floor ${result.floor}: ${result.pairs_used} pairs (${result.bidirectional_pairs} bidirectional), ` +
-            `typical error ×${result.error_factor_before} → ×${result.error_factor_after} predicted after correction.` +
+            `receiver/transmitter model error ×${result.error_factor_before} → ×${result.error_factor_after} (not tracking accuracy).` +
             (missingCount ? ` ${missingCount} placed receiver${missingCount > 1 ? "s" : ""} missing — see below.` : "");
 
         const slugs = Object.keys(result.receivers).sort();
@@ -6374,6 +6376,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         html += '</table>';
         if (lowConfidence.length) {
             html += `<p class="text-sm text-gray-500" style="margin-top:6px">⚠ Low confidence (aggressive correction or few pairs): ${escHtml(lowConfidence.join(', '))} — verify those receivers before applying.</p>`;
+        }
+        const autoExcluded = (result.auto_excluded_receivers || []).filter(s =>
+            (finalcords.floor || []).some(f => sameFloorName(f.name, result.floor)
+                && (f.receivers || []).some(r => r.entity_id === s)));
+        if (autoExcluded.length) {
+            html += `<p class="text-sm text-gray-500" style="margin-top:6px">Auto updates excluded: ${escHtml(autoExcluded.join(', '))} — fresh samples exist, but independent bidirectional support is insufficient or belongs to a separate receiver network. Current corrections are retained.</p>`;
         }
         // Placed receivers absent from the matrix, with WHY (issue #63): the
         // report is built only from scanners that produced matched samples, so
@@ -6410,6 +6418,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function renderCalibration(status) {
+        calibLastStatus = status;
         const auto = status.mode === 'auto';
         const manualSampling = status.mode === 'manual' && status.state === 'sampling';
         calibLastResults = status.results || {};
@@ -6433,13 +6442,21 @@ document.addEventListener('DOMContentLoaded', async () => {
             else line += ' · first solve after a few minutes of data';
             if (result) {
                 line += ` · floor ${result.floor}: ${result.pairs_used} pairs used, `
-                    + `typical error ×${result.error_factor_before} → ×${result.error_factor_after}`;
+                    + `model error ×${result.error_factor_before} → ×${result.error_factor_after}`;
                 // Keep the missing-receiver pointer (issue #63) — this line
                 // replaces the one renderCalibrationResult just wrote. Same
                 // reconciled lists so a replaced receiver isn't counted.
                 const m = calibMissingNow(result);
                 const missing = m.missUnmatched.length + m.missNoData.length;
                 if (missing) line += ` · ${missing} placed receiver${missing > 1 ? "s" : ""} missing — see below`;
+            }
+            const decision = Object.entries(status.auto_status || {}).find(([name]) =>
+                name.toLowerCase() === mapname.value.toLowerCase())?.[1];
+            if (decision) {
+                line += ` · ${decision.state}: ${decision.reason}`;
+                if (decision.updated_receivers) line += ` · ${decision.updated_receivers} receivers, maximum change ${decision.max_change_pct}%`;
+                if (decision.unchanged_receivers?.length) line += ` · ${decision.unchanged_receivers.length} unsupported receivers unchanged`;
+                if (decision.tracking_validation) line += ` · measured tracking check: ${decision.tracking_validation.verdict}`;
             }
             calibStatus.textContent = line;
             return;
@@ -6498,6 +6515,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Switching floors should switch the displayed matrix too.
     mapSelector.addEventListener('change', () => {
+        if (calibLastStatus?.mode === 'auto') {
+            renderCalibration(calibLastStatus);
+            return;
+        }
         const result = selectedFloorResult(calibLastResults);
         if (result) renderCalibrationResult(result);
         else calibResults.innerHTML = '';
