@@ -1249,8 +1249,9 @@ both error metrics must improve by at least 0.25 m or 10%, whichever is larger,
 without additional candidate solve failures. Otherwise it reports worse or
 inconclusive. The result names the candidate solve time.
 
-This is a read-only raw-fix comparison using the live solver, height projection
-and obstruction weights. It omits temporal jump weights, Kalman smoothing,
+This is a read-only raw-fix comparison using the live solver, height projection,
+nearby range trust when Outdoor tracking is enabled, and obstruction weights.
+It omits temporal jump weights, Kalman smoothing,
 group fusion, floor election and zone snapping, so field tracking can still
 differ. It does not apply corrections or suspend auto calibration; auto mode
 continues checking for accepted updates every 15 minutes. For testing before application,

@@ -7,6 +7,7 @@ import pytest
 
 import bps
 import bps.outdoor_tracking as outdoor
+from bps.calibration_validation import replay
 from bps.sparse_tracking import solve_sparse_detection
 
 
@@ -38,6 +39,40 @@ def sparse(floor, weighted, *, enabled=True, previous=None):
 
 def diagnostics(result):
     return result["outdoor"]["receiver_diagnostics"]
+
+
+@pytest.mark.parametrize("corrections", [{}, {"station_0": 4, "station_1": 3}])
+def test_calibration_replay_matches_live_nearby_solver_across_corrected_range_thresholds(corrections):
+    positions = [(-3, 0), (0, -4), (3, 3), (20, 0), (0, 25), (25, 25)]
+    ranges = [math.hypot(*xy) for xy in positions]
+    ranges[3:] = [r + 12 for r in ranges[3:]]
+    floor, weighted = case(positions, ranges)
+    readings = [{"receiver": f"station_{i}", "measured_distance_m": distance,
+                 "observed": 1000} for i, distance in enumerate(ranges)]
+    layout = {"outdoor_tracking": {"enabled": True}}
+    actual = replay(floor, readings, corrections, floor["scale"], layout, 1000, bps.trilaterate)
+    # Reproduce live inputs after receiver correction, including replay's
+    # expanded outdoor bounds, and compare the real numerical fixes.
+    live_floor = copy.deepcopy(floor)
+    for i, rec in enumerate(live_floor["receivers"]):
+        distance = ranges[i] * corrections.get(rec["entity_id"], 1)
+        weighted[i] = (*weighted[i][:2], distance * floor["scale"], 1., distance * floor["scale"])
+        rec["distance"] = distance
+        rec["cords"]["r"] = weighted[i][2]
+    margin = max(pt[2] for pt in weighted)
+    xs, ys = [pt[0] for pt in weighted], [pt[1] for pt in weighted]
+    bounds = (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
+    live = outdoor.solve_outdoor(live_floor, weighted, bounds, floor["scale"], 5,
+                                 30, None, bps.trilaterate, nearby_trust=True)
+    legacy = outdoor.solve_outdoor(live_floor, weighted, bounds, floor["scale"], 5,
+                                   30, None, bps.trilaterate, nearby_trust=False)
+    assert actual["cords"] == pytest.approx(live["fix"])
+    assert math.dist(actual["cords"], legacy["fix"]) / floor["scale"] > .01
+    assert actual["outdoor"]["range_trust_enabled"] is True
+    assert [d["range_trust_weight"] for d in actual["outdoor"]["receiver_diagnostics"]] == pytest.approx(
+        [d["range_trust_weight"] for d in live["outdoor"]["receiver_diagnostics"]])
+    expected_reference = math.hypot(3, 3) if corrections else 3
+    assert actual["outdoor"]["receiver_diagnostics"][0]["nearby_priority_reference_m"] == pytest.approx(expected_reference)
 
 
 @pytest.mark.parametrize("far_error", [6, 12, 20])
