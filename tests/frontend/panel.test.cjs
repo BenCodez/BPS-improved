@@ -68,7 +68,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons, redrawAll,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
-            tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt};
+            tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt, addDeviceButton, saveReceiver};
     // With a single configured floor`);
     vm.runInContext(code, sandbox);
     const ready = listeners.get('DOMContentLoaded')();
@@ -1002,4 +1002,55 @@ test('proven saved aliases render as known and conflicting placements show actio
     assert.doesNotMatch(p.el('scannerissues').innerHTML, /No known Bermuda identity/);
     assert.deepEqual(plain(p.hooks.layout().floor), before.floor);
     assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+});
+
+test('Place Receiver hides physical aliases on this floor and Save rejects a custom alias duplicate', async () => {
+    for (const storedIdentity of [false, true]) {
+        const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+        matching.options.push({...matching.options[0], entity_id: 'old_station'});
+        const source = layout(); source.floor[0].receivers = [{entity_id: 'old_station', cords: {x: 100, y: 100}}];
+        if (storedIdentity) {
+            source.floor[0].receivers[0].scanner_mac = matching.options[0].scanner_mac;
+            source.floor[0].receivers[0].scanner_config_entry_id = 'owner-a';
+            matching.options.pop(); // old registry alias was removed
+        }
+        const p = await panel(source, [], false, matching); p.hooks.select('Property');
+        await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+        assert.ok(!p.el('receiverName').options.some(o => o.value === 'workshop_112233'));
+        assert.ok(p.el('receiverName').options.some(o => o.value === 'atrium_445566'), 'distinct scanner remains available');
+        p.el('receiverName').value = '__custom__'; p.el('receiverCustomName').value = 'workshop_112233';
+        const before = plain(p.hooks.layout()); p.hooks.saveReceiver();
+        assert.deepEqual(plain(p.hooks.layout()), before, 'custom entry cannot bypass physical duplicate guard');
+        assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    }
+});
+
+test('Place Receiver allows another floor and preserves proven identity for a new placement', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'workshop_112233', cords: {x: 100, y: 100}}];
+    source.floor.push({name: 'Upstairs', scale: 20, zones: [], receivers: []});
+    const p = await panel(source, [], false, matching); p.hooks.select('Upstairs');
+    await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+    assert.ok(p.el('receiverName').options.some(o => o.value === 'workshop_112233'));
+    p.el('receiverName').value = 'workshop_112233'; p.hooks.saveReceiver();
+    const rec = p.hooks.layout().floor[1].receivers[0];
+    assert.equal(rec.scanner_mac, matching.options[0].scanner_mac);
+    assert.equal(rec.scanner_config_entry_id, 'owner-a');
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[1].receivers[0].scanner_config_entry_id, 'owner-a');
+});
+
+test('proven distinct Bermuda owners with the same MAC can be placed and matched independently', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+    matching.options.push({...matching.options[0], entity_id: 'second_owner_station', config_entry_ids: ['owner-b']});
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'workshop_112233', cords: {x: 100, y: 100}}];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+    assert.ok(p.el('receiverName').options.some(o => o.value === 'second_owner_station'));
+    p.el('receiverName').value = 'second_owner_station'; p.hooks.saveReceiver();
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 2);
+    const dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    assert.equal(dialog.error.textContent || '', '');
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 2);
 });

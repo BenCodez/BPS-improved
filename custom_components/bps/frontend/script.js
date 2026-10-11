@@ -3793,6 +3793,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
         const newReceiver = { entity_id: receiverName, cords: tmpcords };
+        const option = receiverMatching.options.find(o => o.entity_id === receiverName);
+        const floor = finalcords.floor.find(f => sameFloorName(f.name, SelMapName));
+        if ((floor?.receivers || []).some(rec => sameReceiverIdentity(rec, newReceiver, receiverMatching.options))) {
+            bpsToast("This scanner is already placed on this floor. Move or match its existing placement instead.");
+            return;
+        }
+        if (option?.scanner_mac && !option.identity_ambiguous) {
+            newReceiver.scanner_mac = option.scanner_mac;
+            if (option.config_entry_ids?.length === 1) newReceiver.scanner_config_entry_id = option.config_entry_ids[0];
+        }
         // Optional mount height (m). Empty = unknown: distances stay slant
         // ranges and calibration truth stays 2D, exactly as before.
         // badInput = unparsable content reading back as "": reject it rather
@@ -4317,13 +4327,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function populateReceiverSelect() {
         // A scanner may be placed on other floors. Hide same-floor bindings.
-        const placedAnywhere = new Set();
+        const placedHere = [];
         if (Array.isArray(finalcords.floor)) {
             finalcords.floor.forEach(floor => {
-                if (sameFloorName(floor.name, SelMapName)) (floor.receivers || []).forEach(r => placedAnywhere.add(r.entity_id));
+                if (sameFloorName(floor.name, SelMapName)) placedHere.push(...(floor.receivers || []));
             });
         }
-        availableReceiverNames = receiverOptions.filter(name => !placedAnywhere.has(name));
+        availableReceiverNames = receiverOptions.filter(name => !placedHere.some(rec =>
+            sameReceiverIdentity(rec, {entity_id: name}, receiverMatching.options)));
         if (receiverSearchInput) receiverSearchInput.value = "";
         renderReceiverOptions("");
         if (receiverCustomInput) {
@@ -5118,6 +5129,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         return JSON.stringify(stored);
     }
 
+    function sameReceiverIdentity(left, right, options) {
+        if (left.entity_id === right.entity_id) return true;
+        const leftOption = options.find(o => o.entity_id === left.entity_id);
+        const rightOption = options.find(o => o.entity_id === right.entity_id);
+        if (leftOption?.identity_ambiguous || rightOption?.identity_ambiguous) return false;
+        const leftMac = left.scanner_mac || leftOption?.scanner_mac;
+        const rightMac = right.scanner_mac || rightOption?.scanner_mac;
+        if (typeof leftMac !== 'string' || typeof rightMac !== 'string' || !leftMac || leftMac.toLowerCase() !== rightMac.toLowerCase()) return false;
+        const leftOwner = left.scanner_config_entry_id || (leftOption?.config_entry_ids?.length === 1 ? leftOption.config_entry_ids[0] : null);
+        const rightOwner = right.scanner_config_entry_id || (rightOption?.config_entry_ids?.length === 1 ? rightOption.config_entry_ids[0] : null);
+        // A legacy MAC without ownership still guards accidental duplication;
+        // two proven distinct owners remain independent.
+        return !leftOwner || !rightOwner || leftOwner === rightOwner;
+    }
+
     async function openReceiverMatching(floor, rec, index) {
         if (document.querySelector('.bps-modal-overlay')) return;
         const snapshot = receiverPlacementSignature(rec);
@@ -5180,8 +5206,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const duplicate = floor.receivers.some(other => {
                     if (other === rec) return false;
                     const identity = bySlug.get(other.entity_id);
-                    return other.entity_id === choice || option.scanner_mac &&
-                        (other.scanner_mac === option.scanner_mac || identity?.scanner_mac === option.scanner_mac)
+                    return sameReceiverIdentity(other, {entity_id: choice}, fresh.options)
                         || option.token && !identity?.identity_ambiguous &&
                         !(option.scanner_mac && (other.scanner_mac || identity?.scanner_mac))
                         && fresh.options.filter(o => o.token === option.token).length === 1
