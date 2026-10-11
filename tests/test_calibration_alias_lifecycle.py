@@ -280,6 +280,68 @@ def test_unchanged_manual_save_retains_samples_and_provenance(hass, monkeypatch,
     assert (cal["samples"], cal["_bermuda_source"], cal["matched_placed"]) == before
 
 
+@pytest.mark.parametrize("replacement", ["unchanged", "mac", "owner", "legacy"])
+@pytest.mark.parametrize("rematch_after_solve", [False, True])
+def test_restored_raw_samples_never_certify_replacement_hardware(
+        hass, monkeypatch, replacement, rematch_after_solve):
+    async def scenario():
+        data, macs, devices = fixture(hass, monkeypatch)
+        cal = C.get_calibration_state(hass)
+        cal.update(mode="manual", receivers=C._build_receiver_map(data, "Ground", hass=hass))
+        for index in range(C.MIN_SAMPLES_PER_PAIR):
+            sampled_dump(hass, cal, data, macs, 100 + index)
+        await C.save_calibration_state(hass)
+        saved_geometry = hass._store_backing["bps_calibration_state"]["sample_geometry"]
+        assert saved_geometry["shared_old"]["scanner_mac"] == macs["shared_old"]
+        if replacement == "legacy":
+            hass._store_backing["bps_calibration_state"].pop("sample_geometry")
+        del hass.data["bps"]["calibration"]
+        await C.async_restore_calibration_state(hass)
+        registry = bps.er.async_get(hass).entities
+        mac, owner = macs["shared_old"], "entry"
+        if replacement == "mac":
+            mac = "dd:ee:ff:10:20:00"
+            devices["shared_old"].address = mac
+        elif replacement == "owner":
+            owner = "replacement-owner"
+            devices.pop("shared_old")
+        for slug in ("shared_old", "shared_current"):
+            registry[f"sensor.tag_distance_to_{slug}"].unique_id = "synthetic-tag_" + mac + "_range"
+            registry[f"sensor.tag_distance_to_{slug}"].config_entry_id = owner
+        current = data["floor"][0]["receivers"][0]
+        current.update(scanner_mac=mac, scanner_config_entry_id=owner)
+        await save_bps_data(hass, data)
+        async def no_sampling(*args):
+            pass
+        monkeypatch.setattr(C, "_auto_loop", no_sampling)
+        hass.async_create_task = asyncio.create_task
+        await C.set_auto_calibration(hass, True)
+        cal = C.get_calibration_state(hass)
+        try:
+            assert cal["_auto_samples"] == {}
+            expected_pairs = 12 if replacement == "unchanged" else 0 if replacement == "legacy" else 6
+            assert len(cal["samples"]) == expected_pairs
+            async def body():
+                return {"action": "solve", "floor": "Ground"}
+            response = await C.BPSCalibrationAPI().post(NS(app={"hass": hass}, json=body))
+            if replacement == "legacy":
+                assert response.status == 400 and not cal["results"]
+                return
+            assert response.status == 200
+            result = cal["results"]["Ground"]
+            assert ("shared_old" in result["receiver_identities"]) is (replacement == "unchanged")
+            if rematch_after_solve:
+                data["floor"][0]["receivers"][0]["entity_id"] = "shared_current"
+                data["auto_calibration"] = True
+                await save_bps_data(hass, data)
+            assert await C.apply_corrections(hass, cal, "Ground") == (4 if replacement == "unchanged" else 3)
+            saved = get_bps_data_for_edit(hass)["floor"][0]["receivers"][0]
+            assert saved["correction"] == (result["receivers"]["shared_old"] if replacement == "unchanged" else 1.)
+        finally:
+            await C._stop_task(cal)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("conflict", ["cords", "correction", "outdoor_policy", "owner"])
 def test_manual_apply_never_repairs_preexisting_conflicting_alias_properties(hass, monkeypatch, conflict):
     async def scenario():

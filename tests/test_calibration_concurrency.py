@@ -188,7 +188,7 @@ def test_manual_solve_tokens_and_lock_are_not_persisted(hass):
         assert "_manual_solve_lock" in cal and "_manual_solve_generation" in cal
         await C.save_calibration_state(hass)
         saved = hass._store_backing[STORAGE_KEY_CALIB]
-        assert set(saved) == {"saved_at", "results", "applied", "samples"}
+        assert set(saved) == {"saved_at", "results", "applied", "samples", "sample_geometry"}
         assert saved["results"] == cal["results"]
 
     run(scenario())
@@ -255,7 +255,7 @@ def test_cancelled_http_request_retains_admission_until_private_worker_finishes(
             assert cal["_manual_solve_pending"] is pending
             assert (await api.post(request(hass))).status == 409
             await C.save_calibration_state(hass)
-            assert set(hass._store_backing[STORAGE_KEY_CALIB]) == {"saved_at", "results", "applied", "samples"}
+            assert set(hass._store_backing[STORAGE_KEY_CALIB]) == {"saved_at", "results", "applied", "samples", "sample_geometry"}
         finally:
             release.set()
         # Waiting for task completion without retrieving its result leaves the

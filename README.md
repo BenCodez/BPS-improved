@@ -670,6 +670,8 @@ The same scanner can have a placement on another floor.
 Save checks a fresh Bermuda inventory. If scanner identities changed while the
 panel was open, review the refreshed choice and save again; the marker, height
 and other inputs are retained.
+Editor saves support up to 256 receiver placements per floor and 1,024 across
+the layout. Existing larger layouts remain readable.
 
 ![Placing a receiver: pick its name from the list of receivers Bermuda reports](img/screenshots/receiver-picker.png)
 
@@ -705,6 +707,8 @@ calibration uses each floor's own geometry when a scanner is shared between floo
 Manual results capture the scanner MAC and owner so their corrections follow the
 same hardware after a rename. Legacy results without that proof need a fresh
 solve before applying to a renamed placement.
+Changing a receiver's identity or geometry during a manual run discards the
+affected sample pairs and their old provenance before another solve.
 
 The chooser checks the inventory again before applying and rejects stale choices,
 a changed floor or placement, ambiguous identities and another binding to the
@@ -931,12 +935,14 @@ and vetoes updates that worsen measured beacon tracking. An insufficient or
 outdated recording does not establish tracking improvement; fresh reference
 checks still apply. Manual Apply remains available.
 
-The toggle is stored in `bpsdata.txt` (alongside the corrections), while the
-latest solve and the rolling sample window are persisted separately in
-`bps_calibration_state.json`. So after a restart the toggle sticks, the matrix
-reappears immediately, and existing corrections stay active. Automatic updates
-wait for new independent observations after restart or re-enabling the toggle;
-restored samples alone cannot trigger a change.
+The toggle and corrections use Home Assistant's BPS layout storage, while the
+latest solve and rolling sample window use its separate calibration storage.
+Both survive restart, and existing corrections stay active. Saved raw samples
+retain the receiver identity and geometry that produced them. Changed receivers
+lose their affected samples; legacy windows without that evidence are discarded
+when auto mode resumes. Automatic updates wait for new independent observations
+after restart or re-enabling the toggle; restored samples alone cannot trigger
+an automatic change.
 
 ## Kalman position smoothing
 

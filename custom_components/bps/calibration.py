@@ -153,6 +153,9 @@ async def save_calibration_state(hass) -> None:
             key: list(values)[-STATE_SAMPLES_PER_PAIR:]
             for key, values in cal["samples"].items()
         },
+        # Raw pair keys alone cannot identify the hardware or geometry that
+        # produced them. Keep that observation baseline across restarts.
+        "sample_geometry": copy.deepcopy(cal.get("_auto_geometry", cal.get("receivers", {}))),
     }
     try:
         await save_calib_state(hass, payload)
@@ -183,6 +186,10 @@ async def async_restore_calibration_state(hass) -> None:
                     (float(v) for v in values if isinstance(v, (int, float))),
                     maxlen=SAMPLES_MAXLEN,
                 )
+        geometry = payload.get("sample_geometry")
+        # Legacy windows may remain visible until receivers are loaded, but
+        # cannot be rebound to today's scanner hardware by an explicit solve.
+        cal["_auto_geometry"] = copy.deepcopy(geometry) if isinstance(geometry, dict) else {}
     _LOGGER.info(
         "Restored calibration state (%d floor results, %d sample pairs%s)",
         len(cal["results"]),
@@ -1132,6 +1139,8 @@ async def set_auto_calibration(hass, enabled: bool) -> None:
 
     await _stop_task(cal)
     if enabled:
+        if "_auto_geometry" not in cal:
+            cal["_auto_geometry"] = copy.deepcopy(cal.get("receivers", {}))
         # Keep raw samples/results for the existing matrix. Automatic updates
         # nevertheless require fresh independent evidence from this session.
         cal.update(
@@ -1153,7 +1162,6 @@ async def set_auto_calibration(hass, enabled: bool) -> None:
         # Persisted raw windows keep the matrix warm, but independent evidence
         # must be observed afresh after restart or a new automatic session.
         cal["_auto_samples"] = {}
-        cal.pop("_auto_geometry", None)
         _refresh_auto_history(cal)
         cal["_advert_stamps"] = {}
         cal["auto_status"] = {}
