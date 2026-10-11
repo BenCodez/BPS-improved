@@ -189,6 +189,36 @@ def test_legacy_indoor_tracking_still_needs_three_receivers(hass):
     assert result == []
 
 
+@pytest.mark.parametrize("count", [0, 1, 2])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_background_loop_reaches_sparse_tracking_only_when_outdoor_enabled(hass, monkeypatch, count, enabled):
+    now = 1000.0
+    monkeypatch.setattr(bps.time, "time", lambda: now)
+    data = layout(enabled)
+    data["floor"][0]["receivers"] = data["floor"][0]["receivers"][:count]
+    run(save_bps_data(hass, data))
+    states(hass, "5", age=2)
+    ids = [f"sensor.beacon_a_distance_to_p{i}" for i in range(count)]
+    monkeypatch.setattr(bps, "_bermuda_distance_sensor_ids", lambda hass: ids)
+    for name in ("last_liveness", "last_selftest", "last_history_flush"):
+        monkeypatch.setattr(bps.update_tracked_entities, name, now, raising=False)
+    delays = []
+    async def stop_after_cycle(delay):
+        delays.append(delay)
+        raise asyncio.CancelledError
+    monkeypatch.setattr(bps.asyncio, "sleep", stop_after_cycle)
+    with pytest.raises(asyncio.CancelledError):
+        run(bps.update_tracked_entities(hass))
+    if enabled and count:
+        assert len(bps.apitricords) == 1
+        assert bps.apitricords[0]["outdoor"]["detection_only"] is True
+        assert bps.apitricords[0]["updated"] == 998
+        assert delays == [bps.secToUpdate]
+    else:
+        assert bps.apitricords == []
+        assert delays == [10]
+
+
 def test_outdoor_fix_can_be_outside_receiver_extent_and_zone_union(hass):
     data = layout(True)
     truth = (300.0, 200.0)

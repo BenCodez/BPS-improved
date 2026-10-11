@@ -715,7 +715,8 @@ async def update_tracked_entities(hass):
                 _LOGGER.info("There are no devices present to track, sleep 10 seconds")
                 await asyncio.sleep(10)
                 continue  # Skip and start over
-            if num_points < 3:
+            layout = get_bps_data(hass)
+            if num_points < 3 and not outdoor_settings(layout)["enabled"]:
                 await update_tracker_groups(hass)
                 _LOGGER.info("There are not enough trackers with available data to track, sleep 10 seconds")
                 await asyncio.sleep(10)
@@ -724,7 +725,6 @@ async def update_tracked_entities(hass):
             cleaned = [item.split("_distance_to_")[0].replace("sensor.", "") for item in tracked_entities]
             unique_values = list(set(cleaned))
             # Use a separate copy per entity to avoid cross-entity mutation side effects.
-            layout = get_bps_data(hass)
             new_global_data = [{"entity": ent, "data": copy.deepcopy(layout)} for ent in unique_values]
 
             await process_entities(hass, new_global_data)
