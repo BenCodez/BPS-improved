@@ -1,4 +1,5 @@
 """Synthetic metre-based evidence for bounded nearby receiver trust."""
+import asyncio
 import copy
 import json
 import math
@@ -39,6 +40,86 @@ def sparse(floor, weighted, *, enabled=True, previous=None):
 
 def diagnostics(result):
     return result["outdoor"]["receiver_diagnostics"]
+
+
+def reset_election(monkeypatch):
+    monkeypatch.setattr(bps, "apitricords", [])
+    for name in ("_floor_probability", "_floor_challenge", "_floor_dark_cycles", "_kf_position_state"):
+        monkeypatch.setattr(bps, name, {})
+    for name in ("last_floor", "last_r_values"):
+        monkeypatch.setattr(bps.update_trilateration_and_zone, name, {}, raising=False)
+    monkeypatch.setattr(bps.time, "time", lambda: 1000)
+
+
+@pytest.mark.parametrize("scale", [10, 40])
+def test_multifloor_election_keeps_contradictory_far_ranges_visible(hass, monkeypatch, scale):
+    reset_election(monkeypatch)
+    wrong, wrong_points = case([(0, 0), (20, 0), (0, 20), (20, 20)],
+                               [3, 15, 15, 20], scale=scale)
+    positions = [(-5, -5), (5, -5), (-5, 5), (5, 5)]
+    ranges = [math.hypot(*xy) + (5 if i % 2 else 0) for i, xy in enumerate(positions)]
+    correct, correct_points = case(positions, ranges, scale=scale)
+    wrong["name"], correct["name"] = "Wrong", "Correct"
+    wrong["zones"], correct["zones"] = [], []
+    wrong_result, correct_result = solve(wrong, wrong_points), solve(correct, correct_points)
+    wrong_suppressed = bps._score_floor_fit(wrong_result["fix"], wrong_result["weighted"], scale)[0]
+    wrong_evidence = bps._score_floor_fit(wrong_result["fix"], wrong_result["floor_election_weighted"], scale)[0]
+    correct_evidence = bps._score_floor_fit(correct_result["fix"], correct_result["floor_election_weighted"], scale)[0]
+    # This fixture reproduces the election reversal: the short spurious range
+    # flattered a wrong floor by suppressing disagreement from its other nodes.
+    assert wrong_suppressed > correct_evidence > wrong_evidence
+    data = {"floor": [wrong, correct], "outdoor_tracking": {"enabled": True}}
+    asyncio.run(bps.update_trilateration_and_zone(hass, [{"entity": "synthetic_tag", "data": data}], "synthetic_tag"))
+    published = bps.apitricords[0]
+    assert published["floor"] == "Correct"
+    assert published["floors"]["Correct"] > published["floors"]["Wrong"]
+    assert published["raw"] == pytest.approx([round(float(v), 2) for v in correct_result["fix"]])
+    assert published["outdoor"]["range_trust_enabled"] is True
+
+
+def test_sparse_multifloor_election_uses_reception_evidence_independent_of_display_anchor(hass, monkeypatch):
+    reset_election(monkeypatch)
+    wrong, points = case([(0, 0), (20, 20)], [5, 6.8])
+    wrong["receivers"][0]["distance_accuracy_m"] = 5
+    correct, _points = case([(10, 10)], [6])
+    wrong["name"], correct["name"] = "Wrong", "Correct"
+    original = sparse(wrong, points, enabled=False)
+    nearby = sparse(wrong, points)
+    assert original["outdoor"]["detection_range_m"] == 6.8
+    assert nearby["outdoor"]["detection_range_m"] == 5
+    assert nearby["outdoor"]["floor_election_range_m"] == 6.8
+    assert nearby["outdoor"]["floor_election_receiver"] == "station_1"
+    data = {"floor": [wrong, correct], "outdoor_tracking": {"enabled": True}}
+    asyncio.run(bps.update_trilateration_and_zone(hass, [{"entity": "synthetic_tag", "data": data}], "synthetic_tag"))
+    published = bps.apitricords[0]
+    assert published["floor"] == "Correct"
+    assert published["outdoor"]["direction_known"] is False
+    assert published["conf"] == 0 and published["outdoor"]["confidence"] == "poor"
+
+
+@pytest.mark.parametrize("policy,jump,accuracy,age", [
+    ("auto", 1, 0, 0), ("prefer", 1, 0, 0), ("deprioritize", .8, 5, 20),
+    ("auto", .001, 1000, 0), ("normal", .8, 10, 20),
+])
+def test_election_evidence_retains_other_controls_and_nonlinear_floors(policy, jump, accuracy, age):
+    floor, weighted = case([(3, 0), (30, 0), (0, 15)])
+    weighted[1] = (*weighted[1][:3], jump, weighted[1][4])
+    rec = floor["receivers"][1]
+    rec.update(outdoor_policy=policy, distance_accuracy_m=accuracy)
+    rec["_outdoor_reading"]["reading_age_s"] = age
+    floor["environment"] = [{"id": "synthetic_building", "type": "building", "material": "metal",
+        "points": [{"x": x, "y": y} for x, y in [(50, -10), (60, -10), (60, 10), (50, 10)]]}]
+    fixed = lambda *args, **kwargs: (0, 0)
+    original = solve(floor, weighted, enabled=False, solver=fixed)
+    nearby = solve(floor, weighted, solver=fixed)
+    assert nearby["floor_election_weighted"] == original["weighted"]
+    assert nearby["fix"] == original["fix"]
+    assert diagnostics(nearby)[1]["floor_election_weight"] == original["weighted"][1][3]
+    if policy == "auto" and jump == 1:
+        # A clipped positioning weight cannot safely be divided by .15:
+        # that would overstate the range-neutral building evidence.
+        assert nearby["weighted"][1][3] == .05
+        assert nearby["floor_election_weighted"][1][3] == .25
 
 
 @pytest.mark.parametrize("corrections", [{}, {"station_0": 4, "station_1": 3}])

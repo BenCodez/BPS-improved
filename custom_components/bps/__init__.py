@@ -1388,7 +1388,8 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
             fix = trilaterate(weighted, bounds=floor_bounds, min_weight_radius=min_wr)
         if fix is None:
             continue  # this floor's readings don't converge; not a contender
-        conf, rms_m, coverage = _score_floor_fit(fix, weighted, scale)
+        election_weighted = outdoor_result["floor_election_weighted"] if outdoor_result else weighted
+        conf, rms_m, coverage = _score_floor_fit(fix, election_weighted, scale)
         # A fit landing in this floor's no-go zone is physically impossible
         # here (issue #60): down-weight it so the competition prefers the
         # floor where that spot is a real room. Down-weight, not eliminate —
@@ -1427,7 +1428,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 # directional fix and never claims a room/zone membership.
                 solved[floor_name] = {"fix": detection["fix"], "weighted": detection["weighted"],
                     "bounds": None, "zone_polys": [], "scale": scale,
-                    "conf": .1 / (1 + quality["detection_range_m"]), "rms_m": None, "outdoor": quality}
+                    "conf": .1 / (1 + quality["floor_election_range_m"]), "rms_m": None, "outdoor": quality}
 
     if not solved:
         # No candidate floor has three converging receivers (historical

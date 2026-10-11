@@ -318,6 +318,10 @@ or Bermuda/BPS calibration. Receiver diagnostics show **distance trust**, its
 corrected slant range and the reference range. One or two receivers still report
 unknown direction. A short RSSI-derived distance remains an estimate, and one
 close station alone cannot determine an accurate position or prove a building.
+Floor election scores the solved position with this extra distance priority
+removed, retaining jump, accuracy, freshness, policy and path trust. Distant
+contradictory readings still count as evidence against a wrong floor. Sparse
+detection likewise uses reception evidence independent of its display anchor.
 
 The optional diagnostics show measured and corrected distances separately,
 reading age, path classification, boundary crossings, and reliability. For a

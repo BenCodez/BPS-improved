@@ -99,6 +99,13 @@ def nearby_range_trust(observations, max_age_s, *, enabled=False):
             for distance in distances]
 
 
+def _controlled_reliability(base_weight, diagnostic):
+    """Apply path, age and policy controls with the shared safety floor."""
+    weight = base_weight * diagnostic["environmental_weight"] * diagnostic["freshness_weight"]
+    weight *= diagnostic["policy_weight"] * diagnostic.get("indoor_range_weight", 1.0)
+    return min(1.0, max(min(base_weight, MIN_RELIABILITY), weight))
+
+
 def _boundary_clearance(point, region):
     distances = []
     for start, end, _index in region.edges:
@@ -193,9 +200,7 @@ def _indoor_support(environment, selected, diagnostics, scale, max_age_s):
                     diagnostic["indoor_range_weight"] = min(diagnostic["indoor_range_weight"], factor)
         # Same policy/freshness/floor rules as measurement_reliability; only
         # relative trust changes. Weak original jump weights are never raised.
-        weight = pt[3] * diagnostic["environmental_weight"] * diagnostic["freshness_weight"]
-        weight *= diagnostic["policy_weight"] * diagnostic["indoor_range_weight"]
-        diagnostic["reliability_weight"] = min(1.0, max(min(pt[3], MIN_RELIABILITY), weight))
+        diagnostic["reliability_weight"] = _controlled_reliability(pt[3], diagnostic)
         diagnostic["status"] = "downweighted" if diagnostic["reliability_weight"] < 0.999 else "used"
     return summary
 
@@ -302,8 +307,20 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
                 diagnostic["status"] = "refinement_failed"
             indoor["indoor_support_applied"] = False
     indoor.setdefault("indoor_support_applied", indoor["indoor_support_receivers"] > 0)
+    election_weighted = []
     for pt, diagnostic in zip(base, diagnostics):
         diagnostic["horizontal_residual_m"] = (math.dist(pt[:2], fix) - pt[2]) / scale
+        # Nearby priority helps POSITIONING, but cannot make contradictory
+        # distant readings disappear from the floor's agreement score. Reapply
+        # the other controls to the original accuracy/jump base: dividing by
+        # range trust would incorrectly undo safety floors or Prefer caps.
+        election_weight = pt[3]
+        if nearby_trust:
+            original_base = diagnostic["base_jump_weight"] * diagnostic["accuracy_weight"]
+            election_weight = (original_base if diagnostic["status"] == "refinement_failed"
+                               else _controlled_reliability(original_base, diagnostic))
+        diagnostic["floor_election_weight"] = election_weight
+        election_weighted.append((*pt[:3], election_weight, pt[4]))
     quality = estimate_uncertainty(
         fix, base, scale, diagnostics, bounds=bounds, previous=previous,
     )
@@ -344,7 +361,8 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
                 "range_trust_distance_m": finite_number(rec["distance"], minimum=0.0),
                 "nearby_priority_reference_m": ranges[0]["nearby_priority_reference_m"],
             })
-    return {"fix": fix, "weighted": base, "outdoor": quality}
+    return {"fix": fix, "weighted": base, "floor_election_weighted": election_weighted,
+            "outdoor": quality}
 
 
 def account_for_published_position(quality, raw, published, scale):

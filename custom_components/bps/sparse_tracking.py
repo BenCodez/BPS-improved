@@ -125,28 +125,39 @@ def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
 
     trusts = nearby_range_trust([d for _pt, d in selected.values()], limit, enabled=nearby_trust)
     for (pt, diagnostic), trust in zip(selected.values(), trusts):
+        diagnostic["floor_election_weight"] = diagnostic["reliability_weight"]
         diagnostic.update(trust)
         diagnostic["reliability_weight"] *= trust["range_trust_weight"]
         if diagnostic["reliability_weight"] < 0.999:
             diagnostic["status"] = "downweighted"
 
-    def rank(item):
+    def rank(item, weight_key):
         _pt, diag = item
         # Slant ranges avoid rewarding a high-mounted receiver whose horizontal
         # projection collapsed. Weak jump/freshness/policy trust costs range.
-        return diag["corrected_distance_m"] / math.sqrt(diag["reliability_weight"])
+        return diag["corrected_distance_m"] / math.sqrt(diag[weight_key])
 
-    anchor = min(selected.values(), key=lambda item: (rank(item), item[1]["receiver"]))
-    if isinstance(previous, dict) and previous.get("floor") == floor["name"]:
-        quality = previous.get("outdoor")
-        previous_slug = quality.get("detection_receiver") if isinstance(quality, dict) else None
-        prior = selected.get(previous_slug) if isinstance(previous_slug, str) else None
-        if prior and rank(prior) <= rank(anchor) + max(1.0, rank(anchor) * 0.20):
-            anchor = prior
+    def choose_anchor(weight_key, previous_key):
+        anchor = min(selected.values(), key=lambda item: (rank(item, weight_key), item[1]["receiver"]))
+        if isinstance(previous, dict) and previous.get("floor") == floor["name"]:
+            quality = previous.get("outdoor")
+            previous_slug = quality.get(previous_key, quality.get("detection_receiver")) \
+                if isinstance(quality, dict) else None
+            prior = selected.get(previous_slug) if isinstance(previous_slug, str) else None
+            if prior and rank(prior, weight_key) <= rank(anchor, weight_key) + max(1.0, rank(anchor, weight_key) * 0.20):
+                anchor = prior
+        return anchor
+
+    anchor = choose_anchor("reliability_weight", "detection_receiver")
+    # Reception-floor confidence uses its own range-neutral current anchor.
+    # Nearby priority may move the DISPLAY anchor without changing this score.
+    election_anchor = choose_anchor("floor_election_weight", "floor_election_receiver")
     pt, diag = anchor
     radius_m = pt[2] / scale
     quality = {"detection_only": True, "direction_known": False,
                "detection_receiver": diag["receiver"], "receiver": diag["receiver"],
+               "floor_election_receiver": election_anchor[1]["receiver"],
+               "floor_election_range_m": election_anchor[0][2] / scale,
                "detection_range_m": radius_m,
                "detection_range_px": pt[2], "confidence": "poor",
                "estimated_uncertainty_m": max(3.0, radius_m * 1.5),
