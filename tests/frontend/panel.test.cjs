@@ -52,9 +52,11 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             requests.push({url, options});
             if (url === '/api/bps/cords' && network.failCords) throw new Error('connection lost');
             if (url === '/api/bps/scanner_linking' && network.matchingRequest) return await network.matchingRequest();
+            if (url === '/api/bps/scanner_linking' && network.matching) return {ok: true, status: 200,
+                json: async () => ({placed: [], unplaced: [], beacons: [], matching: network.matching})};
             const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: (matching?.options || []).map(o => o.entity_id), receiver_matching: matching}
                 : url === '/api/bps/cords' ? network.cords
-                : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: [], matching: network.matching} : url === '/api/bps/calibration' ? network.calibration
+                : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration
                 : url === '/api/bps/diagnostics?report=1' ? {text: 'BPS full diagnostics\n{"context":{"layout":{"floor":[]}}}'} : [];
             const status = url === '/api/bps/cords' ? network.cordsStatus : 200;
             return {ok: status === 200, status, json: async () => body};

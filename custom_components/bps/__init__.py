@@ -60,8 +60,8 @@ from .solver_settings import MIN_WEIGHT_RADIUS_M, SOLVER_ROBUST_F_SCALE
 from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
-from . import bermuda_diagnostics
 from .receiver_matching import inventory as receiver_inventory
+from . import bermuda_diagnostics
 
 _LOGGER = logging.getLogger(__name__)
 
