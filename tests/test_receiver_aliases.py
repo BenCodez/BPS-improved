@@ -285,3 +285,42 @@ def test_legacy_exact_calibration_name_stays_usable_without_alias_mac_proof(hass
     payload = {MAC: {"_is_scanner": True, "address": MAC, "name": "new_name_112233", "adverts": {}}}
     receivers["old_station"]["uid"] = "112233"
     assert C._match_scanners({"receivers": receivers}, payload) == {}, 'token alone cannot expand calibration aliases'
+
+
+@pytest.mark.parametrize("outdoor", [False, True])
+@pytest.mark.parametrize("runtime_identity", [False, True])
+def test_exact_owned_legacy_reading_survives_runtime_identity_without_unproven_alias_expansion(hass, monkeypatch, outdoor, runtime_identity):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch, outdoor=outdoor)
+    entries[old].unique_id = "legacy-format"
+    states[old].state = "3"; states[old].last_updated = timestamp(995)
+    devices["station"].name = "old_station"
+    if not runtime_identity:
+        devices.clear()
+    resolver = ReceiverSources(hass)
+    rec = data["floor"][0]["receivers"][0]
+    assert resolver.source("tag", rec)[0] == old, 'fresh alias cannot substitute an unproven tracker identity'
+    asyncio.run(bps.update_receiver_radii(hass, {"entity": "tag", "data": data}))
+    assert rec["distance"] == 6
+    hass.data["bps"]["layout"] = data
+    row = bps._diagnostic_snapshot(hass, ["tag"], 1000)["readings"][0]
+    assert row["entity_id"] == old and row["observed"] == 995 and row["age_s"] == 5
+    states[old].last_updated = timestamp(900)
+    asyncio.run(bps.update_receiver_radii(hass, {"entity": "tag", "data": data}))
+    assert "distance" not in rec, 'legacy source does not rejuvenate its original clock'
+
+
+@pytest.mark.parametrize("invalid", ["different_owner", "raw", "disabled", "foreign"])
+def test_runtime_identity_does_not_admit_unowned_or_disabled_exact_legacy_sources(hass, monkeypatch, invalid):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    del entries[new]; del states[new]
+    devices["station"].name = "old_station"
+    entries[old].unique_id = "legacy-format"
+    states[old].state = "3"
+    if invalid == "different_owner": entries[old].config_entry_id = "other-owner"
+    elif invalid == "raw": entries[old].unique_id = "legacy_range_raw"
+    elif invalid == "disabled": entries[old].disabled_by = "user"
+    elif invalid == "foreign": entries[old].platform = "esphome"
+    resolver = ReceiverSources(hass)
+    assert resolver.source("tag", data["floor"][0]["receivers"][0])[1] is None
+    asyncio.run(bps.update_receiver_radii(hass, {"entity": "tag", "data": data}))
+    assert "distance" not in data["floor"][0]["receivers"][0]

@@ -99,7 +99,14 @@ class ReceiverSources:
         if self.registry is None:
             return direct, self.hass.states.get(direct)
         key = binding["identity"] or receiver.get("entity_id", "")
-        candidates = self.readings.get((tracker, key), [])
+        candidates = list(self.readings.get((tracker, key), []))
+        # Runtime identity can upgrade an exact legacy entity whose unique ID
+        # cannot prove a scanner MAC. Preserve only that enabled, owned exact
+        # source; its unknown tracker identity below prevents alias expansion.
+        if binding["identity"] and direct in self.readings.get((tracker, receiver.get("entity_id", "")), []):
+            entry = self.registry.entities.get(direct)
+            if getattr(entry, "config_entry_id", None) == binding["identity"][0] and direct not in candidates:
+                candidates.append(direct)
         tracker_id = self.tracker_ids.get(direct)
         if tracker_id:
             candidates = [eid for eid in candidates if self.tracker_ids.get(eid) == tracker_id]
