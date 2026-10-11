@@ -731,9 +731,30 @@ If clipboard access is unavailable, use the selectable text box and
 It contains property geometry and tracker locations, but excludes map images,
 icons, authentication tokens, BLE identity-resolving keys and unrelated entity
 states. Bermuda scanner MAC identifiers are included to link offsets and paths.
-This is a live
-snapshot; use a recording below to diagnose intermittent jumps or measure
-accuracy over time.
+With Outdoor Tracking enabled, the report also includes **recent_tracking**:
+an automatic rolling history of completed tracking batches, sampled at most
+once every two seconds. After an unexpected jump or grey mini beacon, copy the
+report promptly. It retains original beacon and group positions, source
+timestamps, solver receiver inputs, selection weights/reasons and motion gates.
+Saved map placements, wall/fence materials, receiver corrections/hardware,
+calibration status and allowlisted Bermuda settings are versioned alongside it.
+Grey means stale or excluded from fusion; it does not establish which beacon
+was physically correct. Last-known original fixes remain identifiable even
+when a group excludes them.
+
+Recent history stays in Home Assistant memory and clears on integration unload,
+restart or disabling Outdoor Tracking. Retention is up to **10 minutes, 300
+samples and 2 MiB**, whichever limit is reached first; each sample is limited to
+64 KiB, settings contexts to 256 KiB, and includes up to 128 positions. Oversized
+or malformed samples are skipped and counted. The copy report exports the newest
+history fitting a 1 MiB history budget (less when the live report is large), with
+actual time coverage and truncation/drop counters. It does not upload anything,
+write additional history files, trigger extra Bluetooth scans or change tracking.
+Sampling timestamps never refresh the underlying BLE observations. Very brief
+events between completed batches can be missed. Current full Bermuda sensors
+and RSSI adverts remain in the live snapshot, rather than being polled again for
+each history sample. Use a recording below for longer sessions and measured
+known-position accuracy tests; its controls are independent of recent history.
 
 Open **BPS → Debugging → Diagnostic recording**, click **Load trackers / refresh**,
 choose an original Bermuda tracker or an enabled dog group, and start a 5, 10,

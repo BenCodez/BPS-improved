@@ -110,6 +110,21 @@ def _coordinator(hass, entry):
     return legacy.get("coordinator") if isinstance(legacy, Mapping) else legacy
 
 
+def settings_snapshot(hass):
+    """Cheap allowlisted settings context, without registry/state/advert scans."""
+    manager = getattr(hass, "config_entries", None)
+    entries = manager.async_entries("bermuda") if manager is not None else []
+    const = sys.modules.get("custom_components.bermuda.const")
+    rows = []
+    for entry in entries[:32]:
+        coordinator = _coordinator(hass, entry)
+        rows.append({"entry_id": entry.entry_id, "configured_settings": settings(entry.options),
+                     "effective_settings": settings(getattr(coordinator, "options", {}))})
+    return {"entries": rows, "entries_truncated": len(entries) > 32,
+            "installed_defaults": {key: scalar(getattr(const, attr))
+                for key, attr in SETTING_DEFAULTS.items() if const is not None and hasattr(const, attr)}}
+
+
 def snapshot(hass, now):
     """Public HA states/config plus optional, allowlisted Bermuda runtime data."""
     result = {"available": False, "entries": [], "entities": [], "adverts": [], "warnings": [],

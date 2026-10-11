@@ -62,6 +62,7 @@ from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
 from . import bermuda_diagnostics
+from . import recent_tracking
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -712,12 +713,14 @@ async def update_tracked_entities(hass):
             num_points = len(tracked_entities)
             if num_points == 0:
                 await update_tracker_groups(hass)
+                await _capture_recent_tracking(hass)
                 _LOGGER.info("There are no devices present to track, sleep 10 seconds")
                 await asyncio.sleep(10)
                 continue  # Skip and start over
             layout = get_bps_data(hass)
             if num_points < 3 and not outdoor_settings(layout)["enabled"]:
                 await update_tracker_groups(hass)
+                await _capture_recent_tracking(hass)
                 _LOGGER.info("There are not enough trackers with available data to track, sleep 10 seconds")
                 await asyncio.sleep(10)
                 continue  # Skip and start over
@@ -1764,7 +1767,8 @@ async def update_tracker_groups(hass):
         attrs = {k: v for k, v in position.items() if k not in {"ent", "zone", "last_update_age_s"}}
         attrs.update(tracker_key=position["ent"], zone=position["zone"])
         attrs["outdoor"] = {k: v for k, v in position["outdoor"].items() if k != "position_age_s"}
-        attrs["beacon_positions"] = [{k: v for k, v in beacon.items() if k != "age_s"}
+        attrs["beacon_positions"] = [{k: v for k, v in beacon.items()
+                                     if k not in ("age_s", "weight", "normalized_weight")}
                                      for beacon in position["beacon_positions"]]
         update_bps_sensor_state(hass, f"sensor.{position['ent']}_bps_position", "tracking", attrs,
                                 only_changed=True)
@@ -1873,6 +1877,7 @@ async def process_entities(hass, new_global_data):
                 bucket.pop("_tracking_last_failure", None)
             if _tracking_context_current(context):
                 await update_tracker_groups(hass)
+                await _capture_recent_tracking(hass)
         finally:
             _tracking_context.reset(token)
 
@@ -2880,10 +2885,100 @@ def _diagnostic_snapshot(hass, targets, now):
             "offline_receivers": list(hass.data.get(DOMAIN, {}).get("rl_offline", []))[:128]}
 
 
+def _recent_tracking_snapshot(hass, now):
+    """Detached completed-batch telemetry; never poll all HA sensor states.
+
+    Original fixes remain visible after exclusion/expiry, with their original
+    observation times. Absence from a group's valid members is not a new fix.
+    """
+    dom = hass.data.get(DOMAIN, {})
+    layout = get_bps_data(hass) or {}
+    context = {"layout": {key: copy.deepcopy(layout[key]) for key in (
+        "outdoor_tracking", "tracker_groups", "tracker_height", "tracker_heights",
+        "tracker_hardware", "tracker_ref_offsets", "reading_max_age", "position_timeout") if key in layout}}
+    context["layout"]["floor"] = [{key: copy.deepcopy(floor[key]) for key in (
+        "name", "scale", "receivers", "zones", "subzones", "environment") if key in floor}
+        for floor in layout.get("floor", [])]
+    context["bermuda_settings"] = bermuda_diagnostics.settings_snapshot(hass)
+    cal = dom.get("calibration", {})
+    context["calibration"] = {key: copy.deepcopy(cal.get(key)) for key in (
+        "mode", "floor", "applied", "last_solved_at", "auto_status")}
+    context["defaults"] = {"reading_max_age_s": READING_MAX_AGE_SECS,
+        "position_timeout_s": STALE_POSITION_SECS, "tracker_height_m": TRACKER_HEIGHT_M,
+        "tracking_update_interval_s": secToUpdate}
+    positions = dom.get("apitricords", [])
+    known = {p.get("ent") for p in positions if not p.get("group") and isinstance(p.get("ent"), str)}
+    members = {beacon for group in normalize_groups(layout, known_trackers=known)
+               for beacon in group.get("beacons", [])}
+    # Groups are appended after originals at publication. Retain their
+    # decisions and member solver inputs before unrelated beacon fixes.
+    positions = ([p for p in positions if p.get("group")]
+        + [p for p in positions if not p.get("group") and p.get("ent") in members]
+        + [p for p in positions if not p.get("group") and p.get("ent") not in members])
+    keys = ("ent", "group", "floor", "zone", "cords", "updated", "outdoor",
+            "beacons_reporting", "total_beacons", "beacon_positions", "anchor_beacon",
+            "anchor_switch_pending", "motion_gate", "fusion_confidence", "beacon_disagreement_m")
+    copied = [{key: copy.deepcopy(p[key]) for key in keys if key in p} for p in positions[:128]]
+    for position in copied:
+        quality = position.get("outdoor")
+        if isinstance(quality, dict):
+            observed = (position.get("updated") if quality.get("use_observation_age") is False
+                        else quality.get("observed", position.get("updated")))
+            observed = finite_number(observed, minimum=0.0)
+            if observed is not None:
+                age = max(0.0, now - observed)
+                cutoff = finite_number(quality.get("stale_after_s"), minimum=0.0) or 30.0
+                quality.update(position_age_s=age, stale=age >= cutoff)
+        if position.get("group"):
+            valid = {p["ent"]: p for p in position.get("beacon_positions", [])}
+            group = next((g for g in layout.get("tracker_groups", [])
+                          if "bps_group_" + str(g.get("id")) == position.get("ent")), {})
+            position["member_status"] = {member: (
+                valid[member].get("selection_reason", "used" if valid[member].get("used") else "excluded")
+                if member in valid else "no_eligible_fix") for member in group.get("beacons", [])}
+    return {"time": now, "context": context, "positions": copied,
+        "omitted_positions": max(0, len(positions) - 128),
+        "offline_receivers": list(dom.get("rl_offline", []))[:128]}
+
+
+async def _capture_recent_tracking(hass):
+    """Use the existing batch task; failures never interrupt positioning."""
+    if not hass.data.get("bps_initialized"):
+        return
+    dom = hass.data.setdefault(DOMAIN, {})
+    history = dom.get("_recent_tracking")
+    if history is None:
+        history = dom["_recent_tracking"] = recent_tracking.RecentTrackingHistory()
+    if not outdoor_settings(get_bps_data(hass) or {})["enabled"]:
+        history.clear()
+        return
+    now = time.time()
+    if not history.due(now):
+        return
+    last = dom.get("_recent_tracking_last_attempt")
+    if last and last[0] is history and 0 <= now - last[1] < recent_tracking.SAMPLE_INTERVAL_SECONDS:
+        return
+    dom["_recent_tracking_last_attempt"] = (history, now)
+    context = _capture_tracking_context(hass)
+    try:
+        detached = _recent_tracking_snapshot(hass, now)
+        packed = await hass.async_add_executor_job(recent_tracking.pack, detached)
+        # An unload/layout change during encoding invalidates this batch.
+        if (_tracking_context_current(context) and hass.data.get("bps_initialized")
+                and dom.get("_recent_tracking") is history):
+            history.append(packed, time.time())
+    except recent_tracking.PackError as err:
+        history.record_failure(err.reason)
+    except Exception:
+        history.record_failure()
+
+
 def _diagnostic_report_snapshot(hass, now):
     """All saved tracking configuration and current telemetry; never starts capture."""
     snapshot = _diagnostic_snapshot(hass, None, now)
     dom = hass.data.get(DOMAIN, {})
+    recent = dom.get("_recent_tracking")
+    snapshot["_recent_tracking_snapshot"] = (recent or recent_tracking.RecentTrackingHistory()).snapshot(now)
     layout = get_bps_data(hass)
     # Saved settings only; omit map/icon assets and unrelated entity state.
     if isinstance(layout, dict):

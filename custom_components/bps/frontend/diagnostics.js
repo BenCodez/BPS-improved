@@ -16,7 +16,10 @@
             el('ReportStatus').textContent = 'Collecting full diagnostics…';
             try {
                 const panel = panelSnapshot ? JSON.stringify(panelSnapshot(), null, 2) : null;
-                const response = await apiFetch('/api/bps/diagnostics?report=1');
+                const panelContext = panel ? {guide: 'Editor state may contain unsaved changes; the backend uses context.layout.', ...JSON.parse(panel)} : null;
+                const panelBytes = panelContext ? new TextEncoder().encode(JSON.stringify({panel_context: panelContext}, null, 2)).length + 256 : 0;
+                if (panelBytes > 4 * 1024 * 1024) throw new Error('Combined diagnostic report exceeds 4 MiB.');
+                const response = await apiFetch('/api/bps/diagnostics?report=1' + (panelContext ? '&panel_bytes=' + panelBytes : ''));
                 const body = await response.json();
                 if (!response.ok) throw new Error(body.error || `Diagnostic request failed (${response.status})`);
                 if (typeof body.text !== 'string' || !body.text.trim()) throw new Error('The diagnostic report was empty. Try again.');
@@ -24,7 +27,7 @@
                 if (panel) {
                     const start = text.indexOf('{');
                     const report = JSON.parse(text.slice(start));
-                    report.panel_context = {guide: 'Editor state may contain unsaved changes; the backend uses context.layout.', ...JSON.parse(panel)};
+                    report.panel_context = panelContext;
                     text = text.slice(0, start) + JSON.stringify(report, null, 2);
                 }
                 if (new TextEncoder().encode(text).length > 4 * 1024 * 1024) throw new Error('Combined diagnostic report exceeds 4 MiB.');
