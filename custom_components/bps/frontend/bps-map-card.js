@@ -1102,7 +1102,7 @@ class BpsMapCard extends HTMLElement {
         // Centered under the icon, clamped to the canvas so names near the
         // edges stay fully readable; flipped above the icon at the bottom.
         const unknown = this._receiverStatuses.get(rec.entity_id) == null;
-        const unmatched = this._receiverMatching && !this._receiverMatching.has(rec.entity_id);
+        const unmatched = this._receiverMatching && !this._currentReceiverOption(rec.entity_id);
         const label = (offline ? "(Offline) " : unmatched ? "(Unmatched) " : unknown ? "(Unknown) " : "") + rec.entity_id;
         const textWidth = ctx.measureText(label).width;
         let labelX = x - textWidth / 2;

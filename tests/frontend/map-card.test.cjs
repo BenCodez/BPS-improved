@@ -666,6 +666,12 @@ test('real card refresh resolves removed old slug through unchanged proven MAC a
         }
         c._nextBermudaDumpAt = 0; c._nextReceiverInventoryAt = 0; await c._refreshBermudaScanners();
         assert.equal(c._computeReceiverStatuses().get('old_station'), true, `${legacy}/${proof}`);
+        const cv = canvas(); c._canvas = cv.value;
+        c._config.show_receiver_labels = true; c._config.scale_receiver_labels = 100;
+        c._config.scale_receiver_icon = 100; c._getIconImage = () => null;
+        c._receiverStatuses = c._computeReceiverStatuses(); c._drawReceivers();
+        assert.ok(cv.calls.includes('old_station'), 'proven alias renders the normal receiver label');
+        assert.ok(!cv.calls.includes('(Unmatched) old_station'));
         assert.equal(JSON.stringify(c._receivers), before);
     }
 });
