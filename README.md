@@ -1253,6 +1253,8 @@ wins:
 Tiers 2–4 need no configuration and match by the receiver name you used in the
 panel (normally the proxy's HA device name), including uniquely proven aliases.
 Conflicting or unavailable saved scanner identities remain Unknown until matched.
+The card refreshes Bermuda identity evidence while open. If that authenticated
+inventory is unavailable, automatic status remains Unknown until it can be checked.
 If a receiver shows red while the
 device is online, map it explicitly in `receiver_status`.
 

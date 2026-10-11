@@ -99,9 +99,12 @@ class BpsMapCard extends HTMLElement {
     this._outdoorSettings = {enabled: false, show_uncertainty: true, hide_uncertainty_below_m: 0};
     this._floorScale = null;
     this._receiverStatuses = new Map();
+    this._receiverBindings = new Map();
+    this._receiverInventoryCurrent = false;
     this._bermudaScanners = null;
     this._bermudaDumpAt = 0;
     this._nextBermudaDumpAt = 0;
+    this._nextReceiverInventoryAt = 0;
     this._bermudaNewest = 0;
     this._devicesRef = null;
     this._deviceSlugMap = new Map();
@@ -161,9 +164,12 @@ class BpsMapCard extends HTMLElement {
     this._subzones = [];
     this._zones = [];
     this._receiverStatuses = new Map();
+    this._receiverBindings = new Map();
+    this._receiverInventoryCurrent = false;
     // A reconfigure gets an immediate dump attempt; the previous scanner map
     // is kept to bridge the gap until it lands.
     this._nextBermudaDumpAt = 0;
+    this._nextReceiverInventoryAt = 0;
     this._lastZoneLabelSignature = "";
     this._lastFloorPresenceSignature = "";
     this._baseImage = null;
@@ -406,15 +412,43 @@ class BpsMapCard extends HTMLElement {
     return res;
   }
 
-  async _refreshBermudaScanners() {
+  async _refreshBermudaScanners(expectedGen = this._runGeneration) {
     const hass = this._hass;
-    if (!hass?.callWS || !this._config?.show_receivers) return;
+    if (!this._config?.show_receivers || expectedGen !== this._runGeneration) return;
     const now = Date.now();
-    if (now < this._nextBermudaDumpAt) return;
+    const inventoryDue = now >= (this._nextReceiverInventoryAt || 0);
+    const dumpDue = now >= (this._nextBermudaDumpAt || 0);
+    if (!inventoryDue && !dumpDue) return;
+    const sequence = this._receiverRefreshSequence = (this._receiverRefreshSequence || 0) + 1;
+    const current = () => expectedGen === this._runGeneration && sequence === this._receiverRefreshSequence;
     // Keep the refresh shorter than the offline threshold: between dumps a
     // scanner's age grows by the elapsed wall time, so a healthy scanner must
     // be re-anchored before it can cross receiver_timeout.
-    this._nextBermudaDumpAt = now + Math.min(15, Math.max(5, this._config.receiver_timeout / 2)) * 1000;
+    const nextAt = now + Math.min(15, Math.max(5, this._config.receiver_timeout / 2)) * 1000;
+    if (dumpDue) this._nextBermudaDumpAt = nextAt;
+    // Age and connectivity evidence must use current owner/MAC proof. Retain
+    // the last valid inventory for display, but suspend automatic statuses
+    // while its authenticated refresh is pending or unavailable.
+    if (inventoryDue) {
+      this._nextReceiverInventoryAt = nextAt;
+      this._receiverInventoryCurrent = false;
+      try {
+        const response = await this._apiFetch("/api/bps/scanner_linking");
+        if (!current()) return;
+        if (!response?.ok) throw new Error("Scanner inventory unavailable");
+        const data = await response.json();
+        if (!current()) return;
+        const matching = data?.matching;
+        if (!Array.isArray(matching?.options) || !matching.mac_owners || typeof matching.mac_owners !== "object"
+          || Array.isArray(matching.mac_owners)) throw new Error("Invalid scanner inventory");
+        this._receiverMatching = new Map(matching.options.map(option => [option.entity_id, option]));
+        this._receiverMacOwners = new Map(Object.entries(matching.mac_owners));
+        this._receiverInventoryCurrent = true;
+      } catch (e) {
+        if (!current()) return;
+      }
+    }
+    if (!dumpDue || !hass?.callWS) return;
     try {
       const resp = await hass.callWS({
         type: "call_service",
@@ -423,6 +457,7 @@ class BpsMapCard extends HTMLElement {
         service_data: { configured_devices: true },
         return_response: true,
       });
+      if (!current()) return;
       const devices = resp?.response;
       if (!devices || typeof devices !== "object") return;
       // last_seen stamps are monotonic (seconds since HA host boot), not
@@ -461,6 +496,7 @@ class BpsMapCard extends HTMLElement {
       this._bermudaScannerMacAges = byMac;
       this._bermudaDumpAt = now;
     } catch (e) {
+      if (!current()) return;
       // Bermuda missing, too old for service response data, or a transient
       // websocket error. Keep any previously working map — wall-clock aging
       // degrades it gracefully toward offline — and back off harder only
@@ -529,6 +565,31 @@ class BpsMapCard extends HTMLElement {
     return !["", "unavailable", "unknown", "none", "off", "false", "not_home", "offline", "disconnected"].includes(s);
   }
 
+  _captureReceiverBindings() {
+    // Preserve inferred legacy identity until a config/floor reload. A reused
+    // entity slug must not silently rebind a placement to replacement hardware.
+    this._receiverBindings = new Map(this._receivers.map(rec => {
+      const option = this._receiverMatching?.get(rec.entity_id);
+      const savedMac = typeof rec.scanner_mac === "string" && /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(rec.scanner_mac)
+        ? rec.scanner_mac.toLowerCase() : null;
+      const mac = savedMac || (!option?.identity_ambiguous ? option?.scanner_mac : null) || null;
+      const owner = rec.scanner_config_entry_id || (option?.scanner_mac === mac && !option?.identity_ambiguous
+        && option?.config_entry_ids?.length === 1 ? option.config_entry_ids[0] : null);
+      return [rec.entity_id, mac && owner ? {scanner_mac: mac, owner} : null];
+    }));
+  }
+
+  _currentReceiverOption(id) {
+    const direct = this._receiverMatching?.get(id);
+    if (!this._receiverBindings) return direct; // Older/no-layout callers.
+    const binding = this._receiverBindings.get(id);
+    if (!binding) return direct?.identity_ambiguous ? null : direct;
+    const matches = option => !option?.identity_ambiguous && option?.scanner_mac === binding.scanner_mac
+      && option.config_entry_ids?.length === 1 && option.config_entry_ids[0] === binding.owner;
+    if (direct) return matches(direct) ? direct : null;
+    return [...(this._receiverMatching?.values() || [])].find(matches) || null;
+  }
+
   _computeReceiverStatuses() {
     const statuses = new Map();
     const states = this._hass?.states;
@@ -582,7 +643,11 @@ class BpsMapCard extends HTMLElement {
         statuses.set(id, value == null || ["", "unknown", "unavailable"].includes(value) ? null : BpsMapCard.stateLooksOnline(value));
         continue;
       }
-      const identity = this._receiverMatching?.get(id);
+      const identity = this._currentReceiverOption(id);
+      if (this._receiverInventoryCurrent === false || this._receiverBindings && !identity) {
+        statuses.set(id, null);
+        continue;
+      }
       const savedMac = typeof rec.scanner_mac === "string" && /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(rec.scanner_mac)
         ? rec.scanner_mac.toLowerCase() : null;
       if (identity?.identity_ambiguous || savedMac && (savedMac !== identity?.scanner_mac
@@ -605,7 +670,7 @@ class BpsMapCard extends HTMLElement {
         const nameAge = identity?.liveness_name_unique === false ? null : this._bermudaScanners.get(id) ??
           (identity ? this._bermudaScanners.get(BpsMapCard.haSlugify(identity.name)) : null);
         const ageAtDump = identity?.identity_ambiguous || (ownersByMac.get(identity?.scanner_mac)?.size || 0) > 1 ? null :
-          this._bermudaScannerMacAges?.get(identity?.scanner_mac) ?? nameAge;
+          (identity?.scanner_mac ? this._bermudaScannerMacAges?.get(identity.scanner_mac) : nameAge);
         if (ageAtDump != null) {
           const age = ageAtDump + (Date.now() - this._bermudaDumpAt) / 1000;
           statuses.set(id, age <= this._config.receiver_timeout);
@@ -774,6 +839,7 @@ class BpsMapCard extends HTMLElement {
 
   async _loadFloorResources(expectedGen) {
     await bpsOutdoorReady;
+    if (expectedGen !== this._runGeneration) return;
     const res = await this._apiFetch("/api/bps/read_text");
     if (!res) throw new Error("BPS auth not ready (no token / backing off)");
     if (!res.ok) throw new Error(`Could not read BPS data (${res.status})`);
@@ -790,6 +856,7 @@ class BpsMapCard extends HTMLElement {
     this._knownBeaconKeys = new Set(Array.isArray(data.entities) ? data.entities : []);
     this._receiverMatching = new Map((data.receiver_matching?.options || []).map(option => [option.entity_id, option]));
     this._receiverMacOwners = new Map(Object.entries(data.receiver_matching?.mac_owners || {}));
+    this._receiverInventoryCurrent = true;
     for (const alias of data.scanner_diagnostics?.alias_receivers || []) {
       const option = [...this._receiverMatching.values()].find(row => row.scanner_mac === alias.scanner_mac
         && row.config_entry_ids?.length === 1 && row.config_entry_ids[0] === alias.config_entry_id);
@@ -809,18 +876,18 @@ class BpsMapCard extends HTMLElement {
     this._receivers = Array.isArray(floor.receivers)
       ? floor.receivers.filter((r) => r && r.entity_id && r.cords && r.cords.x != null && r.cords.y != null)
       : [];
+    this._captureReceiverBindings();
     this._subzones = Array.isArray(floor.subzones)
       ? floor.subzones.filter((s) => s && Array.isArray(s.cords) && s.cords.length >= 3)
       : [];
     this._zones = Array.isArray(floor.zones)
       ? floor.zones.filter((z) => z && Array.isArray(z.cords) && z.cords.length >= 3)
       : [];
-    await this._refreshBermudaScanners();
+    await this._refreshBermudaScanners(expectedGen);
+    if (expectedGen !== this._runGeneration) return;
     this._receiverStatuses = this._computeReceiverStatuses();
-    if (expectedGen !== this._runGeneration) {
-      return;
-    }
     const mapUrl = await this._resolveMapUrl(floor.name);
+    if (expectedGen !== this._runGeneration) return;
     if (mapUrl !== this._mapUrlLoaded || !this._baseImage) {
       await this._loadFloorImage(mapUrl, expectedGen);
       if (expectedGen !== this._runGeneration) {
