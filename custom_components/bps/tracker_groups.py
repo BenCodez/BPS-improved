@@ -385,13 +385,20 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
     environment_fallback = any(p["environment_fallback"] for p in accepted)
     if conflict or floor_conflict or environment_fallback or motion or detection_only:
         confidence = "poor"
-    diagnostics = [{k: v for k, v in p.items() if k not in ("weight", "scale", "receiver_ids")}
+    diagnostics = [{k: v for k, v in p.items() if k not in ("scale", "receiver_ids")}
                    for p in fixes]
     accepted_ids = {p["ent"] for p in accepted}
     for entry in diagnostics:
         entry["used"] = entry["ent"] in accepted_ids
+        entry["normalized_weight"] = entry["weight"] / weight if entry["used"] else 0.0
+        entry["selection_reason"] = ("anchor" if entry["ent"] == anchor["ent"] else
+            "agrees_with_anchor" if entry["used"] else
+            "different_floor" if entry["floor"] != floor else
+            "detection_only_with_directional_fix" if entry["detection_only"] and not detection_only else
+            "outside_anchor_agreement")
         if entry["ent"] in rejected_motion:
             entry["excluded_reason"] = "group_motion_outlier"
+            entry["selection_reason"] = "group_motion_outlier"
     # The same proxy often sees both beacons. Counts alone cannot identify
     # overlap; use a conservative maximum unless all sources provide names.
     if all(p["receiver_ids"] for p in accepted):

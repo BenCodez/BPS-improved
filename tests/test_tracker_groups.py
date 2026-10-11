@@ -31,6 +31,15 @@ def fuse(*positions, now=NOW):
     return G.fuse_group(GROUP, list(positions), SCALES, now)
 
 
+def test_member_selection_reasons_and_weights_explain_grey_beacon():
+    result = fuse(position(), position(ent="beacon_b", x=600, uncertainty=20))
+    anchor, excluded = result["beacon_positions"]
+    assert anchor["selection_reason"] == "anchor" and anchor["normalized_weight"] == 1
+    assert excluded["selection_reason"] == "outside_anchor_agreement"
+    assert excluded["normalized_weight"] == 0 and excluded["weight"] > 0
+    assert not excluded["used"]
+
+
 def test_old_layout_and_disabled_feature_produce_no_groups():
     for data in ({}, None, layout(enabled=False), layout(enabled=1),
                  {"outdoor_tracking": True, "tracker_groups": [GROUP]}):

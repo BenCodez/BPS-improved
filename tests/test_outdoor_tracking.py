@@ -957,6 +957,8 @@ def test_group_entities_publish_changes_without_ticking_age_attributes(hass, mon
     assert "last_update_age_s" not in attrs
     assert "position_age_s" not in attrs["outdoor"]
     assert all("age_s" not in beacon for beacon in attrs["beacon_positions"])
+    assert all("weight" not in beacon and "normalized_weight" not in beacon
+               for beacon in attrs["beacon_positions"])
     for now in range(1001, 1011):
         run(bps.update_tracker_groups(hass))
     assert all(sensor.writes == 1 and sensor._attrs == attrs for sensor in sensors)
