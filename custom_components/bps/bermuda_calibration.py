@@ -164,8 +164,12 @@ def build_preview(coords, floor_name, result, current_source, tracking=None):
         warnings.append("solve_error_unavailable")
     elif after > before:
         warnings.append("solve_worsens_reference_error")
+    tested = tracking.get("candidate_corrections") if tracking is not None else None
+    # Tracking replay expands equivalent aliases exactly as Apply does. Extra
+    # alias keys are harmless, but every solved factor still needs validation.
     validated = (tracking is not None and tracking.get("candidate_solved_at") == result.get("solved_at")
-                 and tracking.get("candidate_corrections") == candidates)
+                 and isinstance(tested, Mapping) and all(slug in tested and tested[slug] == factor
+                     for slug, factor in candidates.items()))
     if not validated:
         warnings.append("measured_tracking_revalidation_required")
     elif tracking.get("verdict") != "improves":
