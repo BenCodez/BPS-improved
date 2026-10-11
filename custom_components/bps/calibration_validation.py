@@ -21,7 +21,7 @@ def number(value):
 def geometry(floor):
     return {"scale": floor.get("scale"), "zones": floor.get("zones", []),
             "environment": floor.get("environment", []),
-            "receivers": [{k: r.get(k) for k in ("entity_id", "height", "outdoor_policy")} |
+            "receivers": [{k: r.get(k) for k in ("entity_id", "scanner_uid", "height", "outdoor_policy")} |
                 {"cords": {k: r.get("cords", {}).get(k) for k in ("x", "y")}}
                 for r in floor.get("receivers", [])]}
 
@@ -115,8 +115,9 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
         if context_id != frame["context_id"]:
             context_id, context_since = frame["context_id"], frame["time"]
         layout = context["layout"]
-        if (current_layout is not None
-                and layout.get("outdoor_tracking", {}) != current_layout.get("outdoor_tracking", {})):
+        if (current_layout is not None and any(layout.get(key) != current_layout.get(key)
+                for key in ("outdoor_tracking", "tracker_groups", "tracker_height", "tracker_heights",
+                            "tracker_ref_offsets", "reading_max_age", "position_timeout"))):
             continue
         floor = next((f for f in layout.get("floor", []) if f.get("name") == floor_name), None)
         if floor is None or geometry(floor) != geometry(current_floor):

@@ -535,9 +535,11 @@ test('auto calibration displays apply and skip reasons even before a first resul
     await p.el('calibAuto').fire('change');
     assert.match(p.el('calibStatus').textContent, /skipped: Collecting fresh/);
     p.network.calibration.auto_status.Property = {state: 'applied', reason: 'Stable estimate',
-        updated_receivers: 4, max_change_pct: 10, unchanged_receivers: ['weak_receiver']};
+        updated_receivers: 4, max_change_pct: 10, unchanged_receivers: ['weak_receiver'],
+        tracking_validation: {verdict: 'inconclusive'}};
     await p.el('calibAuto').fire('change');
     assert.match(p.el('calibStatus').textContent, /applied: Stable estimate/);
     assert.match(p.el('calibStatus').textContent, /4 receivers, maximum change 10%/);
     assert.match(p.el('calibStatus').textContent, /1 unsupported receivers unchanged/);
+    assert.match(p.el('calibStatus').textContent, /measured tracking check: inconclusive/);
 });

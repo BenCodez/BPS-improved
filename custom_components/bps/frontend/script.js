@@ -6449,6 +6449,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 line += ` · ${decision.state}: ${decision.reason}`;
                 if (decision.updated_receivers) line += ` · ${decision.updated_receivers} receivers, maximum change ${decision.max_change_pct}%`;
                 if (decision.unchanged_receivers?.length) line += ` · ${decision.unchanged_receivers.length} unsupported receivers unchanged`;
+                if (decision.tracking_validation) line += ` · measured tracking check: ${decision.tracking_validation.verdict}`;
             }
             calibStatus.textContent = line;
             return;

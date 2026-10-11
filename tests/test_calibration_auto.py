@@ -49,6 +49,17 @@ def test_stable_real_fit_earns_gradual_update_on_held_out_samples():
     assert (snapshot, history) == before
 
 
+def test_ble_jumps_do_not_turn_into_large_correction_updates():
+    _floor, snapshot, history = fixture_data()
+    noise = (1.03, .97, 1.01, .99, 1., 8., .98, 1.02, 1., 1.)
+    for key, rows in history.items():
+        history[key] = [(t, d * noise[i % 10]) for i, (t, d) in enumerate(rows)]
+    _result, updates, status = assess(snapshot, history)
+    assert status['state'] == 'applied'
+    assert max(abs(factor - 1) for factor in updates.values()) <= .100001
+    assert updates['r0'] < 1 < updates['r1']
+
+
 def test_current_layout_scale_and_unsupported_receiver_are_preserved():
     _floor, snapshot, history = fixture_data()
     snapshot["receivers"]["unsupported"] = dict(snapshot["receivers"]["r0"], x=600)
