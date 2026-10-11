@@ -77,6 +77,22 @@ test('invalid uncertainty and legacy untimed data do not retain a fake display r
     assert.equal(out.uncertaintyRadius(row.outdoor, 20, {enabled: true}), 80);
 });
 
+test('republished cached observations cannot confirm growth even with measurement-age gating disabled', () => {
+    for (const use_observation_age of [true, false]) {
+        let fix = radiusFix(3, 0, undefined, 'Property', {use_observation_age});
+        fix = radiusFix(120, 1, fix, 'Property', {use_observation_age});
+        for (const seconds of [2, 4, 8]) {
+            fix = radiusFix(120, seconds, fix, 'Property', {observed: 101, use_observation_age});
+        }
+        assert.equal(fix.uncertaintyState.elevatedCount, 1);
+        assert.equal(fix.outdoor.display_uncertainty_m, 3);
+        fix = radiusFix(120, 9, fix, 'Property', {use_observation_age});
+        assert.equal(fix.outdoor.display_uncertainty_m, 3);
+        fix = radiusFix(120, 10, fix, 'Property', {use_observation_age});
+        assert.ok(fix.outdoor.display_uncertainty_m > 3);
+    }
+});
+
 test('mini beacon numbering remains stable when earlier members lose their fixes', () => {
     const group = {beacons: ['beacon_a', 'beacon_b']};
     assert.equal(out.beaconNumber({ent: 'beacon_b'}, group), '2');

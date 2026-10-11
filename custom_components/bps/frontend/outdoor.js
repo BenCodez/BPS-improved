@@ -57,7 +57,10 @@
     }
     function stabilizeUncertainty(row, previous, now = Date.now()) {
         const raw = row?.outdoor?.estimated_uncertainty_m;
-        const stamp = number(row?.updated) ? row.updated * 1000 : row?.outdoor?.observed * 1000;
+        // Re-solving cached BLE readings advances publication time, not the
+        // observation clock. Require distinct measurements to confirm growth.
+        const source = number(row?.outdoor?.observed) ? row.outdoor.observed : row?.updated;
+        const stamp = source * 1000;
         if (!number(raw) || raw < 0 || !number(stamp) || stamp < 0) {
             return {outdoor: row?.outdoor, uncertaintyState: null};
         }
