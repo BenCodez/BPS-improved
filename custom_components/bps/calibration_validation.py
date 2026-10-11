@@ -84,7 +84,7 @@ def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_
     bounds = (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
     if layout.get("outdoor_tracking", {}).get("enabled") is True:
         result = solve_outdoor(candidate, weighted, bounds, scale, .5 * scale,
-            max_age_s, None, solver)
+            max_age_s, None, solver, nearby_trust=True)
         if result is None:
             return None
         fix, quality = result["fix"], result["outdoor"]
@@ -181,7 +181,7 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
             "candidate_failures": s["candidate_failures"]} for key, s in reports.items()},
         "scope": "Paired raw beacon fixes on the marked floor, using "
             + ("current layout corrections" if baseline_corrections is not None else "recorded corrections") + " as baseline. "
-            "Group recordings test their member beacons. Includes obstruction weights and height projection; "
+            "Group recordings test their member beacons. Includes nearby range trust, obstruction weights and height projection; "
             "excludes temporal jump weights, Kalman smoothing, group fusion, floor election and zone snapping. "
             "At least 5 distinct observations at 2 measured locations are needed. No calibration changed."}
 
