@@ -92,5 +92,12 @@ def inventory(hass):
             target[key].sort()
         target["label"] = f'{target["name"]} · {slug}' + (f' · {mac}' if mac else '')
         options.append(target)
+    name_identities = {}
+    for option in options:
+        name = slugify(option["name"])
+        identity = (tuple(option["config_entry_ids"]), option["scanner_mac"] or option["entity_id"])
+        name_identities.setdefault(name, set()).add(identity)
+    for option in options:
+        option["liveness_name_unique"] = len(name_identities[slugify(option["name"])]) == 1
     revision = hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()
     return {"read_only": True, "revision": revision, "options": options}

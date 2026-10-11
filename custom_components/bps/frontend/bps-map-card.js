@@ -557,9 +557,10 @@ class BpsMapCard extends HTMLElement {
       // fetched, so add the wall time elapsed since.
       if (this._bermudaScanners) {
         const identity = this._receiverMatching?.get(id);
-        const ageAtDump = identity?.identity_ambiguous ? null :
-          this._bermudaScannerMacAges?.get(identity?.scanner_mac) ?? this._bermudaScanners.get(id) ??
+        const nameAge = identity?.liveness_name_unique === false ? null : this._bermudaScanners.get(id) ??
           (identity ? this._bermudaScanners.get(BpsMapCard.haSlugify(identity.name)) : null);
+        const ageAtDump = identity?.identity_ambiguous ? null :
+          this._bermudaScannerMacAges?.get(identity?.scanner_mac) ?? nameAge;
         if (ageAtDump != null) {
           const age = ageAtDump + (Date.now() - this._bermudaDumpAt) / 1000;
           statuses.set(id, age <= this._config.receiver_timeout);

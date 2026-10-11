@@ -400,3 +400,17 @@ test('duplicate friendly names resolve liveness by MAC or remain unknown regardl
     await c._refreshBermudaScanners();
     assert.equal(c._bermudaScanners.has('workshop'), false, 'missing clock must not borrow a same-name scanner age');
 });
+
+test('a scanner absent from the dump cannot inherit a shared friendly name age', async () => {
+    const c = card(); c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+    c._receivers = [{entity_id: 'old_a'}, {entity_id: 'old_b'}];
+    c._receiverMatching = new Map([['old_a', {name: 'Workshop', scanner_mac: 'aa:bb:cc:11:22:33', liveness_name_unique: false}],
+        ['old_b', {name: 'Workshop', scanner_mac: 'aa:bb:cc:44:55:66', liveness_name_unique: false}]]);
+    c._hass.callWS = async () => ({response: {'aa:bb:cc:44:55:66': {_is_scanner: true, name: 'Workshop', last_seen: 1},
+        tag: {last_seen: 100}}});
+    await c._refreshBermudaScanners();
+    assert.equal(c._computeReceiverStatuses().get('old_a'), null);
+    assert.equal(c._computeReceiverStatuses().get('old_b'), false);
+    c._hass.states['binary_sensor.old_a_status'] = {state: 'on', attributes: {device_class: 'connectivity'}};
+    assert.equal(c._computeReceiverStatuses().get('old_a'), true);
+});

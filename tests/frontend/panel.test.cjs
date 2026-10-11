@@ -950,3 +950,16 @@ test('same-floor scanner aliases with proven identical MAC cannot be bound twice
     assert.match(dialog.error.textContent, /already bound/); assert.deepEqual(plain(p.hooks.layout()), before);
     await dialog.cancel.fire('click');
 });
+
+test('applying an existing scanner slug repairs stored hardware identity without changing placement properties', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'workshop_112233', scanner_uid: 'obsolete',
+        scanner_mac: 'dd:ee:ff:11:22:33', cords: {x: 10, y: 20}, height: 2, correction: 1.2, hardware_model: 'Synthetic'}];
+    const p = await panel(source, [], false, matchingFixture()); p.hooks.select('Property');
+    const before = plain(p.hooks.layout().floor[0].receivers[0]);
+    const dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    const after = plain(p.hooks.layout().floor[0].receivers[0]);
+    assert.deepEqual(after, {...before, scanner_uid: '112233', scanner_mac: 'aa:bb:cc:11:22:33'});
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].receivers[0], after);
+});

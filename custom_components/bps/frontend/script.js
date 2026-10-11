@@ -5185,7 +5185,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                         && option.token === (other.scanner_uid || identity?.token || scannerTokenJs(other.entity_id));
                 });
                 if (duplicate) throw new Error('This scanner is already bound to another placement on this floor.');
-                if (rec.entity_id === choice) { close(); return; }
                 const oldId = rec.entity_id;
                 rec.entity_id = choice;
                 rec.scanner_uid = option.token || scannerTokenJs(choice);

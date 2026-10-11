@@ -1144,7 +1144,7 @@ async def update_receiver_liveness(hass):
         name = matching.get(slug, {}).get("name")
         mac = matching.get(slug, {}).get("scanner_mac")
         age = dom.get("rl_mac_ages", {}).get(mac)
-        if age is None:
+        if age is None and matching.get(slug, {}).get("liveness_name_unique", True):
             age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS

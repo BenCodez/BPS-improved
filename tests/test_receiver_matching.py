@@ -178,3 +178,22 @@ def test_shared_name_with_missing_clock_does_not_borrow_other_scanner_age(hass, 
     bps._refresh_dump_ages(hass, dom, {"a": {"_is_scanner": True, "name": "Workshop", "last_seen": 100},
                                     "b": {"_is_scanner": True, "name": "Workshop", "last_seen": None}})
     assert dom["rl_ages"] == {} and dom["rl_mac_ages"] == {}
+
+
+def test_scanner_absent_from_dump_cannot_borrow_shared_name_age(hass, monkeypatch):
+    entries, states, devices, add = configure(hass, monkeypatch)
+    second_mac = "aa:bb:cc:44:55:66"
+    for slug, mac in (("old_a_112233", MAC), ("old_b_445566", second_mac)):
+        add(f"sensor.tag_distance_to_{slug}", uid="synthetic-tracker_" + mac + "_range")
+        devices[slug] = NS(_is_scanner=True, address=mac, name="Workshop")
+    assert all(not row["liveness_name_unique"] for row in inventory(hass)["options"])
+    async def call(*args, **kwargs):
+        return {second_mac: {"_is_scanner": True, "name": "Workshop", "last_seen": 1},
+                "tag": {"last_seen": 100}}
+    hass.services.async_call = call
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert hass.data["bps"]["rl_offline"] == ["old_b_445566"]
+    assert hass.data["bps"]["rl_unknown"] == ["old_a_112233"]
+    states["binary_sensor.old_a_112233_status"] = NS(state="on", attributes={"device_class": "connectivity"})
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert hass.data["bps"]["rl_offline"] == ["old_b_445566"] and hass.data["bps"]["rl_unknown"] == []
