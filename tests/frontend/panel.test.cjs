@@ -34,7 +34,8 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             async fire(event, extra = {}) {for (const cb of events.get(event) || []) await cb({target: this, preventDefault() {}, ...extra});},
             getContext: () => context, querySelector: () => null, querySelectorAll: () => [], closest: () => null,
             getBoundingClientRect: () => ({left: 0, top: 0, right: 2000, bottom: 1000, width: 2000, height: 1000}), focus() {}};
-        Object.defineProperty(el, 'innerHTML', {get: () => '', set: () => {el.children = [];}});
+        let html = '';
+        Object.defineProperty(el, 'innerHTML', {get: () => html, set: value => {html = value; el.children = [];}});
         return el;
     }
     const document = {getElementById(id) {if (!ids.has(id)) ids.set(id, element(id === 'canvas' ? 'canvas' : 'div')); return ids.get(id);},
@@ -72,6 +73,28 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
 }
 const layout = () => ({floor: [{name: 'Property', scale: 20, zones: [], receivers: []}]});
 const points = [{x: 100, y: 100}, {x: 200, y: 100}, {x: 200, y: 200}, {x: 100, y: 200}];
+
+test('panel smooths the group circle without adding member circles or altering raw diagnostics', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a', 'beacon_b']}];
+    const p = await panel(source); p.hooks.select('Property');
+    p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click');
+    const poll = p.intervals.findLast(i => i.ms === 500);
+    for (const [seconds, radius] of [[0, 3], [1, 120], [2, 120], [3, 120], [4, 3]]) {
+        const now = 100000 + seconds * 1000;
+        p.setClock(now); p.canvasCalls.length = 0;
+        p.network.cords = [{ent: 'bps_group_rover', group: true, name: 'Rover', floor: 'Property',
+            cords: [200, 100], updated: now / 1000, outdoor: {estimated_uncertainty_m: radius, observed: now / 1000},
+            beacon_positions: [{ent: 'beacon_a', cords: [195, 100]}, {ent: 'beacon_b', cords: [205, 100]}]}];
+        await poll.cb();
+        const fix = p.hooks.tracks().get('bps_group_rover');
+        assert.equal(fix.payload.outdoor.estimated_uncertainty_m, radius);
+        const circles = p.canvasCalls.filter(c => c[0] === 'arc' && c[3] > 24);
+        assert.equal(circles.length, 1);
+        assert.equal(circles[0][3], 60);
+    }
+});
 
 test('panel old layout loads without outdoor fields and opt-in saves via authenticated layout endpoint', async () => {
     const p = await panel(layout());
@@ -542,4 +565,22 @@ test('auto calibration displays apply and skip reasons even before a first resul
     assert.match(p.el('calibStatus').textContent, /4 receivers, maximum change 10%/);
     assert.match(p.el('calibStatus').textContent, /1 unsupported receivers unchanged/);
     assert.match(p.el('calibStatus').textContent, /measured tracking check: inconclusive/);
+});
+
+test('auto preview distinguishes existing weak receivers from newly placed receivers', async () => {
+    const source = layout();
+    source.floor[0].receivers = ['r0', 'r1', 'r2', 'r3', 'extra'].map(entity_id => ({entity_id, cords: {x: 0, y: 0}}));
+    const p = await panel(source);
+    p.hooks.select('Property');
+    p.network.calibration = {mode: 'auto', results: {Property: {floor: 'Property', receivers: {r0: 1, r1: 1, r2: 1, r3: 1},
+        matrix: [], auto_excluded_receivers: ['extra'], missing_unmatched: [], missing_no_data: []}}};
+    p.el('calibAuto').checked = true;
+    await p.el('calibAuto').fire('change');
+    assert.match(p.el('calibResults').innerHTML, /Auto updates excluded: extra/);
+    assert.doesNotMatch(p.el('calibResults').innerHTML, /Placed since this report/);
+    p.network.calibration.results.Property.auto_excluded_receivers = [];
+    p.network.calibration.results.Property.missing_unmatched = ['extra'];
+    await p.el('calibAuto').fire('change');
+    assert.match(p.el('calibResults').innerHTML, /No matching Bermuda scanner:/);
+    assert.doesNotMatch(p.el('calibResults').innerHTML, /Placed since this report/);
 });

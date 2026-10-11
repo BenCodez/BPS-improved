@@ -10,6 +10,73 @@ const out = context.BPSOutdoor;
 const plain = value => JSON.parse(JSON.stringify(value));
 const polygon = [{x: 0, y: 0}, {x: 100, y: 0}, {x: 100, y: 100}, {x: 0, y: 100}];
 
+function radiusFix(raw, seconds, previous, floor = 'Property', extra = {}) {
+    const now = 100000 + seconds * 1000;
+    const row = {floor, updated: now / 1000, outdoor: {estimated_uncertainty_m: raw,
+        confidence: raw > 10 ? 'poor' : 'good', observed: now / 1000, ...extra}};
+    return {...out.stabilizeUncertainty(row, previous, now), receivedAt: out.fixTime(row, now)};
+}
+
+test('brief uncertainty spikes are held without changing the live estimate or confidence', () => {
+    let fix = radiusFix(3, 0);
+    for (const seconds of [1, 2, 3, 4]) {
+        fix = radiusFix(120, seconds, fix);
+        assert.equal(fix.outdoor.display_uncertainty_m, 3);
+        assert.equal(fix.outdoor.estimated_uncertainty_m, 120);
+        assert.equal(fix.outdoor.confidence, 'poor');
+    }
+    fix = radiusFix(3, 5, fix);
+    assert.equal(fix.outdoor.display_uncertainty_m, 3);
+    assert.equal(out.uncertaintyRadius(fix.outdoor, 20, {enabled: true}), 60);
+});
+
+test('sustained uncertainty grows gradually and recovery settles without a fixed cap', () => {
+    let fix = radiusFix(3, 0);
+    let previous = 3;
+    for (let seconds = 1; seconds <= 50; seconds++) {
+        fix = radiusFix(60, seconds, fix);
+        const displayed = fix.outdoor.display_uncertainty_m;
+        assert.ok(displayed >= previous && displayed <= Math.max(previous * 1.25, previous + .5) + 1e-9);
+        previous = displayed;
+    }
+    assert.ok(previous > 59.9);
+    for (let seconds = 51; seconds <= 56; seconds++) fix = radiusFix(3, seconds, fix);
+    assert.ok(fix.outdoor.display_uncertainty_m < 5);
+});
+
+test('cached and stale fixes cannot advance spike confirmation; floor and stale gaps reset it', () => {
+    let fix = radiusFix(3, 0);
+    fix = radiusFix(120, 1, fix);
+    for (const seconds of [2, 4, 8]) {
+        const cached = {floor: 'Property', updated: 101, outdoor: fix.outdoor};
+        fix = {...out.stabilizeUncertainty(cached, fix, 100000 + seconds * 1000), receivedAt: 101000};
+    }
+    assert.equal(fix.uncertaintyState.elevatedCount, 1);
+    assert.equal(fix.outdoor.display_uncertainty_m, 3);
+    fix = radiusFix(120, 10, fix, 'Property', {stale: true});
+    assert.equal(fix.outdoor.display_uncertainty_m, 3);
+    assert.equal(fix.uncertaintyState.elevatedCount, 1);
+    fix = radiusFix(120, 40, fix, 'Property', {stale: true});
+    assert.equal(fix.outdoor.display_uncertainty_m, 3, 'long stale gaps do not inflate the display');
+    fix = radiusFix(20, 11, fix, 'Barn');
+    assert.equal(fix.outdoor.display_uncertainty_m, 20);
+    fix = radiusFix(4, 50, fix, 'Barn');
+    assert.equal(fix.outdoor.display_uncertainty_m, 4);
+});
+
+test('invalid uncertainty and legacy untimed data do not retain a fake display radius', () => {
+    const previous = radiusFix(3, 0);
+    for (const raw of [NaN, Infinity, -1, '20']) {
+        const row = {updated: 101, outdoor: {estimated_uncertainty_m: raw}};
+        const result = out.stabilizeUncertainty(row, previous, 101000);
+        assert.equal(result.uncertaintyState, null);
+        assert.equal(out.uncertaintyRadius(result.outdoor, 20, {enabled: true}), null);
+    }
+    const row = {outdoor: {estimated_uncertainty_m: 4}};
+    assert.equal(out.stabilizeUncertainty(row, previous).uncertaintyState, null);
+    assert.equal(out.uncertaintyRadius(row.outdoor, 20, {enabled: true}), 80);
+});
+
 test('mini beacon numbering remains stable when earlier members lose their fixes', () => {
     const group = {beacons: ['beacon_a', 'beacon_b']};
     assert.equal(out.beaconNumber({ent: 'beacon_b'}, group), '2');

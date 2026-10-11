@@ -25,6 +25,7 @@ def finite(value):
 
 def _supported_pairs(snapshot, history, now, true_distance):
     pairs = {}
+    usable_nodes = set()
     for key, observations in history.items():
         tx, rx = key.split("|", 1)
         if tx not in snapshot["receivers"] or rx not in snapshot["receivers"]:
@@ -34,6 +35,8 @@ def _supported_pairs(snapshot, history, now, true_distance):
             continue
         rows = [(t, d) for t, d in observations
                 if finite(t) and finite(d) and d > 0 and now - WINDOW_S <= t <= now]
+        if len(rows) >= 5 and now - rows[-1][0] <= FRESH_S:
+            usable_nodes.update((tx, rx))
         if (len(rows) >= MIN_OBSERVATIONS and now - rows[-1][0] <= FRESH_S
                 and rows[-1][0] - rows[0][0] >= MIN_SPAN_S):
             pairs[key] = rows
@@ -48,7 +51,7 @@ def _supported_pairs(snapshot, history, now, true_distance):
             break
         nodes = supported
     if not nodes:
-        return {}, []
+        return {}, [], usable_nodes
     # Never normalize unrelated components against each other.
     components, remaining = [], set(nodes)
     while remaining:
@@ -64,7 +67,7 @@ def _supported_pairs(snapshot, history, now, true_distance):
     selected = sorted(components, key=lambda c: (-len(c), c))[0]
     selected_set = set(selected)
     return {k: v for k, v in pairs.items()
-            if all(s in selected_set for s in k.split("|", 1))}, selected
+            if all(s in selected_set for s in k.split("|", 1))}, selected, usable_nodes
 
 
 def _score(matrix, observations, factors, true_distance):
@@ -90,10 +93,14 @@ def assess_update(snapshot, history, current, floor_name, now, solve, true_dista
     """Return (preview result, incremental factors, visible decision)."""
     decision = {"state": "skipped", "reason": "Collecting fresh, independent receiver observations",
                 "checked_at": now, "updated_receivers": 0}
-    pairs, nodes = _supported_pairs(snapshot, history, now, true_distance)
+    pairs, nodes, usable_nodes = _supported_pairs(snapshot, history, now, true_distance)
     if len(nodes) < 4:
         return None, {}, decision
-    private = {"receivers": {s: snapshot["receivers"][s] for s in nodes}, "samples": {}}
+    # Fit only supported links, but retain all placements and identity matches
+    # so the preview can distinguish offline/unmatched receivers from nodes
+    # with real samples that simply failed the stronger automatic gates.
+    private = {"receivers": snapshot["receivers"], "samples": {},
+               "matched_placed": snapshot.get("matched_placed", {})}
     # The design matrix must have only the usual shared RX/TX gauge. Even a
     # dense bipartite network can contain an extra unidentifiable offset.
     index = {s: i for i, s in enumerate(nodes)}
@@ -115,6 +122,10 @@ def assess_update(snapshot, history, current, floor_name, now, solve, true_dista
         decision["reason"] = str(error)
         return None, {}, decision
     proposed = result["receivers"]
+    excluded = sorted(usable_nodes - set(proposed))
+    result["auto_excluded_receivers"] = excluded
+    for key in ("missing_unmatched", "missing_no_data"):
+        result[key] = [s for s in result[key] if s not in excluded]
     decision["supported_receivers"] = len(proposed)
     decision["unchanged_receivers"] = sorted(set(current) - set(proposed))
     if set(proposed) != set(check["receivers"]) or len(proposed) != len(nodes):

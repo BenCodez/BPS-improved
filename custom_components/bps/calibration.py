@@ -803,7 +803,8 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
         if len(on_floor) < 4:
             statuses[floor_name] = {"state": "skipped", "reason": "Place at least four connected receivers for automatic updates"}
             continue
-        snapshot = {"receivers": {s: copy.deepcopy(cal["receivers"][s]) for s in on_floor}}
+        snapshot = {"receivers": {s: copy.deepcopy(cal["receivers"][s]) for s in on_floor},
+                    "matched_placed": dict(cal.get("matched_placed") or {})}
         history = {k: list(v) for k, v in cal.get("_auto_samples", {}).items()
                    if all(s in snapshot["receivers"] for s in k.split("|", 1))}
         # The live layout is authoritative, including manual applies/resets.

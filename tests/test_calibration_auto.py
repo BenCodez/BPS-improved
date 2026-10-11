@@ -73,6 +73,23 @@ def test_current_layout_scale_and_unsupported_receiver_are_preserved():
     assert max(abs(updates[s] / current[s] - 1) for s in updates) <= .100001
 
 
+@pytest.mark.parametrize('kind', ['unmatched', 'no_data', 'weak_links'])
+def test_auto_preview_preserves_existing_receiver_diagnostic_categories(kind, monkeypatch):
+    monkeypatch.setattr(C.time, 'time', lambda: NOW)
+    _floor, snapshot, history = fixture_data()
+    snapshot['receivers']['extra'] = dict(snapshot['receivers']['r0'], x=600)
+    if kind != 'unmatched':
+        snapshot['matched_placed'] = {'extra': NOW}
+    if kind == 'weak_links':
+        distance = C._true_distance_m(snapshot, 'r0', 'extra')
+        history['r0|extra'] = [(NOW - (19 - i) * 30, distance) for i in range(20)]
+    result, updates, _status = assess(snapshot, history)
+    assert 'extra' not in updates
+    assert result['missing_unmatched'] == (['extra'] if kind == 'unmatched' else [])
+    assert result['missing_no_data'] == (['extra'] if kind == 'no_data' else [])
+    assert result['auto_excluded_receivers'] == (['extra'] if kind == 'weak_links' else [])
+
+
 @pytest.mark.parametrize("issue", ["stale", "old", "count", "span", "sparse", "nonfinite"])
 def test_weak_evidence_never_replaces_existing_corrections(issue):
     _floor, snapshot, history = fixture_data()

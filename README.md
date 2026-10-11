@@ -14,7 +14,8 @@ Quick list of changes in this fork:
 - Multiple beacons for one dog: one fused main icon plus small, subdued numbered
   icons showing each beacon's estimated position in the panel and Lovelace card.
 - Estimated uncertainty, stale-fix styling, receiver trust controls, and
-  diagnostics explaining beacon disagreement and possible reflection risk.
+  diagnostics explaining beacon disagreement and possible reflection risk,
+  with displayed circles smoothed against brief radius spikes.
 - Robust residual weighting for uncertainty circles, with each group member's
   radius inputs and smoothing/clamping displacement visible in diagnostics.
 - Dedicated selectable group position entities and a stability check against brief BLE quality reversals.
@@ -309,6 +310,14 @@ radius. The circle can be hidden globally or below a configured metre threshold
 from 0 to 10,000 metres.
 Stale last-known fixes have a distinct dashed grey circle. Distances are in
 metres; circle radii use the floor's pixels-per-metre scale before zooming.
+
+The panel and map card smooth the displayed circle radius to reduce brief BLE
+spikes. A large increase needs three distinct elevated fixes spanning at least
+five seconds, then grows gradually; smaller changes and recovery are smoothed.
+Stale data and repeated polls cannot confirm an increase. Floor changes or a
+fresh fix after a stale gap reset the display history. This affects the circle
+only: diagnostic uncertainty and confidence update immediately, and the marker,
+group fusion, calibration and receiver-distance debug circles retain their values.
 **Show tracking diagnostics** reports the residual before and after robust
 weighting, the number of readings downweighted by the robust loss, and the
 raw-to-published shift. For a group, the same breakdown appears for each beacon.

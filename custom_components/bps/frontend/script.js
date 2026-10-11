@@ -702,7 +702,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         circles: sameFloor ? result.radii : null,
                         offFloor: !sameFloor,
                         floor: result.floor,
-                        outdoor: result.outdoor,
+                        ...outdoor.stabilizeUncertainty(result, lastTracks.get(entKey)),
                         group: result.group,
                         name: result.name,
                         beacon_positions: result.beacon_positions,
@@ -6330,6 +6330,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 ...Object.keys(result.receivers || {}),
                 ...(result.missing_unmatched || []),
                 ...(result.missing_no_data || []),
+                ...(result.auto_excluded_receivers || []),
             ]);
             placedSince = [...placedNow].filter(s => !inReport.has(s)).sort();
         }
@@ -6375,6 +6376,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         html += '</table>';
         if (lowConfidence.length) {
             html += `<p class="text-sm text-gray-500" style="margin-top:6px">⚠ Low confidence (aggressive correction or few pairs): ${escHtml(lowConfidence.join(', '))} — verify those receivers before applying.</p>`;
+        }
+        const autoExcluded = (result.auto_excluded_receivers || []).filter(s =>
+            (finalcords.floor || []).some(f => sameFloorName(f.name, result.floor)
+                && (f.receivers || []).some(r => r.entity_id === s)));
+        if (autoExcluded.length) {
+            html += `<p class="text-sm text-gray-500" style="margin-top:6px">Auto updates excluded: ${escHtml(autoExcluded.join(', '))} — fresh samples exist, but independent bidirectional support is insufficient or belongs to a separate receiver network. Current corrections are retained.</p>`;
         }
         // Placed receivers absent from the matrix, with WHY (issue #63): the
         // report is built only from scanners that produced matched samples, so
