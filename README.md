@@ -9,8 +9,9 @@ maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hog
 
 Quick list of changes in this fork:
 
-- Optional outdoor tracking with buildings, trees, and a **Metal / reflective**
-  material for shops, with separate wood/metal materials per wall; these areas adjust measurement trust.
+- Optional outdoor tracking with buildings, trees, and fences. Buildings support
+  different materials per wall; open fence lines support solid or thin/wire
+  styles, including metal. Crossings adjust measurement trust.
 - Multiple beacons for one dog: one fused main icon plus small, subdued numbered
   icons showing each beacon's estimated position in the panel and Lovelace card.
 - Estimated uncertainty, stale-fix styling, receiver trust controls, and
@@ -18,12 +19,22 @@ Quick list of changes in this fork:
   with displayed circles smoothed against brief radius spikes.
 - Robust residual weighting for uncertainty circles, with each group member's
   radius inputs and smoothing/clamping displacement visible in diagnostics.
-- Dedicated selectable group position entities and a stability check against brief BLE quality reversals.
+- Dedicated selectable group position entities, distance circles for all group
+  members, and protection against brief beacon jumps and BLE quality reversals.
+- Fresh close readings from receivers inside buildings supply soft indoor
+  evidence. Optional per-station expected distance error reduces noisy readings'
+  influence; receiver and individual beacon hardware notes appear in diagnostics.
+- Receiver height controls accept metres or feet. Outdoor estimates can extend
+  beyond the map; one or two reporting stations still show a clearly labelled
+  receiver-centred detection with unknown direction.
 - Diagnostic recordings and known-position tests, with an offline accuracy
   report and a read-only comparison of tracking with proposed calibration corrections.
 - Guarded auto calibration: fresh samples, independent validation, gradual
   updates, visible skip reasons, and a measured-position regression veto when
   a compatible Diagnostics recording is available.
+- Read-only Bermuda RSSI correction previews use its actual attenuation and
+  scanner mapping, with separate current-factor transfer and measured validation
+  for new proposals to avoid applying the same correction twice.
 - Outdoor obstruction geometry uses immutable pure Python data rather than
   shared GEOS objects, with bounded tracking batches and protection from late
   results after map edits or reloads. See [stability details](docs/outdoor-geometry-stability.md).
@@ -411,10 +422,59 @@ in HA's executor and performs at most two solves per candidate floor; a clear,
 fresh path needs only the original solve. No battery/solar entities are required,
 and the existing reading-age cutoff still excludes stale receiver measurements.
 
-Zone boundaries still follow the existing BPS position pipeline. Make zones
-cover the traversable land you want the published position to occupy: positions
-outside configured zones may be snapped to the nearest zone, just as in normal
-BPS tracking.
+Outdoor positions are classified against zones without snapping them into a
+zone. An estimate beyond the map shows a subdued **Off map · inferred** marker
+at the image edge; diagnostics retain its actual coordinates. With only one or
+two fresh receivers, BPS shows **Detected only · direction unknown** at a
+reporting receiver, retaining its range rather than claiming a position or zone.
+These detections do not become position-history records. Indoor tracking keeps
+its existing zone-snapping behaviour.
+
+Group movement rejects brief large member excursions, then approaches persistent
+new evidence gradually. Its diagnostics explain held or limited movement. Group
+**Show distances** includes member ranges, while the main uncertainty circle
+combines the accepted members. Display circles are smoothed and limited to 125%
+of the distance to the third-nearest distinct fresh reporting receiver when at
+least three are available. The unclipped estimated uncertainty remains in
+diagnostics; the visual limit is not a promise of accuracy.
+
+### Receiver units, hardware and trust
+
+Open a receiver's properties to choose **m** or **ft** for height and optional
+expected distance error. Heights and errors are stored in metres. Switching
+units preserves the current physical value; old layouts are not automatically
+converted. If an old height was entered in feet while BPS treated it as metres,
+select **ft** and re-enter the measured number before saving the floor.
+
+Add receiver model/antenna notes there, and use **Beacon hardware** for the
+selected individual tracker. These notes are included in full diagnostics, not
+automatic RSSI presets. Populate expected distance error from measured tests:
+larger errors reduce influence. Building crossings already reduce trust in
+indoor receivers heard through walls; fresh short indoor readings provide soft
+evidence, without forcing a dog into a building.
+
+Use the **Fence** map tool to draw an open line with two or more points. Choose
+its material and solid or thin/wire style, edit its vertices, and save the floor.
+Fences do not enclose an area. Obstruction weights are tuning heuristics rather
+than measured attenuation for a particular wall or antenna.
+
+### Moving receiver corrections into Bermuda
+
+In **Receiver Calibration**, select the saved floor and click **Preview Bermuda
+RSSI corrections**. This reads the installed Bermuda model and scanner mapping;
+it changes no settings. The preview separates transferring an existing BPS
+factor from applying a new calibration proposal. New proposals require matching
+source settings, adequate samples and improvement at measured stationary
+locations. Blocked rows explain missing evidence or regressions.
+
+To transfer existing corrections manually, disable BPS auto calibration, apply
+only eligible scanner offsets in Bermuda, then set only the transferred BPS
+receiver factors to **1**. Use the floor-wide reset only after all non-unit
+factors have been transferred. Leaving both active doubles the correction.
+Recheck offsets and attenuation before applying, then collect fresh readings
+and test again: the conversion preserves distance scale, but Bermuda's smoothing
+and velocity history can respond differently. Hardware labels alone cannot
+determine the correct RSSI offset or beacon reference power.
 
 ---
 

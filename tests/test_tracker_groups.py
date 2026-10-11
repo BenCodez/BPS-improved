@@ -87,6 +87,34 @@ def test_one_beacon_available_keeps_source_position_and_timestamp():
     assert result["outdoor"]["estimated_uncertainty_m"] == pytest.approx(3)
 
 
+def detection(ent="beacon_a", x=100, updated=NOW):
+    p = position(ent, x=x, updated=updated)
+    p["outdoor"].update(detection_only=True, direction_known=False,
+                        observed=updated, stale_after_s=30,
+                        detection_receiver="receiver_" + ent, detection_range_m=5)
+    return p
+
+
+def test_sparse_member_never_drags_a_directional_group_fix():
+    result = fuse(position(), detection("beacon_b", x=900))
+    assert result["cords"] == [100, 100]
+    assert result["outdoor"].get("detection_only") is not True
+    assert result["beacon_positions"][1]["used"] is False
+
+
+def test_sparse_group_never_averages_receiver_centres_and_obeys_source_expiry():
+    a, b = detection(), detection("beacon_b", x=900)
+    result = fuse(a, b)
+    assert result["cords"][0] in (100, 900)
+    assert result["outdoor"]["detection_only"] is True
+    assert result["outdoor"]["direction_known"] is False
+    assert sum(p["used"] for p in result["beacon_positions"]) == 1
+    a["updated"] = NOW + 31
+    result = G.fuse_group(GROUP, [a], SCALES, NOW + 31,
+                          max_age_s=300, use_observation_age=False)
+    assert result is None
+
+
 def test_group_exposes_bounded_member_radius_breakdowns_without_changing_sources():
     a, b = position(), position("beacon_b", x=115)
     details = {"residual_m": 2, "unadjusted_residual_m": 5,
@@ -222,7 +250,7 @@ def test_different_floor_pixels_are_never_averaged_or_compared_as_metres():
     assert len(result["beacon_positions"]) == 2
 
 
-def test_zone_snapping_preserves_fused_floor_conflict_warning():
+def test_outdoor_groups_keep_outside_zone_positions_and_conflict_warning():
     import bps
     result = fuse(position(uncertainty=1),
                   position("beacon_b", x=10000, floor="Barn", uncertainty=20))
@@ -234,8 +262,8 @@ def test_zone_snapping_preserves_fused_floor_conflict_warning():
                    {"x": 90, "y": 200}, {"x": 0, "y": 200}]},
     ]}]}}]
     bps._assign_group_zone(result, lookup, SCALES["Yard"])
-    assert result["cords"] == [90, 100]
-    assert result["outdoor"]["estimated_uncertainty_m"] > radius
+    assert result["cords"] == [100, 100]
+    assert result["outdoor"]["estimated_uncertainty_m"] == radius
     assert result["outdoor"]["confidence"] == "poor"
     assert result["fusion_confidence"] == "floor_conflict"
 
@@ -379,11 +407,91 @@ def test_runtime_holds_a_distant_quality_spike_until_distinct_observations():
         assert held['anchor_beacon'] == 'beacon_a'
     b['outdoor']['observed'] = NOW + 5
     b['updated'] = NOW + 5
-    moved = G.fuse_group(GROUP, [a, b], SCALES, NOW + 5, previous=held, stability=state)
-    assert moved['anchor_beacon'] == 'beacon_b'
-    assert moved['anchor_switch_pending'] is False
-    assert moved['cords'] == [600, 100]
-    assert moved['outdoor']['confidence'] == 'poor'
+    held = G.fuse_group(GROUP, [a, b], SCALES, NOW + 5, previous=held, stability=state)
+    assert held['anchor_beacon'] == 'beacon_a'
+    assert held['cords'] == [0, 100]
+    assert held['motion_gate']['state'] == 'beacon_jump_rejected'
+
+
+def test_high_uncertainty_does_not_call_a_thirty_metre_separation_agreement():
+    result = fuse(position(uncertainty=50), position('beacon_b', x=400, uncertainty=55))
+    assert result['cords'] == [100, 100]
+    assert result['fusion_confidence'] == 'disagreement'
+    assert result['beacon_disagreement_m'] == 30
+    assert result['outdoor']['beacons_used'] == 1
+
+
+@pytest.mark.parametrize('jumping', ['beacon_a', 'beacon_b'])
+def test_a_brief_jump_in_either_beacon_keeps_the_group_with_the_stable_member(jumping):
+    state = {}
+    positions = [position(uncertainty=50), position('beacon_b', uncertainty=55)]
+    prev = G.fuse_group(GROUP, positions, SCALES, NOW, stability=state)
+    original = copy.deepcopy(positions)
+    for offset in range(1, 4):
+        for p in positions:
+            p['updated'] = NOW + offset
+            p['outdoor']['observed'] = NOW + offset
+            p['cords'] = [400 if p['ent'] == jumping else 100, 100]
+        prev = G.fuse_group(GROUP, positions, SCALES, NOW + offset, previous=prev, stability=state)
+        assert prev['cords'] == [100, 100]
+        assert prev['outdoor']['beacons_used'] == 1
+        assert prev['outdoor']['confidence'] == 'poor'
+    for p in positions:
+        p['updated'] = NOW + 4
+        p['outdoor']['observed'] = NOW + 4
+        p['cords'] = [100, 100]
+    returned = G.fuse_group(GROUP, positions, SCALES, NOW + 4, previous=prev, stability=state)
+    assert returned['cords'] == pytest.approx([100, 100])
+    assert returned['outdoor']['beacons_used'] == 2
+    assert 'motion_gate' not in returned
+    assert original[0]['cords'] == [100, 100]
+
+
+def test_coherent_normal_running_is_not_held():
+    state = {}
+    prev = None
+    for offset in range(8):
+        ps = [position(x=100 + offset * 50, updated=NOW + offset),
+              position('beacon_b', x=105 + offset * 50, updated=NOW + offset)]
+        prev = G.fuse_group(GROUP, ps, SCALES, NOW + offset, previous=prev, stability=state)
+        assert prev['cords'][0] == pytest.approx(102.5 + offset * 50)
+        assert 'motion_gate' not in prev
+
+
+def test_coherent_large_jump_needs_new_observations_then_moves_at_bounded_speed():
+    state = {}
+    prev = G.fuse_group(GROUP, [position(), position('beacon_b')], SCALES, NOW, stability=state)
+    for offset in range(1, 4):
+        ps = [position(x=400, updated=NOW + offset), position('beacon_b', x=400, updated=NOW + offset)]
+        prev = G.fuse_group(GROUP, ps, SCALES, NOW + offset, previous=prev, stability=state)
+        assert prev['cords'] == [100, 100]
+        assert prev['motion_gate']['state'] == 'held'
+        assert prev['outdoor']['estimated_uncertainty_m'] >= 30
+    ps = [position(x=400, updated=NOW + 4), position('beacon_b', x=400, updated=NOW + 4)]
+    prev = G.fuse_group(GROUP, ps, SCALES, NOW + 4, previous=prev, stability=state)
+    assert prev['cords'] == [200, 100]
+    assert prev['motion_gate']['state'] == 'limited'
+    # Polling and new solve timestamps cannot spend another movement budget.
+    for poll in range(5, 10):
+        for p in ps:
+            p['outdoor']['observed'] = NOW + 4
+            p['updated'] = NOW + poll
+        prev = G.fuse_group(GROUP, ps, SCALES, NOW + poll, previous=prev, stability=state,
+                            use_observation_age=False)
+        assert prev['cords'] == [200, 100]
+
+
+def test_motion_gate_resets_after_all_sources_expire_and_after_scale_change():
+    state = {}
+    prev = G.fuse_group(GROUP, [position()], SCALES, NOW, stability=state)
+    assert G.fuse_group(GROUP, [], SCALES, NOW + 1, previous=prev, stability=state) is None
+    assert state == {}
+    fresh = position(x=500, updated=NOW + 2)
+    result = G.fuse_group(GROUP, [fresh], SCALES, NOW + 2, previous=prev, stability=state)
+    assert result['cords'] == [500, 100]
+    result = G.fuse_group(GROUP, [position(x=1500, updated=NOW + 3)], {'Yard': 20}, NOW + 3,
+                          previous=result, stability=state)
+    assert result['cords'] == [1500, 100]
 
 
 def test_runtime_stale_incumbent_hands_off_without_waiting():

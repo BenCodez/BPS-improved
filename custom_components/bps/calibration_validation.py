@@ -21,7 +21,7 @@ def number(value):
 def geometry(floor):
     return {"scale": floor.get("scale"), "zones": floor.get("zones", []),
             "environment": floor.get("environment", []),
-            "receivers": [{k: r.get(k) for k in ("entity_id", "scanner_uid", "height", "outdoor_policy")} |
+            "receivers": [{k: r.get(k) for k in ("entity_id", "scanner_uid", "height", "outdoor_policy", "distance_accuracy_m")} |
                 {"cords": {k: r.get("cords", {}).get(k) for k in ("x", "y")}}
                 for r in floor.get("receivers", [])]}
 
@@ -79,6 +79,8 @@ def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_
         xs.extend(c["x"] for c in zone.get("cords", []))
         ys.extend(c["y"] for c in zone.get("cords", []))
     margin = .1 * max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+    if layout.get("outdoor_tracking", {}).get("enabled") is True:
+        margin = max(margin, min(max(pt[2] for pt in weighted), 1000 * scale))
     bounds = (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
     if layout.get("outdoor_tracking", {}).get("enabled") is True:
         result = solve_outdoor(candidate, weighted, bounds, scale, .5 * scale,

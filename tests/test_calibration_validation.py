@@ -128,7 +128,7 @@ def test_candidate_failure_cannot_claim_improvement():
 def test_authenticated_calibration_test_uses_detached_recording(hass, monkeypatch):
     data, floor = recording()
     async def export(): return json.dumps(data).encode()
-    hass.data['bps'] = {'layout': {'floor': [floor]}, '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
+    hass.data['bps'] = {'layout': copy.deepcopy(data['contexts']['c']['layout']), '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
         'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS, 'solved_at': 'test-date'}}}}
     before = copy.deepcopy(hass.data['bps']['layout'])
     result = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
@@ -139,6 +139,21 @@ def test_authenticated_calibration_test_uses_detached_recording(hass, monkeypatc
     hass.data['bps']['calibration_validation_busy'] = True
     with pytest.raises(ValueError, match='already running'):
         asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
+
+
+def test_tracking_test_compares_candidate_to_current_installed_corrections(hass):
+    data, floor = recording()
+    current = copy.deepcopy(data['contexts']['c']['layout'])
+    for receiver in current['floor'][0]['receivers']:
+        receiver['correction'] = FACTORS[receiver['entity_id']]
+    async def export():
+        return json.dumps(data).encode()
+    hass.data['bps'] = {'layout': current,
+        '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
+        'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS}}}}
+    result = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
+    assert result['verdict'] != 'improves'
+    assert result['baseline'] == result['candidate']
 
 
 @pytest.mark.parametrize('enabled,expected', [(False, 20), (True, 0)])
@@ -171,7 +186,7 @@ def test_export_decoding_and_replay_both_run_off_the_home_assistant_loop(hass, m
         assert threading.get_ident() == loop_thread
         return payload
     hass.async_add_executor_job = executor
-    hass.data['bps'] = {'layout': {'floor': [floor]}, '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
+    hass.data['bps'] = {'layout': copy.deepcopy(data['contexts']['c']['layout']), '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
         'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS}}}}
     result = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
     assert result['verdict'] == 'improves'

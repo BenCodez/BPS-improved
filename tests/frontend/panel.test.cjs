@@ -12,6 +12,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     let clock = Date.now();
     class ClockDate extends Date {static now() {return clock;}}
     const context = new Proxy({}, {get: (obj, key) => key === 'setLineDash' ? dash => canvasCalls.push(['dash', ...dash])
+        : ['beginPath', 'moveTo', 'lineTo', 'closePath', 'fill', 'stroke'].includes(key) ? (...args) => canvasCalls.push([key, ...args, ...(key === 'stroke' ? [obj.strokeStyle, obj.lineWidth] : [])])
         : key === 'arc' ? (...args) => canvasCalls.push(['arc', ...args])
         : key === 'fillText' ? (...args) => canvasCalls.push(['text', ...args])
         : key === 'drawImage' ? (img, ...args) => canvasCalls.push(['image', img.src, ...args])
@@ -21,7 +22,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         const events = new Map();
         const el = {tagName: tag.toUpperCase(), value: '', checked: false, style: {}, dataset: {}, children: [], width: 2000, height: 1000,
             focus() {}, select() {this.selected = true;},
-            offsetWidth: 100, offsetHeight: 30, classList: {add() {}, remove() {}, toggle() {}, contains: () => false},
+            offsetWidth: 100, offsetHeight: 30, validity: {badInput: false}, classList: {add() {}, remove() {}, toggle() {}, contains: () => false},
             get options() {return this.children;}, get selectedOptions() {return this.children.filter(e => e.selected);},
             appendChild(child) {child.parentElement = this; this.children.push(child); if (child.id) ids.set(child.id, child); return child;},
             contains(child) {return this.children.includes(child) || this.children.some(c => c.contains?.(child));},
@@ -41,7 +42,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     }
     const document = {getElementById(id) {if (!ids.has(id)) ids.set(id, element(id === 'canvas' ? 'canvas' : 'div')); return ids.get(id);},
         createElement: element, querySelector: () => null, querySelectorAll: () => [],
-        addEventListener: (name, cb) => listeners.set(name, cb), body: element(), documentElement: element()};
+        addEventListener: (name, cb) => listeners.set(name, cb), removeEventListener: name => listeners.delete(name), body: element(), documentElement: element()};
     const window = {location: {origin: 'https://home.test'}, scrollX: 0, scrollY: 0, innerHeight: 1000,
         addEventListener: (name, cb) => listeners.set(`window:${name}`, cb)}; window.parent = window;
     const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date: ClockDate, URL, FormData, Response, TextEncoder,
@@ -61,7 +62,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     vm.runInContext(readFileSync(join(directory, 'diagnostics.js'), 'utf8'), sandbox);
     // Expose closures only in the VM so production keeps its private state.
     const code = readFileSync(join(directory, 'script.js'), 'utf8').replace('    // With a single configured floor', `
-        globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview,
+        globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
             tracks: () => lastTracks, tracked: () => trackedDevices};
@@ -70,11 +71,173 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     const ready = listeners.get('DOMContentLoaded')();
     listeners.get('window:message')({origin: window.location.origin, data: {type: 'bps-auth', token: 'test-token'}});
     await ready;
-    return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests, intervals, canvasCalls, network,
+    return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests, intervals, canvasCalls, network, document, listeners,
         setClock: now => {clock = now;}};
 }
 const layout = () => ({floor: [{name: 'Property', scale: 20, zones: [], receivers: []}]});
 const points = [{x: 100, y: 100}, {x: 200, y: 100}, {x: 200, y: 200}, {x: 100, y: 200}];
+
+function receiverProperties(p, id = 'proxy') {
+    const button = {getAttribute: () => id};
+    p.listeners.get('click')({target: {closest: selector => selector === '[data-type="recheight"]' ? button : null}});
+    const dialog = p.document.body.children.findLast(e => e.className === 'bps-modal-overlay').children[0];
+    return {height: dialog.children[1], unit: dialog.children[2], model: dialog.children[3].children[0], antenna: dialog.children[4].children[0],
+        accuracy: dialog.children[5].children[0], save: dialog.children[6].children[1], cancel: dialog.children[6].children[0]};
+}
+
+test('receiver expected distance error converts selected feet and metres, persists canonically and validates atomically', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, height: 2}];
+    const p = await panel(source); p.hooks.select('Property'); const receiver = p.hooks.layout().floor[0].receivers[0];
+    let edit = receiverProperties(p); edit.accuracy.value = '2'; edit.unit.value = 'ft'; await edit.unit.fire('change');
+    assert.ok(Math.abs(Number(edit.accuracy.value) - 2 / .3048) < 1e-8);
+    edit.accuracy.value = '5'; await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.distance_accuracy_m, 1.524); assert.equal(receiver.height, 2); assert.equal(receiver.height_unit, 'ft');
+    edit = receiverProperties(p); assert.equal(edit.accuracy.value, '5'); edit.unit.value = 'm'; await edit.unit.fire('change');
+    assert.equal(Number(edit.accuracy.value), 1.524); await edit.cancel.fire('click'); await Promise.resolve();
+    for (const raw of ['-1', '1001', 'Infinity', 'bad']) {
+        edit = receiverProperties(p); edit.unit.value = 'm'; await edit.unit.fire('change'); edit.accuracy.value = raw; edit.model.value = 'changed';
+        await edit.save.fire('click'); assert.equal(receiver.distance_accuracy_m, 1.524); assert.equal(receiver.hardware_model, undefined);
+        await edit.cancel.fire('click'); await Promise.resolve();
+    }
+    edit = receiverProperties(p); edit.accuracy.value = ''; edit.accuracy.validity.badInput = true;
+    await edit.save.fire('click'); assert.equal(receiver.distance_accuracy_m, 1.524);
+    await edit.cancel.fire('click'); await Promise.resolve();
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[0].receivers[0].distance_accuracy_m, 1.524);
+    edit = receiverProperties(p); edit.height.value = ''; await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.height, undefined); assert.equal(receiver.height_unit, 'ft', 'accuracy alone retains unit preference');
+    edit = receiverProperties(p); edit.accuracy.value = '0'; await edit.save.fire('click'); await Promise.resolve(); assert.equal(receiver.distance_accuracy_m, 0);
+    edit = receiverProperties(p); edit.accuracy.value = ''; await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.distance_accuracy_m, undefined); assert.equal(receiver.height_unit, undefined);
+});
+
+test('beacon hardware profiles persist per beacon, remain independent of tuning and reject invalid or cancelled edits', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a', 'beacon_b']}];
+    const p = await panel(source); p.hooks.select('Property');
+    await p.el('trackerHardwareProfile').fire('click'); assert.equal(p.hooks.layout().tracker_hardware, undefined);
+    p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
+    await p.el('trackerHardwareProfile').fire('click'); assert.equal(p.hooks.layout().tracker_hardware, undefined);
+    assert.ok(p.el('bpsToastHost').children.some(item => /Select an individual beacon/.test(item.textContent || '')));
+    p.el('entSelector').value = 'beacon_a'; await p.el('entSelector').fire('change');
+    const open = async () => {
+        const pending = p.el('trackerHardwareProfile').fire('click');
+        const dialog = p.document.body.children.findLast(e => e.className === 'bps-modal-overlay').children[0];
+        return {pending, model: dialog.children[1].children[0], notes: dialog.children[2].children[0], save: dialog.children[3].children[1], cancel: dialog.children[3].children[0]};
+    };
+    let edit = await open(); edit.model.value = ' BLE tag '; edit.notes.value = ' Synthetic test hardware ';
+    await edit.save.fire('click'); await edit.pending;
+    assert.deepEqual(plain(p.hooks.layout().tracker_hardware), {beacon_a: {hardware_model: 'BLE tag', notes: 'Synthetic test hardware'}});
+    assert.equal(p.hooks.layout().tracker_heights, undefined); assert.equal(p.hooks.layout().tracker_ref_power_trims, undefined);
+    edit = await open(); assert.equal(edit.model.value, 'BLE tag'); edit.model.value = 'x'.repeat(129); edit.notes.value = 'changed';
+    await edit.save.fire('click'); assert.equal(p.hooks.layout().tracker_hardware.beacon_a.notes, 'Synthetic test hardware');
+    await edit.cancel.fire('click'); await edit.pending;
+    edit = await open(); edit.notes.value = 'x'.repeat(257); await edit.save.fire('click');
+    assert.equal(p.hooks.layout().tracker_hardware.beacon_a.notes, 'Synthetic test hardware'); await edit.cancel.fire('click'); await edit.pending;
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.tracker_hardware.beacon_a.hardware_model, 'BLE tag');
+    edit = await open(); edit.model.value = ''; edit.notes.value = ''; await edit.save.fire('click'); await edit.pending;
+    assert.equal(p.hooks.layout().tracker_hardware, undefined);
+});
+
+test('receiver feet heights save canonical metres and reopen in preferred units without migrating legacy values', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, height: 5}];
+    const p = await panel(source); p.hooks.select('Property');
+    const receiver = p.hooks.layout().floor[0].receivers[0];
+    let edit = receiverProperties(p); assert.equal(edit.unit.value, 'm'); assert.equal(edit.height.value, '5');
+    edit.unit.value = 'ft'; await edit.unit.fire('change');
+    assert.ok(Math.abs(Number(edit.height.value) - 5 / .3048) < 1e-8, 'unit change preserves physical height');
+    assert.equal(receiver.height, 5, 'untagged legacy height is not migrated');
+    await edit.cancel.fire('click'); await Promise.resolve(); assert.equal(receiver.height_unit, undefined);
+    for (const [feet, metres] of [[5, 1.524], [4, 1.2192]]) {
+        edit = receiverProperties(p); edit.unit.value = 'ft'; await edit.unit.fire('change'); edit.height.value = String(feet);
+        await edit.save.fire('click'); await Promise.resolve();
+        assert.equal(receiver.height, metres); assert.equal(receiver.height_unit, 'ft');
+        edit = receiverProperties(p); assert.equal(edit.height.value, String(feet));
+        edit.unit.value = 'm'; await edit.unit.fire('change'); assert.equal(Number(edit.height.value), metres);
+        await edit.cancel.fire('click'); await Promise.resolve();
+    }
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[0].receivers[0].height, 1.2192); assert.equal(saved.floor[0].receivers[0].height_unit, 'ft');
+});
+
+test('receiver height unit edits preserve atomic cancellation, reject malformed ranges and clear empty height preferences', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, hardware_model: 'M5Stack'}];
+    const p = await panel(source); p.hooks.select('Property'); const receiver = p.hooks.layout().floor[0].receivers[0];
+    let edit = receiverProperties(p); edit.unit.value = 'ft'; await edit.unit.fire('change'); assert.equal(edit.height.value, '');
+    await edit.save.fire('click'); await Promise.resolve(); assert.equal(receiver.height, undefined); assert.equal(receiver.height_unit, undefined);
+    edit = receiverProperties(p); edit.unit.value = 'ft'; await edit.unit.fire('change'); edit.model.value = 'changed';
+    for (const value of ['bad', '-1', '40', 'Infinity']) {
+        edit.height.value = value; await edit.save.fire('click');
+        assert.equal(receiver.height, undefined); assert.equal(receiver.hardware_model, 'M5Stack');
+    }
+    edit.height.value = ''; edit.height.validity.badInput = true; await edit.save.fire('click'); assert.equal(receiver.height, undefined);
+    edit.unit.value = 'm'; await edit.unit.fire('change'); assert.equal(edit.unit.value, 'ft', 'malformed input prevents unit change');
+    await edit.cancel.fire('click'); await Promise.resolve(); assert.equal(receiver.hardware_model, 'M5Stack');
+    receiver.height = 1.524; receiver.height_unit = 'ft'; edit = receiverProperties(p); edit.height.value = '';
+    await edit.save.fire('click'); await Promise.resolve(); assert.equal(receiver.height, undefined); assert.equal(receiver.height_unit, undefined);
+});
+
+test('receiver property editor persists hardware and antenna notes without altering measurement calibration', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, height: 2}];
+    const p = await panel(source); p.hooks.select('Property');
+    const open = () => receiverProperties(p);
+    let edit = open(); edit.model.value = ' ESP32 '; edit.antenna.value = ' External omni antenna ';
+    await edit.save.fire('click'); await Promise.resolve();
+    const receiver = p.hooks.layout().floor[0].receivers[0];
+    assert.equal(receiver.hardware_model, 'ESP32'); assert.equal(receiver.antenna_notes, 'External omni antenna');
+    assert.equal(receiver.height, 2); assert.equal(receiver.calibration, undefined);
+    edit = open(); assert.equal(edit.model.value, 'ESP32'); edit.model.value = 'x'.repeat(129);
+    await edit.save.fire('click'); assert.equal(receiver.hardware_model, 'ESP32');
+    await edit.cancel.fire('click'); await Promise.resolve();
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[0].receivers[0].antenna_notes, 'External omni antenna');
+    edit = open(); edit.model.value = ''; edit.antenna.value = '';
+    await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.hardware_model, undefined); assert.equal(receiver.antenna_notes, undefined);
+});
+
+test('panel Show distances draws same-floor group member ranges once while retaining different ranges', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a', 'beacon_b', 'beacon_c']}];
+    const p = await panel(source); p.hooks.select('Property');
+    p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click'); p.el('circleToggle').checked = true;
+    p.setClock(100000); p.canvasCalls.length = 0;
+    p.network.cords = [{ent: 'beacon_a', floor: 'Property', cords: [195, 100], radii: [[0, 0, 90], [30, 40, 100]]},
+        {ent: 'beacon_b', floor: 'Property', cords: [205, 100], radii: [[0, 0, 90], [30, 40, 110]]},
+        {ent: 'beacon_c', floor: 'Barn', cords: [205, 100], radii: [[0, 0, 500]]},
+        {ent: 'bps_group_rover', group: true, floor: 'Property', cords: [200, 100], updated: 100,
+            outdoor: {estimated_uncertainty_m: 120, display_radius_limit_m: 8, observed: 100}, beacon_positions: [
+                {ent: 'beacon_a', floor: 'Property'}, {ent: 'beacon_b', floor: 'Property', used: false}, {ent: 'beacon_c', floor: 'Barn'}]}];
+    await p.intervals.findLast(i => i.ms === 500).cb();
+    assert.deepEqual(plain(p.hooks.tracks().get('bps_group_rover').circles), [[0, 0, 90], [30, 40, 100], [30, 40, 110]]);
+    const radii = p.canvasCalls.filter(c => c[0] === 'arc' && c[3] > 24).map(c => c[3]);
+    assert.deepEqual(radii.sort((a, b) => a - b), [90, 100, 110, 160]);
+    p.el('outdoorDiagnostics').checked = true; await p.el('outdoorDiagnostics').fire('change');
+    assert.match(p.el('outdoorDiagnosticText').textContent, /capped for display.*displayed 8.0 m/);
+});
+
+test('panel marks outside-map positions at the edge and labels detection-only fixes without moving raw ranges', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const p = await panel(source); p.hooks.select('Property');
+    p.el('entSelector').value = 'beacon_a'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click'); p.setClock(100000); p.canvasCalls.length = 0;
+    const row = {ent: 'beacon_a', floor: 'Property', cords: [2200, 500], updated: 100,
+        radii: [[100, 100, 90]], outdoor: {estimated_uncertainty_m: 8, observed: 100}};
+    p.network.cords = [row]; await p.intervals.findLast(i => i.ms === 500).cb();
+    assert.equal(p.hooks.tracks().get('beacon_a').x, 2200);
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[1] === 2200 && c[3] === 160), 'uncertainty stays at raw position');
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[1] < 2000 && c[1] > 1900), 'edge marker remains inside map');
+    assert.ok(p.canvasCalls.some(c => c[0] === 'text' && /Off map.*inferred/.test(c[1])));
+    row.cords = [100, 100]; row.outdoor.detection_only = true; row.outdoor.direction_known = false;
+    p.canvasCalls.length = 0; await p.intervals.findLast(i => i.ms === 500).cb();
+    assert.ok(p.canvasCalls.some(c => c[0] === 'text' && /Detected only.*direction unknown/.test(c[1])));
+});
 
 test('full report includes selected map and unsaved placements separately without images or auth tokens', async () => {
     const source = layout();
@@ -545,10 +708,73 @@ test('visible building tool enables outdoor tracking and saves mixed wall materi
     assert.deepEqual(saved.floor[0].environment[0].wall_materials, ['wood', null, 'metal', null]);
 });
 
+test('visible fence tool saves open paths, edits material/thickness, cancels, reloads and deletes', async () => {
+    const p = await panel(layout()); p.hooks.select('Property');
+    await p.el('addFence').fire('click');
+    assert.equal(p.hooks.layout().outdoor_tracking.enabled, true);
+    assert.equal(p.el('environmentType').value, 'fence');
+    assert.equal(p.el('environmentFenceControls').hidden, false);
+    assert.equal(p.el('environmentWalls').hidden, true);
+    assert.equal(p.el('environmentThickness').value, 'solid');
+    p.hooks.setPoints(points.slice(0, 1)); p.el('zoneName').value = 'Fence';
+    assert.equal(p.hooks.finalizeShape(), false);
+    assert.equal(p.hooks.layout().floor[0].environment, undefined);
+    const path = points.slice(0, 3);
+    p.hooks.setPoints(path); p.el('environmentMaterial').value = 'metal'; p.el('environmentThickness').value = 'thin';
+    p.canvasCalls.length = 0; p.hooks.drawZonePreview();
+    const start = p.canvasCalls.findLastIndex(c => c[0] === 'moveTo' && c[1] === 100 && c[2] === 100);
+    const handles = p.canvasCalls.findIndex((c, i) => i > start && c[0] === 'arc');
+    assert.equal(p.canvasCalls.slice(start, handles).some(c => c[0] === 'fill' || c[0] === 'closePath'), false);
+    assert.equal(p.hooks.finalizeShape(), true);
+    const fence = p.hooks.layout().floor[0].environment[0];
+    assert.deepEqual(plain(fence.points), path);
+    assert.equal(fence.material, 'metal'); assert.equal(fence.thickness, 'thin');
+    p.hooks.cancelShapeEdit();
+    p.canvasCalls.length = 0; p.hooks.drawEnvironmentPolygons(p.hooks.layout().floor[0]);
+    assert.equal(p.canvasCalls.some(c => c[0] === 'fill' || c[0] === 'closePath'), false);
+    assert.equal(p.el('environmentList').children[0].children[0].disabled, false);
+    await p.el('environmentList').children[0].children[0].fire('click');
+    assert.equal(p.el('environmentMaterial').value, 'metal'); assert.equal(p.el('environmentThickness').value, 'thin');
+    p.hooks.setPoints(path.map(point => ({x: point.x + 30, y: point.y}))); p.el('environmentThickness').value = 'solid';
+    p.hooks.cancelShapeEdit(); assert.deepEqual(plain(fence.points), path); assert.equal(fence.thickness, 'thin');
+    p.hooks.beginEnvironmentEdit(fence); p.el('environmentMaterial').value = 'wood'; p.el('environmentThickness').value = 'solid';
+    p.hooks.setPoints(path.slice(0, 2)); assert.equal(p.hooks.finalizeShape(), true);
+    p.hooks.cancelShapeEdit(); await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[0].environment[0].material, 'wood'); assert.equal(saved.floor[0].environment[0].thickness, 'solid');
+    assert.deepEqual(saved.floor[0].environment[0].points, path.slice(0, 2));
+    const loaded = await panel(saved); loaded.hooks.select('Property');
+    loaded.hooks.beginEnvironmentEdit(saved.floor[0].environment[0]); loaded.hooks.cancelShapeEdit();
+    assert.deepEqual(plain(loaded.hooks.layout().floor[0].environment), saved.floor[0].environment);
+    await loaded.el('environmentList').children[0].children[1].fire('click');
+    assert.deepEqual(plain(loaded.hooks.layout().floor[0].environment), []);
+});
+
+test('fence editing drags segments, adds outside points and rejects malformed edits without losing saved data', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const fence = {id: 'fence', name: 'Fence', type: 'fence', material: 'metal', thickness: 'thin',
+        points: [{x: 100, y: 100}, {x: 300, y: 100}]};
+    source.floor[0].environment = [fence];
+    const p = await panel(source); p.hooks.select('Property'); p.hooks.beginEnvironmentEdit(fence);
+    await p.el('canvas').fire('mousedown', {button: 0, clientX: 200, clientY: 100});
+    await p.el('canvas').fire('mousemove', {clientX: 220, clientY: 120});
+    await p.el('canvas').fire('mouseup'); assert.equal(p.hooks.finalizeShape(), true);
+    assert.deepEqual(plain(p.hooks.layout().floor[0].environment[0].points), [{x: 120, y: 120}, {x: 320, y: 120}]);
+    const before = JSON.stringify(p.hooks.layout().floor[0].environment);
+    p.hooks.setPoints([{x: 0, y: 0}, {x: 100, y: 100}, {x: 0, y: 100}, {x: 100, y: 0}]);
+    assert.equal(p.hooks.finalizeShape(), false); assert.equal(JSON.stringify(p.hooks.layout().floor[0].environment), before);
+    p.hooks.cancelShapeEdit();
+    p.hooks.beginEnvironmentEdit({...fence, points: null}); assert.equal(p.hooks.editing(), null);
+    p.hooks.beginEnvironmentEdit(p.hooks.layout().floor[0].environment[0]);
+    await p.el('canvas').fire('mousedown', {button: 0, clientX: 500, clientY: 200});
+    await p.el('canvas').fire('mouseup'); assert.equal(p.hooks.finalizeShape(), true);
+    assert.deepEqual(plain(p.hooks.layout().floor[0].environment[0].points.at(-1)), {x: 500, y: 200});
+});
+
 test('map tools are outside the opt-in controls in the actual document', () => {
     const html = readFileSync(join(directory, 'index.html'), 'utf8');
     const controls = html.indexOf('id="outdoorControls"');
-    for (const id of ['addBuilding', 'addTrees', 'openGroupEditor']) {
+    for (const id of ['addBuilding', 'addTrees', 'addFence', 'openGroupEditor']) {
         assert.ok(html.indexOf(`id="${id}"`) < controls);
         assert.equal(html.split(`id="${id}"`).length, 2);
     }

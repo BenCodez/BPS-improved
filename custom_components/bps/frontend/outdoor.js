@@ -1,7 +1,7 @@
 /* Shared optional map/editor helpers. Distances are metres; map points are floor pixels. */
 (function (root) {
     'use strict';
-    const TYPES = ['building', 'dense_trees', 'light_vegetation', 'custom'];
+    const TYPES = ['building', 'dense_trees', 'light_vegetation', 'custom', 'fence'];
     const MATERIALS = ['unknown', 'light', 'wood', 'heavy', 'metal'];
     const POLICIES = ['auto', 'normal', 'prefer', 'deprioritize', 'ignore'];
     const MAX_UNCERTAINTY_THRESHOLD_M = 10000;
@@ -32,10 +32,47 @@
         // Other HTTP failures and malformed responses cannot revoke a fix.
         return data && data.error === 'No data available' ? [] : null;
     }
+    // Group fixes have no solver circles of their own. Preserve every member's
+    // measurement on this floor; equal receiver locations with different ranges
+    // still carry distinct information, while identical circles draw only once.
+    function distanceRadii(row, snapshot, sameFloor = (a, b) => a === b) {
+        if (!row?.group) return row?.radii;
+        const circles = [], seen = new Set();
+        for (const member of row.beacon_positions || []) {
+            if (!member || member.floor && row.floor && !sameFloor(member.floor, row.floor)) continue;
+            const source = Array.isArray(member.radii) ? member
+                : (snapshot || []).find(p => p?.ent === member.ent && !p.group);
+            if (!source || source.floor && row.floor && !sameFloor(source.floor, row.floor)) continue;
+            for (const circle of Array.isArray(source.radii) ? source.radii : []) {
+                if (!Array.isArray(circle) || !circle.slice(0, 3).every(number)
+                    || circle.length < 3 || circle[2] <= 0) continue;
+                const key = JSON.stringify(circle.slice(0, 3));
+                if (!seen.has(key)) {seen.add(key); circles.push(circle);}
+            }
+        }
+        return circles;
+    }
+    function displayLimit(outdoor) {
+        return number(outdoor?.display_radius_limit_m) && outdoor.display_radius_limit_m >= 0
+            ? outdoor.display_radius_limit_m : Infinity;
+    }
+    function markerPlacement(pos, width, height, margin = 24) {
+        const valid = number(pos?.x) && number(pos?.y) && number(width) && width > 0 && number(height) && height > 0;
+        const offMap = valid && (pos.x < 0 || pos.x > width || pos.y < 0 || pos.y > height);
+        const clamp = (value, size) => Math.max(Math.min(margin, size / 2), Math.min(size - Math.min(margin, size / 2), value));
+        return {x: offMap ? clamp(pos.x, width) : pos?.x, y: offMap ? clamp(pos.y, height) : pos?.y, offMap};
+    }
+    function markerStatus(outdoor, offMap = false) {
+        const labels = [];
+        if (outdoor?.detection_only) labels.push('Detected only · direction unknown');
+        if (offMap) labels.push('Off map · inferred');
+        return labels.join(' · ');
+    }
     function uncertaintyRadius(outdoor, scale, config) {
         if (!config || config.enabled !== true || config.show_uncertainty === false) return null;
-        const metres = outdoor && number(outdoor.display_uncertainty_m)
+        const estimate = outdoor && number(outdoor.display_uncertainty_m)
             ? outdoor.display_uncertainty_m : outdoor && outdoor.estimated_uncertainty_m;
+        const metres = number(estimate) ? Math.min(estimate, displayLimit(outdoor)) : estimate;
         if (!number(metres) || metres < 0 || !number(scale) || scale <= 0) return null;
         if (metres < (config.hide_uncertainty_below_m || 0)) return null;
         const radius = metres * scale;
@@ -96,7 +133,13 @@
         }
         // Display-only: retain the instantaneous estimate, confidence and raw
         // payload for diagnostics/calibration. Marker coordinates never change.
-        return {outdoor: {...row.outdoor, display_uncertainty_m: state.radius}, uncertaintyState: state};
+        const cap = displayLimit(row.outdoor);
+        // Apply the spatial bound immediately, even on cached/stale polls. Keep
+        // the bounded value as smoothing state so a changing receiver footprint
+        // cannot reveal the previous oversized circle on the next observation.
+        state = {...state, radius: Math.min(state.radius, cap)};
+        return {outdoor: {...row.outdoor, display_uncertainty_m: state.radius,
+            display_uncertainty_capped: raw > cap}, uncertaintyState: state};
     }
     function drawUncertainty(ctx, pos, scale, config, color, zoom = 1, now = Date.now()) {
         const radius = uncertaintyRadius(pos && pos.outdoor, scale, config);
@@ -171,7 +214,11 @@
         if (!floor || !item || typeof item.id !== 'string' || !item.id
             || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 256
             || !TYPES.includes(item.type) || !MATERIALS.includes(item.material)
-            || !validPolygon(item.points)) throw new Error('Use a named polygon with at least three distinct corners and no crossing edges.');
+            || !validEnvironmentPoints(item)) throw new Error(item?.type === 'fence'
+                ? 'Use a named open fence with at least two distinct points and no crossing or retraced segments.'
+                : 'Use a named polygon with at least three distinct corners and no crossing edges.');
+        if (item.thickness !== undefined && (item.type !== 'fence' || !['thin', 'solid'].includes(item.thickness)))
+            throw new Error('Choose thin or solid fence thickness.');
         if (item.wall_materials !== undefined && (item.type !== 'building'
             || !Array.isArray(item.wall_materials) || item.wall_materials.length !== item.points.length
             || item.wall_materials.some(m => m !== null && !MATERIALS.includes(m))))
@@ -181,10 +228,48 @@
         if (entries.length > MAX_ENVIRONMENT_POLYGONS || index < 0 && entries.length >= MAX_ENVIRONMENT_POLYGONS)
             throw new Error('A floor supports at most 128 environment polygons. Delete a polygon before adding another.');
         const copy = {...item, name: item.name.trim(), points: item.points.map(p => ({x: p.x, y: p.y})),
+            ...(item.type === 'fence' ? {thickness: item.thickness || 'solid'} : {}),
             ...(item.wall_materials ? {wall_materials: [...item.wall_materials]} : {})};
         if (!Array.isArray(floor.environment)) floor.environment = [];
         if (index < 0) floor.environment.push(copy); else floor.environment[index] = copy;
         return copy;
+    }
+    function validPolyline(points) {
+        if (!Array.isArray(points) || points.length < 2 || points.length > 256
+            || points.some(p => !p || !number(p.x) || !number(p.y))) return false;
+        const seen = new Set();
+        const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        const on = (a, b, c) => Math.abs(cross(a, b, c)) < 1e-9
+            && c.x >= Math.min(a.x, b.x) && c.x <= Math.max(a.x, b.x)
+            && c.y >= Math.min(a.y, b.y) && c.y <= Math.max(a.y, b.y);
+        const intersects = (a, b, c, d) => cross(a, b, c) * cross(a, b, d) < 0
+            && cross(c, d, a) * cross(c, d, b) < 0
+            || on(a, b, c) || on(a, b, d) || on(c, d, a) || on(c, d, b);
+        for (let i = 0; i < points.length; i++) {
+            const a = points[i], key = `${a.x},${a.y}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            if (i + 2 < points.length && (on(a, points[i + 1], points[i + 2])
+                || on(points[i + 1], points[i + 2], a))) return false;
+            for (let j = i + 2; i + 1 < points.length && j + 1 < points.length; j++) {
+                if (intersects(a, points[i + 1], points[j], points[j + 1])) return false;
+            }
+        }
+        return true;
+    }
+    const validEnvironmentPoints = item => item?.type === 'fence' ? validPolyline(item.points) : validPolygon(item?.points);
+    function fenceStyle(item) {
+        return {color: {wood: '#8d6e63', metal: '#607d8b', light: '#78909c', heavy: '#455a64', unknown: '#757575'}[item.material] || '#757575',
+            width: item.thickness === 'thin' ? 2 : 5, dash: item.thickness === 'thin' ? [5, 3] : []};
+    }
+    function drawFence(ctx, item, zoom = 1) {
+        if (!validPolyline(item?.points)) return false;
+        const style = fenceStyle(item);
+        ctx.save(); ctx.beginPath(); ctx.moveTo(item.points[0].x, item.points[0].y);
+        item.points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
+        ctx.strokeStyle = style.color; ctx.lineWidth = style.width / zoom;
+        ctx.setLineDash(style.dash.map(length => length / zoom)); ctx.stroke(); ctx.restore();
+        return true;
     }
     function upsertGroup(layout, group, knownTrackers = []) {
         const entries = Array.isArray(layout.tracker_groups) ? layout.tracker_groups : [];
@@ -214,6 +299,8 @@
         const out = row && row.outdoor;
         if (!out) return '';
         const lines = [`Estimated uncertainty: ${display(out.estimated_uncertainty_m, ' m')} · ${out.confidence || 'unknown'} · ${out.receivers_used || 0} receivers`];
+        if (out.detection_only) lines.push(`Detected only · direction unknown${typeof out.receiver === 'string' ? ' · reporting receiver ' + out.receiver : ''}`);
+        if (Number.isFinite(displayLimit(out))) lines.push(`Display radius limit: ${display(out.display_radius_limit_m, ' m')} · nearest reporting receivers${out.estimated_uncertainty_m > displayLimit(out) ? ' · capped for display' : ''}${number(out.display_uncertainty_m) ? ' · displayed ' + display(out.display_uncertainty_m, ' m') : ''}`);
         if (out.environment_fallback) lines.push('Environmental geometry unavailable: neutral obstruction weights used; confidence reduced.');
         const radiusInputs = (details, prefix = '') => {
             if (!details || typeof details !== 'object') return;
@@ -223,6 +310,7 @@
         };
         radiusInputs(out);
         if (row.group && number(out.combined_beacon_uncertainty_m)) lines.push(`Group radius inputs: ${out.beacons_used || 0} beacons combined · beacon uncertainty ${display(out.combined_beacon_uncertainty_m, ' m')} · position spread ${display(out.beacon_scatter_m, ' m')}`);
+        if (row.motion_gate) lines.push(`Group motion: ${row.motion_gate.state || 'filtered'} · candidate shift ${display(row.motion_gate.displacement_m, ' m')} · allowed step ${display(row.motion_gate.allowed_step_m, ' m')}`);
         if (number(out.position_age_s)) lines.push(`Position age: ${display(out.position_age_s, ' s')}${isStale(out) ? ' · stale / last known' : ''}`);
         if (row.group) lines.push(`${row.name || row.ent}: ${row.beacons_reporting || 0}/${row.total_beacons || 0} beacons · disagreement ${display(row.beacon_disagreement_m, ' m')} · ${row.fusion_confidence || 'unknown'}`);
         (row.beacon_positions || []).forEach(p => {
@@ -230,10 +318,15 @@
             lines.push(`${p.ent}: estimated uncertainty ${display(p.estimated_uncertainty_m, ' m')}${p.floor ? ', ' + p.floor : ''}${number(p.age_s) ? ', age ' + display(p.age_s, ' s') : ''}${p.used === false ? ', excluded from fusion' : ''}`);
             radiusInputs(p.uncertainty_details, `${p.ent}: `);
         });
-        (out.receiver_diagnostics || []).forEach(r => lines.push(`${r.receiver}: measured ${display(r.measured_distance_m, ' m')}, corrected ${display(r.corrected_distance_m, ' m')}, age ${display(r.reading_age_s, ' s')}, ${r.classification || 'unknown'}, building crossings ${r.building_crossings ?? '—'}${r.reflection_risk ? ', reflection / multipath risk' : ''}, environment weight ${display(r.environmental_weight)}, reliability ${display(r.reliability_weight)}, ${r.status || 'unknown'}`));
+        (out.receiver_diagnostics || []).forEach(r => {
+            lines.push(`${r.receiver}: measured ${display(r.measured_distance_m, ' m')}, corrected ${display(r.corrected_distance_m, ' m')}, age ${display(r.reading_age_s, ' s')}, ${r.classification || 'unknown'}, building crossings ${r.building_crossings ?? '—'}${r.fence_crossings !== undefined ? ', fence crossings ' + r.fence_crossings : ''}${r.reflection_risk ? ', reflection / multipath risk' : ''}, environment weight ${display(r.environmental_weight)}, reliability ${display(r.reliability_weight)}, ${r.status || 'unknown'}`);
+            (r.intersections || []).filter(item => item.type === 'fence').forEach(item => lines.push(
+                `${r.receiver}: ${item.name || item.id || 'Fence'} · ${item.material || 'unknown'} · ${item.thickness || 'solid'} · crossings ${item.fence_crossings ?? '—'} · trust weight ${display(item.weight)}`));
+        });
         return lines.join('\n');
     }
     root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, MAX_UNCERTAINTY_THRESHOLD_M, MAX_ENVIRONMENT_POLYGONS,
-        groups, environment, settings, positionSnapshot, uncertaintyRadius,
-        drawUncertainty, stabilizeUncertainty, beaconNumber, drawMiniBeacon, isStale, fixTime, validPolygon, upsertEnvironment, upsertGroup, diagnosticsText});
+        groups, environment, settings, positionSnapshot, distanceRadii, markerPlacement, markerStatus, uncertaintyRadius,
+        drawUncertainty, stabilizeUncertainty, beaconNumber, drawMiniBeacon, isStale, fixTime, validPolygon, validPolyline,
+        validEnvironmentPoints, fenceStyle, drawFence, upsertEnvironment, upsertGroup, diagnosticsText});
 })(globalThis);
