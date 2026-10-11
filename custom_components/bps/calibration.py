@@ -47,6 +47,7 @@ from scipy.optimize import least_squares
 
 from .calibration_auto import assess_update, WINDOW_S as AUTO_HISTORY_WINDOW
 from .bermuda_calibration import build_preview, runtime_context, source_snapshot, source_for_floor
+from .scanner_addresses import retained_mac, ble_mac
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -388,7 +389,9 @@ def _match_scanners(cal: dict, devices: dict) -> dict:
     for dev in devices.values():
         if not isinstance(dev, dict) or dev.get("_is_scanner") is not True:
             continue
-        address = str(dev.get("address") or "").lower()
+        address = ble_mac(dev)
+        if address is None or retained_mac(dev) is None:
+            continue
         scanners.append((address, slugify(str(dev.get("name") or ""))))
 
     scanner_slug_by_mac = {}
@@ -397,11 +400,11 @@ def _match_scanners(cal: dict, devices: dict) -> dict:
         address = receiver.get("scanner_mac")
         if address:
             owner = receiver.get("scanner_config_entry_id")
-            candidates = [dev for dev in devices.values() if isinstance(dev, dict)
-                and dev.get("_is_scanner") is True and str(dev.get("address", "")).lower() == address
-                and (dev.get("_bps_config_entry_id") == owner or receiver.get("scanner_owner_unique"))]
-            if candidates:
-                claims.setdefault(address, []).append(slug)
+            candidates = {ble_mac(dev) for dev in devices.values() if isinstance(dev, dict)
+                and dev.get("_is_scanner") is True and retained_mac(dev) == address and ble_mac(dev)
+                and (dev.get("_bps_config_entry_id") == owner or receiver.get("scanner_owner_unique"))}
+            if len(candidates) == 1:
+                claims.setdefault(next(iter(candidates)), []).append(slug)
         else:
             exact = {address for address, name_slug in scanners if name_slug == slug}
             # Exact current names remain compatible with older Bermuda entity

@@ -1041,6 +1041,40 @@ test('Place Receiver allows another floor and preserves proven identity for a ne
     assert.equal(saved.floor[1].receivers[0].scanner_config_entry_id, 'owner-a');
 });
 
+test('Place Receiver normalizes a proven saved BLE binding when hiding and rejecting physical duplicates', async () => {
+    for (const owned of [false, true]) {
+        const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+        const ble = 'dd:ee:ff:90:80:00';
+        matching.runtime_address_map = [{config_entry_id: 'owner-a', scanner_mac: matching.options[0].scanner_mac, scanner_ble_mac: ble}];
+        const source = layout(); source.floor[0].receivers = [{entity_id: 'removed_old_station', scanner_mac: ble,
+            cords: {x: 100, y: 100}, height: 2, correction: 1.3}];
+        if (owned) source.floor[0].receivers[0].scanner_config_entry_id = 'owner-a';
+        const p = await panel(source, [], false, matching); p.hooks.select('Property');
+        await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+        assert.ok(!p.el('receiverName').options.some(o => o.value === 'workshop_112233'));
+        p.el('receiverName').value = '__custom__'; p.el('receiverCustomName').value = 'workshop_112233';
+        const before = plain(p.hooks.layout()); await p.hooks.saveReceiver();
+        assert.deepEqual(plain(p.hooks.layout()), before);
+        assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    }
+});
+
+test('receiver matching blocks a canonical alias already placed using its proven Bluetooth binding', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+    const ble = 'dd:ee:ff:90:80:00';
+    matching.runtime_address_map = [{config_entry_id: 'owner-a', scanner_mac: matching.options[0].scanner_mac, scanner_ble_mac: ble}];
+    const source = layout(); source.floor[0].receivers = [
+        {entity_id: 'unmatched', cords: {x: 10, y: 20}},
+        {entity_id: 'removed_old_station', scanner_mac: ble, scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}},
+    ];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    const before = plain(p.hooks.layout()), dialog = await receiverMatch(p);
+    dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    assert.match(dialog.error.textContent, /already bound/);
+    assert.deepEqual(plain(p.hooks.layout()), before);
+    await dialog.cancel.fire('click');
+});
+
 test('proven distinct Bermuda owners with the same MAC can be placed and matched independently', async () => {
     const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
     matching.options.push({...matching.options[0], entity_id: 'second_owner_station', config_entry_ids: ['owner-b']});

@@ -891,3 +891,138 @@ test('authenticated inventory refresh stays current during Bermuda WS backoff an
     assert.equal(c._nextBermudaDumpAt, dumpNextAt);
     assert.equal(c._computeReceiverStatuses().get('old_station'), null, 'replacement proof supersedes cached dump and automatic fallback');
 });
+
+async function retainedMacDumpCard(scanner, {dumpKey = 'dd:ee:ff:44:55:66', owners = ['owner-a'], replacement = {}} = {}) {
+    const c = card(), mac = 'aa:bb:cc:11:22:33';
+    c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+    c._receivers = [{entity_id: 'saved_station', scanner_mac: mac, scanner_config_entry_id: 'owner-a'}];
+    const option = {entity_id: 'saved_station', name: 'Current station', scanner_mac: mac,
+        config_entry_ids: ['owner-a'], liveness_name_unique: true, distance_sensors: [], disabled_sensors: []};
+    c._receiverMatching = new Map([[option.entity_id, option]]);
+    c._captureReceiverBindings();
+    const current = {...option, ...replacement};
+    c._apiFetch = async path => {
+        assert.equal(path, '/api/bps/scanner_linking');
+        return {ok: true, json: async () => ({matching: {options: [current], mac_owners: {[current.scanner_mac]: owners}}})};
+    };
+    c._hass.callWS = async request => {
+        assert.equal(request.service, 'dump_devices');
+        return {response: {[dumpKey]: {_is_scanner: true, name: 'Current station', ...scanner}, tag: {last_seen: 200}}};
+    };
+    await c._refreshBermudaScanners();
+    assert.equal(c._receiverInventoryCurrent, true);
+    return c;
+}
+
+test('real Bermuda refresh uses retained WiFi MAC ages for trusted saved bindings', async () => {
+    for (const age of [0, 90]) {
+        const c = await retainedMacDumpCard({address_wifi_mac: 'AA:BB:CC:11:22:33',
+            address: 'dd:ee:ff:44:55:66', last_seen: 200 - age});
+        assert.equal(c._bermudaScannerMacAges.get('aa:bb:cc:11:22:33'), age);
+        assert.equal(c._bermudaScannerMacAges.has('dd:ee:ff:44:55:66'), false, 'BLE address cannot replace retained identity');
+        assert.equal(c._computeReceiverStatuses().get('saved_station'), age === 0);
+    }
+});
+
+test('real Bermuda refresh rejects a truthy invalid WiFi MAC without borrowing BLE or name ages', async () => {
+    for (const address_wifi_mac of ['invalid', true, ['aa:bb:cc:11:22:33']]) {
+        const c = await retainedMacDumpCard({address_wifi_mac, address: 'aa:bb:cc:11:22:33', last_seen: 200},
+            {dumpKey: 'aa:bb:cc:11:22:33'});
+        assert.equal(c._bermudaScannerMacAges.size, 0);
+        assert.equal(c._bermudaScanners.get('current_station'), 0, 'legacy name cache is retained');
+        assert.equal(c._computeReceiverStatuses().get('saved_station'), null, 'trusted MAC binding cannot borrow name evidence');
+    }
+});
+
+test('real Bermuda refresh keeps legacy address and dump-key fallback when WiFi MAC is absent or empty', async () => {
+    for (const address_wifi_mac of [undefined, null, '', false]) for (const address of ['aa:bb:cc:11:22:33', undefined, '']) {
+        const c = await retainedMacDumpCard({address_wifi_mac, address, last_seen: 200}, {dumpKey: 'aa:bb:cc:11:22:33'});
+        assert.equal(c._bermudaScannerMacAges.get('aa:bb:cc:11:22:33'), 0);
+        assert.equal(c._computeReceiverStatuses().get('saved_station'), true);
+    }
+});
+
+test('retained WiFi dump ages do not override ambiguous ownership or replacement bindings', async () => {
+    for (const age of [0, 90]) for (const conflict of ['shared_owners', 'replacement_mac', 'replacement_owner']) {
+        const replacement = conflict === 'replacement_mac' ? {scanner_mac: 'aa:bb:cc:77:88:99'}
+            : conflict === 'replacement_owner' ? {config_entry_ids: ['owner-b']} : {};
+        const owners = conflict === 'shared_owners' ? ['owner-a', 'owner-b']
+            : conflict === 'replacement_owner' ? ['owner-b'] : ['owner-a'];
+        const mac = replacement.scanner_mac || 'aa:bb:cc:11:22:33';
+        const c = await retainedMacDumpCard({address_wifi_mac: mac, address: 'dd:ee:ff:44:55:66', last_seen: 200 - age},
+            {owners, replacement});
+        assert.equal(c._bermudaScannerMacAges.get(mac), age, 'dump age remains available to proven identities');
+        assert.equal(c._computeReceiverStatuses().get('saved_station'), null, conflict);
+    }
+});
+
+function bleMappedInventory({mac = 'aa:bb:cc:11:22:33', owner = 'owner-a', rows, directOwner = false} = {}) {
+    const ble = 'dd:ee:ff:44:55:66';
+    return {options: [{entity_id: 'current_station', name: 'Current station', scanner_mac: mac,
+        config_entry_ids: [owner], liveness_name_unique: true, distance_sensors: [], disabled_sensors: []}],
+        mac_owners: {[mac]: [owner], ...(directOwner ? {[ble]: [owner]} : {})},
+        runtime_address_map: rows || [{config_entry_id: owner, scanner_mac: mac, scanner_ble_mac: ble}]};
+}
+
+async function loadedBleIdentityCard({age = 0, matching = bleMappedInventory(), savedOwner = 'owner-a'} = {}) {
+    const c = card();
+    c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+    const rec = {entity_id: 'old_station', scanner_mac: 'DD:EE:FF:44:55:66', scanner_config_entry_id: savedOwner,
+        cords: {x: 1, y: 2}, mount_height: 2};
+    c._apiFetch = async path => ({ok: true, json: async () => path === '/api/bps/read_text'
+        ? {receiver_matching: matching, scanner_diagnostics: {alias_receivers: [{entity_id: rec.entity_id,
+            scanner_mac: rec.scanner_mac, config_entry_id: savedOwner}]}, coordinates: JSON.stringify({
+            floor: [{name: 'Property', scale: 20, receivers: [rec], zones: []}]})} : {matching}});
+    c._hass.callWS = async () => ({response: {'dd:ee:ff:44:55:66': {_is_scanner: true, name: 'Current station',
+        address: 'dd:ee:ff:44:55:66', address_wifi_mac: 'aa:bb:cc:11:22:33', last_seen: 200 - age}, tag: {last_seen: 200}}});
+    c._resolveMapUrl = async () => 'synthetic.png'; c._loadFloorImage = async () => {c._baseImage = {};};
+    await c._loadFloorResources(1);
+    assert.deepEqual(plain(c._receivers), [rec], 'runtime translation cannot rewrite saved placement');
+    return c;
+}
+
+test('actual floor load translates saved BLE identity and diagnostic alias through proven retained MAC and owner', async () => {
+    for (const age of [0, 90]) {
+        const c = await loadedBleIdentityCard({age});
+        assert.deepEqual(plain(c._receiverBindings.get('old_station')), {scanner_mac: 'aa:bb:cc:11:22:33',
+            owner: 'owner-a', scanner_ble_mac: 'dd:ee:ff:44:55:66'});
+        assert.equal(c._currentReceiverOption('old_station').entity_id, 'current_station');
+        assert.equal(c._receiverStatuses.get('old_station'), age === 0);
+    }
+});
+
+test('actual floor load rejects ambiguous or wrong-owner BLE mappings without borrowing friendly names', async () => {
+    const good = bleMappedInventory().runtime_address_map[0];
+    const cases = [bleMappedInventory({rows: [good, {...good, scanner_mac: 'aa:bb:cc:77:88:99'}]}),
+        bleMappedInventory({owner: 'owner-b'}), bleMappedInventory({directOwner: true}),
+        bleMappedInventory({rows: []}), bleMappedInventory({rows: [{...good, scanner_mac: 'invalid'}]})];
+    for (const matching of cases) {
+        const c = await loadedBleIdentityCard({matching});
+        assert.equal(c._currentReceiverOption('old_station'), null);
+        assert.equal(c._receiverStatuses.get('old_station'), null);
+    }
+    const c = await loadedBleIdentityCard({savedOwner: null, matching: bleMappedInventory({rows: [good,
+        {...good, config_entry_id: 'owner-b'}]})});
+    assert.equal(c._receiverStatuses.get('old_station'), null, 'absent saved owner cannot choose between mappings');
+});
+
+test('captured BLE binding rejects changed removed conflicting or differently owned runtime mappings after refresh', async () => {
+    const good = bleMappedInventory().runtime_address_map[0];
+    const replacements = [bleMappedInventory({mac: 'aa:bb:cc:77:88:99'}), bleMappedInventory({owner: 'owner-b'}),
+        bleMappedInventory({rows: [{...good, scanner_mac: 'aa:bb:cc:77:88:99'}]}),
+        bleMappedInventory({rows: []}), bleMappedInventory({rows: [good, {...good, scanner_mac: 'aa:bb:cc:77:88:99'}]}),
+        bleMappedInventory({directOwner: true})];
+    for (const matching of replacements) {
+        const c = await loadedBleIdentityCard(), before = JSON.stringify(c._receivers);
+        c._apiFetch = async () => ({ok: true, json: async () => ({matching})});
+        c._hass.states['binary_sensor.old_station_status'] = {state: 'on', attributes: {device_class: 'connectivity'}};
+        c._nextBermudaDumpAt = 0; c._nextReceiverInventoryAt = 0;
+        await c._refreshBermudaScanners();
+        for (const automatic of [undefined, false, 'heuristic']) {
+            c._config.receiver_status.old_station = automatic;
+            assert.equal(c._computeReceiverStatuses().get('old_station'), null);
+        }
+        assert.equal(c._receiverBindings.get('old_station').scanner_mac, good.scanner_mac, 'captured identity stays fixed');
+        assert.equal(JSON.stringify(c._receivers), before);
+    }
+});

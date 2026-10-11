@@ -3847,7 +3847,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 bpsToast("Choose an available Bermuda receiver. Unknown names must use Custom name….");
                 return;
             }
-            if ((floor?.receivers || []).some(rec => sameReceiverIdentity(rec, newReceiver, fresh.options))) {
+            if ((floor?.receivers || []).some(rec => sameReceiverIdentity(rec, newReceiver, fresh.options, fresh.runtime_address_map))) {
                 bpsToast("This scanner is already placed on this floor. Move or match its existing placement instead.");
                 return;
             }
@@ -5181,13 +5181,27 @@ document.addEventListener('DOMContentLoaded', async () => {
         return JSON.stringify(stored);
     }
 
-    function sameReceiverIdentity(left, right, options) {
+    function sameReceiverIdentity(left, right, options, addressMap = receiverMatching.runtime_address_map) {
         if (left.entity_id === right.entity_id) return true;
         const leftOption = options.find(o => o.entity_id === left.entity_id);
         const rightOption = options.find(o => o.entity_id === right.entity_id);
         if (leftOption?.identity_ambiguous || rightOption?.identity_ambiguous) return false;
-        const leftMac = left.scanner_mac || leftOption?.scanner_mac;
-        const rightMac = right.scanner_mac || rightOption?.scanner_mac;
+        const canonicalMac = (rec, option) => {
+            const raw = rec.scanner_mac || option?.scanner_mac;
+            if (typeof raw !== 'string' || !raw) return null;
+            const mac = raw.toLowerCase(), owner = rec.scanner_config_entry_id;
+            const mapped = (addressMap || []).filter(row => row.scanner_ble_mac === mac && row.scanner_mac !== mac);
+            if (!mapped.length) return mac;
+            const candidates = mapped.map(row => [row.config_entry_id, row.scanner_mac]);
+            for (const current of options.filter(row => row.scanner_mac === mac)) {
+                for (const currentOwner of current.config_entry_ids || []) candidates.push([currentOwner, mac]);
+            }
+            if (!owner && new Set(candidates.map(row => row[0])).size !== 1) return null;
+            const identities = new Set(candidates.filter(row => !owner || row[0] === owner).map(row => JSON.stringify(row)));
+            return identities.size === 1 ? JSON.parse([...identities][0])[1] : null;
+        };
+        const leftMac = canonicalMac(left, leftOption);
+        const rightMac = canonicalMac(right, rightOption);
         if (typeof leftMac !== 'string' || typeof rightMac !== 'string' || !leftMac || leftMac.toLowerCase() !== rightMac.toLowerCase()) return false;
         const leftOwner = left.scanner_config_entry_id || (leftOption?.config_entry_ids?.length === 1 ? leftOption.config_entry_ids[0] : null);
         const rightOwner = right.scanner_config_entry_id || (rightOption?.config_entry_ids?.length === 1 ? rightOption.config_entry_ids[0] : null);
@@ -5258,7 +5272,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const duplicate = floor.receivers.some(other => {
                     if (other === rec) return false;
                     const identity = bySlug.get(other.entity_id);
-                    return sameReceiverIdentity(other, {entity_id: choice}, fresh.options)
+                    return sameReceiverIdentity(other, {entity_id: choice}, fresh.options, fresh.runtime_address_map)
                         || option.token && !identity?.identity_ambiguous &&
                         !(option.scanner_mac && (other.scanner_mac || identity?.scanner_mac))
                         && fresh.options.filter(o => o.token === option.token).length === 1

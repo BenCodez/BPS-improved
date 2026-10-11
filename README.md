@@ -716,6 +716,11 @@ valid reading for each beacon and physical scanner, retaining its source timesta
 Similar names or matching MAC suffixes alone do not establish an alias. Matching
 stores the scanner MAC and owner so a later rename can still resolve when the old
 entity name disappears.
+For scanners with different Wi-Fi and Bluetooth MACs, the binding uses Bermuda's
+retained entity identifier. Bermuda's explicit address relationship links that
+identifier to Bluetooth calibration observations and scanner ages; BPS does not
+guess MAC offsets. Previously saved Bluetooth bindings can resolve through this
+proven relationship without moving the receiver.
 
 Equivalent same-floor placements of that physical scanner count once. If their
 positions, heights, corrections or tracking policies conflict, BPS excludes that

@@ -1110,7 +1110,9 @@ def _refresh_dump_ages(hass, dom, devices):
             if isinstance(ls, (int, float)) and not isinstance(ls, bool) and math.isfinite(ls):
                 age = max(0.0, newest - ls)
                 ages[slug] = age
-                mac = dev.get("address", address)
+                # Bermuda retains the Wi-Fi MAC in range entity IDs while
+                # dump observations can use a different Bluetooth address.
+                mac = dev.get("address_wifi_mac") or dev.get("address", address)
                 if isinstance(mac, str) and bermuda_diagnostics.MAC.fullmatch(mac):
                     mac_ages[mac.lower()] = age
         for slug in repeated_names:

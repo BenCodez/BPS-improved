@@ -7,7 +7,8 @@ from collections.abc import Mapping
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import slugify
 
-from .bermuda_diagnostics import MAC, _coordinator
+from .bermuda_diagnostics import _coordinator
+from .scanner_addresses import ble_mac, retained_mac
 
 # Only the public scanner MAC suffix of a filtered range unique ID is read.
 _RANGE_MAC = re.compile(r"_((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})_range$")
@@ -15,7 +16,7 @@ _RANGE_MAC = re.compile(r"_((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})_range$")
 
 def inventory(hass):
     """Identity revision excludes fluctuating readings, includes registry changes."""
-    rows, runtime = {}, {}
+    rows, runtime, address_pairs = {}, {}, set()
     manager = getattr(hass, "config_entries", None)
     entries = manager.async_entries("bermuda") if manager is not None else []
     for entry in entries:
@@ -25,10 +26,15 @@ def inventory(hass):
         for dev in devices.values():
             if getattr(dev, "_is_scanner", False) is not True:
                 continue
-            address, name = getattr(dev, "address", None), getattr(dev, "name", None)
-            if not isinstance(address, str) or not MAC.fullmatch(address) or not isinstance(name, str) or not name:
+            address, bluetooth = retained_mac(dev), ble_mac(dev)
+            if address is None:
                 continue
-            runtime.setdefault((entry.entry_id, address.lower()), set()).add(name[:256])
+            if bluetooth is not None:
+                address_pairs.add((entry.entry_id, address, bluetooth))
+            name = getattr(dev, "name", None)
+            runtime.setdefault((entry.entry_id, address), set())
+            if isinstance(name, str) and name:
+                runtime[(entry.entry_id, address)].add(name[:256])
 
     def row(slug):
         return rows.setdefault(slug, {"entity_id": slug, "names": set(), "identities": set(),
@@ -116,5 +122,8 @@ def inventory(hass):
     for option in options:
         option["liveness_name_unique"] = len(name_identities[slugify(option["name"])]) == 1
     mac_owners = {mac: sorted(owners) for mac, owners in sorted(mac_owners.items())}
-    revision = hashlib.sha256(json.dumps({"options": options, "mac_owners": mac_owners}, sort_keys=True).encode()).hexdigest()
-    return {"read_only": True, "revision": revision, "options": options, "mac_owners": mac_owners}
+    address_map = [{"config_entry_id": owner, "scanner_mac": mac, "scanner_ble_mac": bluetooth}
+                   for owner, mac, bluetooth in sorted(address_pairs)]
+    identities = {"options": options, "mac_owners": mac_owners, "runtime_address_map": address_map}
+    revision = hashlib.sha256(json.dumps(identities, sort_keys=True).encode()).hexdigest()
+    return {"read_only": True, "revision": revision, **identities}

@@ -22,6 +22,11 @@ class ReceiverSources:
         self.options = {o["entity_id"]: o for o in self.matching["options"]}
         self.by_identity, self.owners_by_mac, self.readings, self.tracker_ids, self.reading_proofs = {}, {}, {}, {}, {}
         self.tracker_proofs = {}
+        self.by_ble_address = {}
+        for item in self.matching.get("runtime_address_map", []):
+            if item["scanner_ble_mac"] != item["scanner_mac"]:
+                self.by_ble_address.setdefault(item["scanner_ble_mac"], set()).add(
+                    (item["config_entry_id"], item["scanner_mac"]))
         self.owners_by_mac.update({mac: set(owners) for mac, owners in self.matching.get("mac_owners", {}).items()})
         for option in self.options.values():
             key = self.option_identity(option)
@@ -68,6 +73,22 @@ class ReceiverSources:
             return {"identity": None, "status": "ambiguous_scanner_identity", "aliases": []}
         if isinstance(mac, str) and MAC.fullmatch(mac):
             mac = mac.lower()
+            # Older layouts can carry Bermuda's Bluetooth address while range
+            # entity IDs retain its Wi-Fi identity. Translate only a proven,
+            # owner-scoped runtime pair; never infer MAC arithmetic or persist it.
+            mapped = self.by_ble_address.get(mac, set())
+            if mapped:
+                owners = {key[0] for key in mapped} | self.owners_by_mac.get(mac, set())
+                if not owner and len(owners) != 1:
+                    return {"identity": None, "status": "scanner_identity_unavailable", "aliases": []}
+                candidates = {key for key in mapped if not owner or key[0] == owner}
+                candidates.update((candidate_owner, mac) for candidate_owner in self.owners_by_mac.get(mac, ())
+                                  if not owner or candidate_owner == owner)
+                if len(candidates) > 1:
+                    return {"identity": None, "status": "scanner_identity_conflict", "aliases": []}
+                if not candidates:
+                    return {"identity": None, "status": "scanner_identity_unavailable", "aliases": []}
+                owner, mac = next(iter(candidates))
             if exact and (exact[1] != mac or owner and owner != exact[0]):
                 return {"identity": None, "status": "scanner_identity_conflict", "aliases": []}
             if owner:

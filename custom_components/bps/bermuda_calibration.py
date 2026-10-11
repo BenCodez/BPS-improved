@@ -10,6 +10,7 @@ import math
 from collections.abc import Mapping
 
 from .bermuda_diagnostics import MAC, _coordinator
+from .scanner_addresses import retained_mac
 
 
 def number(value):
@@ -89,11 +90,13 @@ def runtime_context(hass, coords, floor_name):
             if getattr(dev, "_is_scanner", False) is not True:
                 continue
             address = getattr(dev, "address", None)
-            if not isinstance(address, str) or not MAC.fullmatch(address):
+            identity = retained_mac(dev)
+            if not isinstance(address, str) or not MAC.fullmatch(address) or identity is None:
                 continue
             original_address = address
             address = address.lower()
-            row = {"_is_scanner": True, "address": address, "name": getattr(dev, "name", ""), "_bps_config_entry_id": entry.entry_id, "adverts": {}}
+            row = {"_is_scanner": True, "address": address, "address_wifi_mac": identity,
+                   "name": getattr(dev, "name", ""), "_bps_config_entry_id": entry.entry_id, "adverts": {}}
             ads = getattr(dev, "adverts", {})
             if isinstance(ads, Mapping):
                 for index, advert in enumerate(ads.values()):

@@ -141,10 +141,10 @@ def test_dense_bipartite_network_has_no_identifiable_auto_correction():
 
 
 def dump(stamp):
-    return {f"m{i}": {"_is_scanner": True, "address": f"m{i}", "name": f"r{i}",
-        "adverts": {"first": {"scanner_address": f"m{1-i}", "stamp": stamp,
+    return {f"aa:bb:cc:10:20:{i:02x}": {"_is_scanner": True, "address": f"aa:bb:cc:10:20:{i:02x}", "name": f"r{i}",
+        "adverts": {"first": {"scanner_address": f"aa:bb:cc:10:20:{1-i:02x}", "stamp": stamp,
                                 "rssi_distance_raw": 4.},
-                    "second": {"scanner_address": f"m{1-i}", "stamp": stamp + .1,
+                    "second": {"scanner_address": f"aa:bb:cc:10:20:{1-i:02x}", "stamp": stamp + .1,
                                  "rssi_distance_raw": 5.}}} for i in range(2)}
 
 

@@ -443,6 +443,7 @@ class BpsMapCard extends HTMLElement {
           || Array.isArray(matching.mac_owners)) throw new Error("Invalid scanner inventory");
         this._receiverMatching = new Map(matching.options.map(option => [option.entity_id, option]));
         this._receiverMacOwners = new Map(Object.entries(matching.mac_owners));
+        this._receiverRuntimeAddressMap = matching.runtime_address_map || [];
         this._receiverInventoryCurrent = true;
       } catch (e) {
         if (!current()) return;
@@ -487,7 +488,10 @@ class BpsMapCard extends HTMLElement {
         if (typeof dev.last_seen === "number" && Number.isFinite(dev.last_seen)) {
           const age = Math.max(0, newest - dev.last_seen);
           bySlug.set(slug, age);
-          const mac = dev.address ?? address;
+          // Bermuda retains the WiFi MAC in range IDs even when the dump
+          // address is a different BLE MAC. Validate the selected identifier
+          // without falling back from a present but invalid WiFi address.
+          const mac = dev.address_wifi_mac || dev.address || address;
           if (typeof mac === "string" && /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(mac)) byMac.set(mac.toLowerCase(), age);
         }
       }
@@ -571,6 +575,31 @@ class BpsMapCard extends HTMLElement {
       && (rec.scanner_config_entry_id == null || typeof rec.scanner_config_entry_id === "string");
   }
 
+  _resolveReceiverMac(mac, owner) {
+    // Older placements may contain the BLE address. Only authenticated runtime
+    // evidence can translate it; a direct MAC identity also counts as a candidate.
+    const rows = Array.isArray(this._receiverRuntimeAddressMap) ? this._receiverRuntimeAddressMap : [];
+    const mapped = rows.filter(row => typeof row?.scanner_ble_mac === "string"
+      && row.scanner_ble_mac.toLowerCase() === mac && row.scanner_mac !== mac);
+    if (!mapped.length) return {scanner_mac: mac, owner};
+    if (mapped.some(row => typeof row.config_entry_id !== "string" || !row.config_entry_id
+      || typeof row.scanner_mac !== "string" || !/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(row.scanner_mac))) return null;
+    const directOwners = this._receiverMacOwners?.get(mac) || [];
+    const owners = new Set([...mapped.map(row => row.config_entry_id), ...directOwners]);
+    if (!owner && owners.size !== 1) return null;
+    const candidates = new Map();
+    for (const row of mapped) {
+      if (!owner || row.config_entry_id === owner) {
+        const value = {scanner_mac: row.scanner_mac.toLowerCase(), owner: row.config_entry_id};
+        candidates.set(JSON.stringify([value.owner, value.scanner_mac]), value);
+      }
+    }
+    for (const candidateOwner of directOwners) {
+      if (!owner || candidateOwner === owner) candidates.set(JSON.stringify([candidateOwner, mac]), {scanner_mac: mac, owner: candidateOwner});
+    }
+    return candidates.size === 1 ? [...candidates.values()][0] : null;
+  }
+
   _captureReceiverBindings() {
     // Preserve inferred legacy identity until a config/floor reload. A reused
     // entity slug must not silently rebind a placement to replacement hardware.
@@ -579,10 +608,13 @@ class BpsMapCard extends HTMLElement {
       const option = this._receiverMatching?.get(rec.entity_id);
       const savedMac = typeof rec.scanner_mac === "string" && /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(rec.scanner_mac)
         ? rec.scanner_mac.toLowerCase() : null;
-      const mac = savedMac || (!option?.identity_ambiguous ? option?.scanner_mac : null) || null;
-      const owner = rec.scanner_config_entry_id || (option?.scanner_mac === mac && !option?.identity_ambiguous
+      const resolved = savedMac ? this._resolveReceiverMac(savedMac, rec.scanner_config_entry_id) : null;
+      if (savedMac && !resolved) return [rec.entity_id, {invalid: true}];
+      const mac = resolved?.scanner_mac || (!option?.identity_ambiguous ? option?.scanner_mac : null) || null;
+      const owner = resolved?.owner || rec.scanner_config_entry_id || (option?.scanner_mac === mac && !option?.identity_ambiguous
         && option?.config_entry_ids?.length === 1 ? option.config_entry_ids[0] : null);
-      return [rec.entity_id, mac && owner ? {scanner_mac: mac, owner} : null];
+      return [rec.entity_id, mac && owner ? {scanner_mac: mac, owner,
+        ...(savedMac && savedMac !== mac ? {scanner_ble_mac: savedMac} : {})} : null];
     }));
   }
 
@@ -593,6 +625,11 @@ class BpsMapCard extends HTMLElement {
     const binding = this._receiverBindings.get(id);
     if (binding?.invalid) return null;
     if (!binding) return direct?.identity_ambiguous ? null : direct;
+    if (binding.scanner_ble_mac) {
+      // Keep the originally captured relation fixed across inventory refreshes.
+      const current = this._resolveReceiverMac(binding.scanner_ble_mac, binding.owner);
+      if (current?.scanner_mac !== binding.scanner_mac || current.owner !== binding.owner) return null;
+    }
     const matches = option => !option?.identity_ambiguous && option?.scanner_mac === binding.scanner_mac
       && option.config_entry_ids?.length === 1 && option.config_entry_ids[0] === binding.owner;
     if (direct) return matches(direct) ? direct : null;
@@ -664,7 +701,9 @@ class BpsMapCard extends HTMLElement {
       }
       const savedMac = typeof rec.scanner_mac === "string" && /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(rec.scanner_mac)
         ? rec.scanner_mac.toLowerCase() : null;
-      if (identity?.identity_ambiguous || savedMac && (savedMac !== identity?.scanner_mac
+      const resolvedMac = savedMac ? this._resolveReceiverMac(savedMac,
+        rec.scanner_config_entry_id || this._receiverBindings?.get(id)?.owner) : null;
+      if (identity?.identity_ambiguous || savedMac && (resolvedMac?.scanner_mac !== identity?.scanner_mac
         || rec.scanner_config_entry_id && (identity?.config_entry_ids?.length !== 1 || identity.config_entry_ids[0] !== rec.scanner_config_entry_id))) {
         statuses.set(id, null);
         continue;
@@ -870,10 +909,12 @@ class BpsMapCard extends HTMLElement {
     this._knownBeaconKeys = new Set(Array.isArray(data.entities) ? data.entities : []);
     this._receiverMatching = new Map((data.receiver_matching?.options || []).map(option => [option.entity_id, option]));
     this._receiverMacOwners = new Map(Object.entries(data.receiver_matching?.mac_owners || {}));
+    this._receiverRuntimeAddressMap = data.receiver_matching?.runtime_address_map || [];
     this._receiverInventoryCurrent = true;
     for (const alias of data.scanner_diagnostics?.alias_receivers || []) {
-      const option = [...this._receiverMatching.values()].find(row => row.scanner_mac === alias.scanner_mac
-        && row.config_entry_ids?.length === 1 && row.config_entry_ids[0] === alias.config_entry_id);
+      const resolved = typeof alias.scanner_mac === "string" ? this._resolveReceiverMac(alias.scanner_mac.toLowerCase(), alias.config_entry_id) : null;
+      const option = resolved && [...this._receiverMatching.values()].find(row => row.scanner_mac === resolved.scanner_mac
+        && row.config_entry_ids?.length === 1 && row.config_entry_ids[0] === resolved.owner);
       if (option) this._receiverMatching.set(alias.entity_id, option);
     }
     this._outdoorSettings = BPSOutdoor.settings(coords);
