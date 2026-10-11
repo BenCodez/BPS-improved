@@ -213,6 +213,18 @@ def test_recent_history_reserves_actual_large_panel_context():
     assert "_panel_bytes" not in report
 
 
+def test_recent_omission_notice_respects_explicit_panel_budget():
+    history = recent.RecentTrackingHistory()
+    history.append(recent.pack({"time": 100, "context": {}, "positions": []}))
+    snapshot = {"live": "x" * 3200000}
+    baseline = diag.format_report(snapshot)
+    reservation = diag.MAX_REPORT_BYTES - len(baseline.encode()) - 10
+    text = diag.format_report({**snapshot, "_panel_bytes": reservation,
+                              "_recent_tracking_snapshot": history.snapshot(100)})
+    assert len(text.encode()) + reservation <= diag.MAX_REPORT_BYTES
+    assert text == baseline
+
+
 @pytest.mark.parametrize("value", ["-1", "nan", "99999999", "", "１２３"])
 def test_full_report_rejects_invalid_panel_byte_reservation(hass, value):
     async def scenario():

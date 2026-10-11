@@ -57,6 +57,7 @@ def format_report(snapshot):
               "home_assistant_version": getattr(ha_const, "__version__", "unknown"),
               "python_version": sys.version.split()[0], **snapshot}
     recent = report.pop("_recent_tracking_snapshot", None)
+    explicit_panel = "_panel_bytes" in report
     panel_bytes = report.pop("_panel_bytes", 256 * 1024)
     limit = MAX_REPORT_BYTES - panel_bytes
     header = ("BPS full diagnostics (live snapshot)\n"
@@ -94,7 +95,7 @@ def format_report(snapshot):
             report["recent_tracking"] = {"metadata": {"export_truncated": True},
                 "reason": "Live report leaves insufficient space for recent history"}
             candidate = render()
-            if len(candidate.encode("utf-8")) <= MAX_REPORT_BYTES:
+            if len(candidate.encode("utf-8")) <= (limit if explicit_panel else MAX_REPORT_BYTES):
                 text = candidate
     if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
         raise ValueError("Full diagnostic report exceeds 4 MiB; reduce tracker/receiver scope before retrying")
