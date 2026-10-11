@@ -34,7 +34,8 @@
     }
     function uncertaintyRadius(outdoor, scale, config) {
         if (!config || config.enabled !== true || config.show_uncertainty === false) return null;
-        const metres = outdoor && outdoor.estimated_uncertainty_m;
+        const metres = outdoor && number(outdoor.display_uncertainty_m)
+            ? outdoor.display_uncertainty_m : outdoor && outdoor.estimated_uncertainty_m;
         if (!number(metres) || metres < 0 || !number(scale) || scale <= 0) return null;
         if (metres < (config.hide_uncertainty_below_m || 0)) return null;
         const radius = metres * scale;
@@ -53,6 +54,49 @@
         if (number(timestamp) && timestamp >= 0 && number(timestamp * 1000)) return Math.min(now, timestamp * 1000);
         const age = row && row.outdoor && row.outdoor.position_age_s;
         return number(age) && age >= 0 ? now - age * 1000 : now;
+    }
+    function stabilizeUncertainty(row, previous, now = Date.now()) {
+        const raw = row?.outdoor?.estimated_uncertainty_m;
+        // Re-solving cached BLE readings advances publication time, not the
+        // observation clock. Require distinct measurements to confirm growth.
+        const source = number(row?.outdoor?.observed) ? row.outdoor.observed : row?.updated;
+        const stamp = source * 1000;
+        if (!number(raw) || raw < 0 || !number(stamp) || stamp < 0) {
+            return {outdoor: row?.outdoor, uncertaintyState: null};
+        }
+        const prior = previous?.uncertaintyState;
+        const stale = isStale(row.outdoor, fixTime(row, now), now);
+        const limit = number(row.outdoor.stale_after_s) && row.outdoor.stale_after_s > 0
+            ? row.outdoor.stale_after_s * 1000 : 30000;
+        const reset = !prior || prior.floor !== row.floor || !stale && (
+            stamp - prior.stamp >= limit || isStale(previous?.outdoor, previous?.receivedAt, now));
+        let state;
+        if (reset) {
+            state = {floor: row.floor, stamp, radius: raw, elevatedSince: null, elevatedCount: 0};
+        } else if (stale || stamp <= prior.stamp) {
+            // A redraw/cached poll cannot confirm a spike or make old data fresh.
+            state = prior;
+        } else {
+            state = {...prior, stamp};
+            const dt = Math.min(2, (stamp - prior.stamp) / 1000);
+            if (raw > prior.radius + Math.max(1, prior.radius * .25)) {
+                state.elevatedSince ??= stamp;
+                state.elevatedCount += 1;
+                // Require three distinct elevated fixes spanning five seconds.
+                if (state.elevatedCount >= 3 && stamp - state.elevatedSince >= 5000) {
+                    state.radius = Math.min(raw, Math.max(prior.radius + .5 * dt,
+                        prior.radius * Math.pow(1.25, dt)));
+                }
+            } else {
+                state.elevatedSince = null;
+                state.elevatedCount = 0;
+                const tau = raw < prior.radius ? 1.5 : 3;
+                state.radius = prior.radius + (raw - prior.radius) * (1 - Math.exp(-dt / tau));
+            }
+        }
+        // Display-only: retain the instantaneous estimate, confidence and raw
+        // payload for diagnostics/calibration. Marker coordinates never change.
+        return {outdoor: {...row.outdoor, display_uncertainty_m: state.radius}, uncertaintyState: state};
     }
     function drawUncertainty(ctx, pos, scale, config, color, zoom = 1, now = Date.now()) {
         const radius = uncertaintyRadius(pos && pos.outdoor, scale, config);
@@ -191,5 +235,5 @@
     }
     root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, MAX_UNCERTAINTY_THRESHOLD_M, MAX_ENVIRONMENT_POLYGONS,
         groups, environment, settings, positionSnapshot, uncertaintyRadius,
-        drawUncertainty, beaconNumber, drawMiniBeacon, isStale, fixTime, validPolygon, upsertEnvironment, upsertGroup, diagnosticsText});
+        drawUncertainty, stabilizeUncertainty, beaconNumber, drawMiniBeacon, isStale, fixTime, validPolygon, upsertEnvironment, upsertGroup, diagnosticsText});
 })(globalThis);

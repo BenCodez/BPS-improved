@@ -1111,7 +1111,7 @@ class BpsMapCard extends HTMLElement {
               y: row.cords[1],
               label: row.group ? row.name || this._friendlyLabel(key) : this._friendlyLabel(key),
               zone: row.zone != null ? row.zone : "",
-              outdoor: row.outdoor,
+              ...BPSOutdoor.stabilizeUncertainty(row, this._positions.get(key)),
               receivedAt: BPSOutdoor.fixTime(row),
               payload: row,
             });

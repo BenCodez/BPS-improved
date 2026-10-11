@@ -14,12 +14,16 @@ Quick list of changes in this fork:
 - Multiple beacons for one dog: one fused main icon plus small, subdued numbered
   icons showing each beacon's estimated position in the panel and Lovelace card.
 - Estimated uncertainty, stale-fix styling, receiver trust controls, and
-  diagnostics explaining beacon disagreement and possible reflection risk.
+  diagnostics explaining beacon disagreement and possible reflection risk,
+  with displayed circles smoothed against brief radius spikes.
 - Robust residual weighting for uncertainty circles, with each group member's
   radius inputs and smoothing/clamping displacement visible in diagnostics.
 - Dedicated selectable group position entities and a stability check against brief BLE quality reversals.
 - Diagnostic recordings and known-position tests, with an offline accuracy
   report and a read-only comparison of tracking with proposed calibration corrections.
+- Guarded auto calibration: fresh samples, independent validation, gradual
+  updates, visible skip reasons, and a measured-position regression veto when
+  a compatible Diagnostics recording is available.
 - Outdoor obstruction geometry uses immutable pure Python data rather than
   shared GEOS objects, with bounded tracking batches and protection from late
   results after map edits or reloads. See [stability details](docs/outdoor-geometry-stability.md).
@@ -306,6 +310,14 @@ radius. The circle can be hidden globally or below a configured metre threshold
 from 0 to 10,000 metres.
 Stale last-known fixes have a distinct dashed grey circle. Distances are in
 metres; circle radii use the floor's pixels-per-metre scale before zooming.
+
+The panel and map card smooth the displayed circle radius to reduce brief BLE
+spikes. A large increase needs three distinct elevated fixes spanning at least
+five seconds, then grows gradually; smaller changes and recovery are smoothed.
+Stale data and repeated polls cannot confirm an increase. Floor changes or a
+fresh fix after a stale gap reset the display history. This affects the circle
+only: diagnostic uncertainty and confidence update immediately, and the marker,
+group fusion, calibration and receiver-distance debug circles retain their values.
 **Show tracking diagnostics** reports the residual before and after robust
 weighting, the number of readings downweighted by the robust loss, and the
 raw-to-published shift. For a group, the same breakdown appears for each beacon.
@@ -748,14 +760,37 @@ distances at once); the absolute scale stays with Bermuda's own
 ### Auto calibration
 
 Toggle **Auto calibration** and it runs permanently: sampling every 30 seconds
-into a rolling ~6-hour window, re-solving every 15 minutes for every floor, and
-re-applying corrections whenever they shift by more than 1%. It keeps adapting
-as the environment changes (furniture moves, a probe is swapped, a door stays
-open). The toggle is stored in `bpsdata.txt` (alongside the corrections), while the
+into a rolling window and checking every 15 minutes for every floor. It retains
+your saved corrections until there is enough independent evidence to update:
+
+- At least four connected receivers, each with three bidirectional neighbours
+  and ten distinct observations per link spanning at least four minutes.
+- Recent observations from the last 30 minutes; cached adverts do not count
+  again. Receiver placement/height/identity changes require fresh evidence.
+- Separate earlier/later sampling periods must agree within 15%. Corrections
+  reaching the 0.2 or 5.0 limits are held for manual review.
+- The actual proposed update must improve relative receiver distance errors
+  on the later observations, without worsening the error tail or hiding a
+  significant regression for one reference transmitter.
+- Accepted changes are limited to 10% per check, preserving the existing
+  geometric mean. Unsupported receivers retain their corrections.
+
+The Calibration status explains whether a change was applied, unchanged or
+skipped. Validation removes each reference beacon's common transmit-power
+offset; it measures receiver consistency, **not dog position accuracy**. Stable
+walls/reflections can still bias BLE, so use the marked-location tracking test
+to check accuracy on your property. If a compatible marked Diagnostics recording
+is available, auto mode also replays it against the **current saved corrections**
+and vetoes updates that worsen measured beacon tracking. An insufficient or
+outdated recording does not establish tracking improvement; fresh reference
+checks still apply. Manual Apply remains available.
+
+The toggle is stored in `bpsdata.txt` (alongside the corrections), while the
 latest solve and the rolling sample window are persisted separately in
 `bps_calibration_state.json`. So after a restart the toggle sticks, the matrix
-reappears immediately, and the window resumes warm instead of rebuilding from
-zero.
+reappears immediately, and existing corrections stay active. Automatic updates
+wait for new independent observations after restart or re-enabling the toggle;
+restored samples alone cannot trigger a change.
 
 ## Kalman position smoothing
 
@@ -1110,5 +1145,13 @@ This is a read-only raw-fix comparison using the live solver, height projection
 and obstruction weights. It omits temporal jump weights, Kalman smoothing,
 group fusion, floor election and zone snapping, so field tracking can still
 differ. It does not apply corrections or suspend auto calibration; auto mode
-continues to apply corrections every 15 minutes. For testing before application,
+continues checking for accepted updates every 15 minutes. For testing before application,
 use a manual calibration run with auto mode off.
+
+If the test cannot start, its error message explains the missing prerequisite,
+such as recording Diagnostics or solving calibration for the selected floor.
+The matrix's predicted error measures the fitted receiver/transmitter distance
+model; it is not a measurement of tracker position accuracy. Use marked-location
+recordings to assess tracking. A recording made after applying corrections uses
+those corrections as its baseline, so it cannot establish the improvement over
+the previous settings.

@@ -28,6 +28,29 @@ function canvas() {
     return {calls, dashes, value: {width: 2000, height: 1000, getContext: () => ctx}};
 }
 
+test('card polling holds short radius spikes while retaining raw diagnostics and one circle', async () => {
+    const c = card(), cv = canvas();
+    c._canvas = cv.value; c._outdoorSettings = {enabled: true, show_uncertainty: true};
+    c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
+    c._redraw = () => {cv.calls.length = 0; c._drawMarkers();};
+    let now = 100000;
+    class ClockDate extends Date {static now() {return now;}}
+    sandbox.Date = ClockDate;
+    try {
+        for (const [seconds, radius] of [[0, 3], [1, 120], [2, 120], [3, 120], [4, 3]]) {
+            now = 100000 + seconds * 1000;
+            const row = {ent: 'beacon_a', floor: 'Property', cords: [200, 100], updated: now / 1000,
+                outdoor: {estimated_uncertainty_m: radius, observed: now / 1000}};
+            c._apiFetch = async () => ({ok: true, json: async () => [row]});
+            await c._pollOnce();
+            assert.equal(c._positions.get('beacon_a').payload.outdoor.estimated_uncertainty_m, radius);
+            assert.deepEqual(cv.calls.filter(a => Array.isArray(a) && a[2] > 24).map(a => a[2]), [60]);
+        }
+    } finally {
+        sandbox.Date = Date;
+    }
+});
+
 test('card loads floor scale/settings from authenticated existing layout endpoint', async () => {
     const c = card();
     let url;
