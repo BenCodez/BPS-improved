@@ -9,18 +9,20 @@ function panel() {
     let nextTimer = 1;
     function element(tag = 'div') {
         let value = '';
-        return {children: [], disabled: false, textContent: '', events: {},
+        return {children: [], disabled: false, textContent: '', events: {}, hidden: true,
+            focus() {this.focused = true;}, select() {this.selected = true;},
             get value() {return value || (tag === 'select' && this.children.length ? this.children[0].value : '');},
             set value(v) {value = v;}, appendChild(e) {this.children.push(e);},
             replaceChildren() {this.children = []; value = '';}, remove() {},
             addEventListener(type, cb) {this.events[type] = cb;},
             fire(type = 'click') {return this.events[type]();}, click() {downloads.push({href: this.href, name: this.download});}};
     }
-    for (const name of ['Start', 'Stop', 'Download', 'Clear', 'Mark', 'Release', 'Note', 'Refresh', 'Target', 'Duration', 'Floor', 'Status', 'X', 'Y', 'Label']) {
+    for (const name of ['CopyAll', 'ReportText', 'ReportStatus', 'ReportPanel', 'SelectReport', 'Start', 'Stop', 'Download', 'Clear', 'Mark', 'Release', 'Note', 'Refresh', 'Target', 'Duration', 'Floor', 'Status', 'X', 'Y', 'Label']) {
         elements.set('diagnostic' + name, element(['Target', 'Duration', 'Floor'].includes(name) ? 'select' : 'input'));
     }
     elements.get('diagnosticDuration').value = '600';
-    const network = {error: null, pending: null,
+    const copied = [];
+    const network = {error: null, pending: null, clipboardError: false, report: 'BPS full diagnostics\n{"trackers": ["tag", "tag2"]}',
         status: {active: false, available: false, targets: [], reason: 'Not started', frames: 0, annotations: 0, bytes: 0,
                  trackers: [{key: 'bps_group_dog', name: 'Dog (group)'}], floors: ['Yard']}};
     const el = name => elements.get('diagnostic' + name);
@@ -28,12 +30,14 @@ function panel() {
         createElement: element, body: element()},
         URL: {createObjectURL: blob => {assert.equal(blob, 'diagnostic-blob'); return 'blob:local';}, revokeObjectURL: url => downloads.push({revoked: url})},
         setInterval: (cb, ms) => {const id = nextTimer++; timers.set(id, {cb, ms}); return id;}, clearInterval: id => timers.delete(id),
+        navigator: {clipboard: {writeText: async text => {if (network.clipboardError) throw new Error('denied'); copied.push(text);}}},
         setTimeout: cb => {cb();}});
     vm.runInContext(readFileSync(join(__dirname, '../../custom_components/bps/frontend/diagnostics.js'), 'utf8'), sandbox);
     sandbox.BPSDiagnostics.init(async (url, options) => {
         requests.push({url, options});
         if (network.pending) await network.pending;
         if (network.error) return {ok: false, status: 400, json: async () => ({error: network.error})};
+        if (url.endsWith('?report=1')) return {ok: true, status: 200, json: async () => ({text: network.report})};
         if (options) {
             const body = JSON.parse(options.body);
             if (body.action === 'start') Object.assign(network.status, {active: true, available: true, targets: body.targets, frames: 1, reason: 'Recording', seconds_left: 600});
@@ -43,8 +47,48 @@ function panel() {
         }
         return {ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(network.status)), blob: async () => 'diagnostic-blob'};
     });
-    return {el, network, timers, requests, downloads};
+    return {el, network, timers, requests, downloads, copied};
 }
+
+test('full report is copied on demand without loading trackers or starting capture', async () => {
+    const p = panel();
+    await p.el('CopyAll').fire();
+    assert.deepEqual(p.requests.map(r => r.url), ['/api/bps/diagnostics?report=1']);
+    assert.deepEqual(p.copied, [p.network.report]);
+    assert.equal(p.el('ReportText').value, p.network.report);
+    assert.equal(p.el('ReportPanel').hidden, false);
+    assert.match(p.el('ReportStatus').textContent, /copied/);
+    assert.equal(p.timers.size, 0);
+});
+
+test('clipboard rejection leaves a selected report and failed refresh preserves the previous text', async () => {
+    const p = panel(); p.network.clipboardError = true;
+    await p.el('CopyAll').fire();
+    assert.equal(p.el('ReportText').selected, true);
+    assert.match(p.el('ReportStatus').textContent, /Ctrl\+C/);
+    p.el('ReportText').selected = false;
+    p.el('SelectReport').fire();
+    assert.equal(p.el('ReportText').selected, true);
+    p.network.error = 'Full diagnostic report exceeds 4 MiB';
+    await p.el('CopyAll').fire();
+    assert.equal(p.el('ReportText').value, p.network.report);
+    assert.match(p.el('ReportStatus').textContent, /exceeds 4 MiB.*previous report/);
+    assert.equal(p.el('CopyAll').disabled, false);
+});
+
+test('concurrent full report clicks are coalesced and empty reports are rejected', async () => {
+    const p = panel();
+    let release; p.network.pending = new Promise(resolve => {release = resolve;});
+    const first = p.el('CopyAll').fire();
+    await p.el('CopyAll').fire();
+    assert.equal(p.requests.length, 1);
+    assert.equal(p.el('CopyAll').disabled, true);
+    release(); p.network.pending = null; await first;
+    p.network.report = '';
+    await p.el('CopyAll').fire();
+    assert.match(p.el('ReportStatus').textContent, /empty/);
+    assert.equal(p.copied.length, 1);
+});
 
 test('capture is off by default, controls load selectable trackers and poll only while recording', async () => {
     const p = panel();

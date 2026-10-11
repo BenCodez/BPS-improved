@@ -2212,7 +2212,7 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSSelfTestAPI(hass))
             hass.http.register_view(BPSTrackerTuneAPI())
             hass.http.register_view(BPSHistoryAPI(hass))
-            hass.http.register_view(BPSDiagnosticsAPI(_diagnostic_snapshot, _diagnostic_inventory))
+            hass.http.register_view(BPSDiagnosticsAPI(_diagnostic_snapshot, _diagnostic_inventory, _diagnostic_report_snapshot))
             hass.data["bps_views_registered"] = True
 
         config_path = hass.config.path()
@@ -2732,25 +2732,34 @@ def _diagnostic_snapshot(hass, targets, now):
     Current sensor readings are deliberately separate from the earlier solver
     inputs in positions: polling never pretends these were one atomic solve.
     """
+    report = targets is None
     data = get_bps_data(hass)
     if not isinstance(data, dict):
-        raise ValueError("Save a BPS layout before recording")
+        if not report:
+            raise ValueError("Save a BPS layout before recording")
+        data = {}
     known = {eid[len("sensor."):].split("_distance_to_", 1)[0]
              for eid in _bermuda_distance_sensor_ids(hass)}
     groups = {"bps_group_" + g["id"]: g["beacons"] for g in normalize_groups(data, known)}
     recording = hass.data.get(DOMAIN, {}).get("_diagnostics")
-    retained = recording.members if recording and recording.active else {}
+    retained = recording.members if not report and recording and recording.active else {}
+    if report:
+        targets = sorted(known | set(groups) | {p["ent"] for p in
+            hass.data.get(DOMAIN, {}).get("apitricords", []) if isinstance(p.get("ent"), str)})
     # Freeze subjects for this session, including when a group is edited or
     # disabled/deleted. A new recording resolves the current membership afresh.
     members = {target: list(retained[target]) if target in retained else
                [target] if target in known else list(groups.get(target, [target]))
                for target in targets}
     beacons = sorted({beacon for values in members.values() for beacon in values})
-    if len(beacons) > 16:
+    if not report and len(beacons) > 16:
         raise ValueError("Record at most 16 constituent beacons at once")
     floors = data.get("floor", [])
-    if sum(len(f.get("receivers", [])) for f in floors) > 128:
+    placements = sum(len(f.get("receivers", [])) for f in floors)
+    if not report and placements > 128:
         raise ValueError("Diagnostic recording supports at most 128 receiver placements")
+    if report and len(beacons) * placements > 32768:
+        raise ValueError("Full diagnostic report supports at most 32768 beacon/receiver readings")
     context = {"layout": {key: copy.deepcopy(data[key]) for key in (
         "outdoor_tracking", "tracker_groups", "tracker_height", "tracker_heights",
         "tracker_ref_offsets", "reading_max_age", "position_timeout") if key in data},
@@ -2815,6 +2824,33 @@ def _diagnostic_snapshot(hass, targets, now):
             "calibration_status": {"state": cal.get("state", "idle"), "error": cal.get("error"),
                 "pair_counts": {str(k): len(v) for k, v in list(cal.get("samples", {}).items())[:256]}},
             "offline_receivers": list(hass.data.get(DOMAIN, {}).get("rl_offline", []))[:128]}
+
+
+def _diagnostic_report_snapshot(hass, now):
+    """All saved tracking configuration and current telemetry; never starts capture."""
+    snapshot = _diagnostic_snapshot(hass, None, now)
+    dom = hass.data.get(DOMAIN, {})
+    layout = get_bps_data(hass)
+    # Saved settings only; omit map/icon assets and unrelated entity state.
+    if isinstance(layout, dict):
+        snapshot["context"]["layout"].update({key: copy.deepcopy(layout[key]) for key in (
+            "history_enabled", "history_max_age") if key in layout})
+    snapshot["context"]["defaults"].update(kalman_measurement_noise_m=KF_MEAS_NOISE_M,
+        kalman_acceleration_noise_ms2=KF_ACCEL_NOISE_MS2, radius_jump_tolerance=RADIUS_JUMP_TOL,
+        min_weight_radius_m=MIN_WEIGHT_RADIUS_M, solver_robust_f_scale=SOLVER_ROBUST_F_SCALE)
+    cal = dom.get("calibration", {})
+    snapshot["calibration_status"].update({key: copy.deepcopy(cal.get(key)) for key in (
+        "mode", "floor", "auto_status", "last_solved_at", "ends_at", "duration")})
+    snapshot["calibration_status"]["pair_counts"] = {str(k): len(v) for k, v in cal.get("samples", {}).items()}
+    snapshot["offline_receivers"] = list(dom.get("rl_offline", []))
+    snapshot["inventory"] = _diagnostic_inventory(hass)
+    snapshot["scanner_diagnostics"] = _scanner_diagnostics(hass, json.dumps(snapshot["context"]["layout"]))
+    updater = hass.data.get("bps_update_task")
+    recording = dom.get("_diagnostics")
+    snapshot["runtime"] = {"initialized": bool(hass.data.get("bps_initialized")),
+        "tracking_task_running": updater is not None and not updater.done(),
+        "recording": copy.deepcopy(recording.status()) if recording else {"active": False, "available": False}}
+    return snapshot
 
 
 class BPSReceiverStatusAPI(HomeAssistantView):

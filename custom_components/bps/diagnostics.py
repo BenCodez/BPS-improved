@@ -4,6 +4,8 @@ import hashlib
 import json
 import logging
 import math
+from pathlib import Path
+import sys
 import time
 
 from aiohttp import web
@@ -18,6 +20,7 @@ MAX_FRAME_BYTES = 256 * 1024
 MAX_ANNOTATIONS = 200
 MAX_FRAMES = MAX_DURATION_S // INTERVAL_S + 1
 FORMAT = "bps-diagnostics-v1"
+MAX_REPORT_BYTES = 4 * 1024 * 1024
 GUIDE = (
     "Coordinates in positions/raw/radii and layout are map pixels; layout floor.scale is pixels per metre. "
     "Readings are current sensor snapshots; positions contain their own solve/observation timestamps and may be older. "
@@ -43,6 +46,21 @@ def pack(snapshot):
     if len(frame) > MAX_FRAME_BYTES:
         raise ValueError("Diagnostic frame exceeds 256 KiB")
     return key, context, frame
+
+
+def format_report(snapshot):
+    """Format a detached live snapshot off the HA loop, without recording."""
+    import homeassistant.const as ha_const
+    version = json.loads(Path(__file__).with_name("manifest.json").read_text())["version"]
+    report = {"format": "bps-support-report-v1", "bps_version": version,
+              "home_assistant_version": getattr(ha_const, "__version__", "unknown"),
+              "python_version": sys.version.split()[0], **snapshot}
+    text = ("BPS full diagnostics (live snapshot)\n"
+            "Positions and current sensor readings have separate timestamps. Coordinates are map pixels; floor scale is pixels/metre.\n"
+            + json.dumps(report, indent=2, allow_nan=False))
+    if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
+        raise ValueError("Full diagnostic report exceeds 4 MiB; reduce tracker/receiver scope before retrying")
+    return text
 
 
 class Recording:
@@ -244,11 +262,22 @@ class BPSDiagnosticsAPI(HomeAssistantView):
     name = "api:bps:diagnostics"
     requires_auth = True
 
-    def __init__(self, snapshot, inventory):
+    def __init__(self, snapshot, inventory, report=None):
         self.snapshot, self.inventory = snapshot, inventory
+        self.report = report
 
     async def get(self, request):
         hass = request.app["hass"]
+        if request.query.get("report") == "1":
+            try:
+                if self.report is None:
+                    raise ValueError("Live diagnostic report is unavailable")
+                snapshot = self.report(hass, time.time())
+                text = await hass.async_add_executor_job(format_report, snapshot)
+            except (ValueError, TypeError) as err:
+                return web.json_response({"error": str(err)}, status=400)
+            return web.Response(body=encode({"text": text}), content_type="application/json",
+                                headers={"Cache-Control": "no-store"})
         recording = get_recording(hass, self.snapshot)
         if request.query.get("download") == "1":
             try:

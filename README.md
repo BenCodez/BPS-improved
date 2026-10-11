@@ -644,6 +644,18 @@ lives.)
 
 ## Diagnostic recordings
 
+For an easy copy/paste report, open **BPS → Debugging → Full diagnostics** and
+click **Copy full diagnostics**. It gathers all current beacons and groups,
+receiver readings and corrections, uncertainty and fusion details, saved floor
+geometry/wall materials, scanner mismatches, calibration apply/skip reasons,
+and version/runtime information. No recording or tracker selection is needed.
+If clipboard access is unavailable, use the selectable text box and
+**Select report for manual copy**. Paste the report into your support message.
+It contains property geometry and tracker locations, but excludes map images,
+icons, authentication tokens and unrelated entity states. This is a live
+snapshot; use a recording below to diagnose intermittent jumps or measure
+accuracy over time.
+
 Open **BPS → Debugging → Diagnostic recording**, click **Load trackers / refresh**,
 choose an original Bermuda tracker or an enabled dog group, and start a 5, 10,
 or 30 minute recording. A group records its constituent beacons as well as the

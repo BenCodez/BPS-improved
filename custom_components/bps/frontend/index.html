@@ -421,6 +421,18 @@
         <!-- ============================ DEBUGGING ============================ -->
         <section class="bps-tabpanel" data-tabpanel="debugging">
             <div class="bps-card">
+                <h3>Full diagnostics</h3>
+                <p>Copy one live report with all trackers, groups, receiver readings, calibration decisions and saved map settings. No recording or tracker selection needed. Contains your property geometry and tracker locations.</p>
+                <div class="bps-btn-row">
+                    <button type="button" id="diagnosticCopyAll" class="bps-btn bps-btn-primary">Copy full diagnostics</button>
+                </div>
+                <p id="diagnosticReportStatus" role="status">Click to collect a report you can paste when asking for help.</p>
+                <div id="diagnosticReportPanel" hidden>
+                    <div class="bps-field"><label for="diagnosticReportText">Diagnostic report</label><textarea id="diagnosticReportText" rows="14" readonly spellcheck="false" style="width:100%"></textarea></div>
+                    <button type="button" id="diagnosticSelectReport" class="bps-btn bps-btn-outline">Select report for manual copy</button>
+                </div>
+            </div>
+            <div class="bps-card">
                 <h3>Diagnostic recording</h3>
                 <p>Record a tracker or dog group to investigate poor accuracy. Includes receiver readings, positions, map geometry, and calibration settings. Tracking and calibration continue as usual.</p>
                 <p>Recordings stay in memory until restart. Download before starting another recording. The file contains your property layout and location history.</p>
