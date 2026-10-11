@@ -414,3 +414,32 @@ test('a scanner absent from the dump cannot inherit a shared friendly name age',
     c._hass.states['binary_sensor.old_a_status'] = {state: 'on', attributes: {device_class: 'connectivity'}};
     assert.equal(c._computeReceiverStatuses().get('old_a'), true);
 });
+
+test('ownerless Bermuda ages cannot mark separate owners of the same MAC online or offline', () => {
+    for (const age of [0, 90]) {
+        const c = card(); c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+        c._receivers = [{entity_id: 'station_a'}, {entity_id: 'station_b'}];
+        const mac = 'aa:bb:cc:11:22:33';
+        c._receiverMatching = new Map([
+            ['station_a', {name: 'Station A', scanner_mac: mac, config_entry_ids: ['owner-a']}],
+            ['station_b', {name: 'Station B', scanner_mac: mac, config_entry_ids: ['owner-b']}],
+        ]);
+        c._bermudaScanners = new Map([['station_a', age], ['station_b', age]]);
+        c._bermudaScannerMacAges = new Map([[mac, age]]); c._bermudaDumpAt = Date.now();
+        assert.equal(c._computeReceiverStatuses().get('station_a'), null);
+        assert.equal(c._computeReceiverStatuses().get('station_b'), null);
+        c._hass.states['binary_sensor.station_a_status'] = {state: 'off', attributes: {device_class: 'connectivity'}};
+        assert.equal(c._computeReceiverStatuses().get('station_a'), false, 'independent connectivity remains authoritative');
+    }
+});
+
+test('multiple aliases belonging to one Bermuda owner still resolve liveness', () => {
+    const c = card(); c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+    c._receivers = [{entity_id: 'old_station'}, {entity_id: 'current_station'}];
+    const mac = 'aa:bb:cc:11:22:33';
+    c._receiverMatching = new Map(['old_station', 'current_station'].map(id => [id,
+        {name: 'Current Station', scanner_mac: mac, config_entry_ids: ['owner-a']} ]));
+    c._bermudaScanners = new Map(); c._bermudaScannerMacAges = new Map([[mac, 0]]); c._bermudaDumpAt = Date.now();
+    assert.equal(c._computeReceiverStatuses().get('old_station'), true);
+    assert.equal(c._computeReceiverStatuses().get('current_station'), true);
+});

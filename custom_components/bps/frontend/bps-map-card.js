@@ -536,6 +536,13 @@ class BpsMapCard extends HTMLElement {
       return statuses;
     }
     const heuristic = [];
+    const ownersByMac = new Map();
+    for (const option of this._receiverMatching?.values() || []) {
+      if (option.identity_ambiguous || !option.scanner_mac || option.config_entry_ids?.length !== 1) continue;
+      const owners = ownersByMac.get(option.scanner_mac) || new Set();
+      owners.add(option.config_entry_ids[0]);
+      ownersByMac.set(option.scanner_mac, owners);
+    }
     for (const rec of this._receivers) {
       const id = rec.entity_id;
       const statusEntity = this._config.receiver_status[id];
@@ -559,7 +566,7 @@ class BpsMapCard extends HTMLElement {
         const identity = this._receiverMatching?.get(id);
         const nameAge = identity?.liveness_name_unique === false ? null : this._bermudaScanners.get(id) ??
           (identity ? this._bermudaScanners.get(BpsMapCard.haSlugify(identity.name)) : null);
-        const ageAtDump = identity?.identity_ambiguous ? null :
+        const ageAtDump = identity?.identity_ambiguous || (ownersByMac.get(identity?.scanner_mac)?.size || 0) > 1 ? null :
           this._bermudaScannerMacAges?.get(identity?.scanner_mac) ?? nameAge;
         if (ageAtDump != null) {
           const age = ageAtDump + (Date.now() - this._bermudaDumpAt) / 1000;
