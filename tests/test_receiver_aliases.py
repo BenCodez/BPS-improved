@@ -330,3 +330,26 @@ def test_runtime_identity_does_not_admit_unowned_or_disabled_exact_legacy_source
     assert "distance" not in data["floor"][0]["receivers"][0]
     linked = bps._scanner_linking(hass, json.dumps(data))["placed"][0]
     assert linked["sensor_count"] == 0 and linked["selected_sources"] == {}
+
+
+@pytest.mark.parametrize("conflict", ["mac", "owner"])
+@pytest.mark.parametrize("last_seen", [1, 100])
+def test_liveness_never_borrows_evidence_from_a_conflicting_saved_scanner_identity(hass, monkeypatch, conflict, last_seen):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    devices["station"].name = "old_station"
+    rec = data["floor"][0]["receivers"][0]
+    rec.update(scanner_mac=MAC, scanner_config_entry_id="entry")
+    rec["scanner_mac" if conflict == "mac" else "scanner_config_entry_id"] = "dd:ee:ff:11:22:33" if conflict == "mac" else "another-owner"
+    hass.data["bps"]["layout"] = data
+    async def call(*args, **kwargs):
+        return {MAC: {"_is_scanner": True, "address": MAC, "name": "old_station", "last_seen": last_seen},
+                "tag": {"last_seen": 100}}
+    hass.services.async_call = call
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "old_station" in hass.data["bps"]["rl_unknown"]
+    assert "old_station" not in hass.data["bps"]["rl_offline"]
+    assert bps._scanner_linking(hass, json.dumps(data))["placed"][0]["status"] == "conflict"
+    rec.update(scanner_mac=MAC, scanner_config_entry_id="entry")
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "old_station" not in hass.data["bps"]["rl_unknown"]
+    assert ("old_station" in hass.data["bps"]["rl_offline"]) is (last_seen == 1)

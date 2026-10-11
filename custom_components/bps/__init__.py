@@ -1164,8 +1164,12 @@ async def update_receiver_liveness(hass):
     matching = {row["entity_id"]: row for row in receiver_inventory(hass)["options"]}
     receivers.update(matching)
     sources = ReceiverSources(hass)
+    identity_conflicts = set()
     for floor in (get_bps_data(hass) or {}).get("floor", []):
         for rec, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
+            if binding["status"] in ("scanner_identity_conflict", "scanner_identity_unavailable", "ambiguous_scanner_identity"):
+                identity_conflicts.add(rec["entity_id"])
+                receivers.add(rec["entity_id"])
             if not sources.blocked(binding) and binding["identity"]:
                 alias = next((matching[name] for name in binding["aliases"] if name in matching), None)
                 if alias:
@@ -1200,7 +1204,7 @@ async def update_receiver_liveness(hass):
         return False if saw_state else None
 
     def is_online(slug):
-        if matching.get(slug, {}).get("identity_ambiguous"):
+        if slug in identity_conflicts or matching.get(slug, {}).get("identity_ambiguous"):
             return None
         name = matching.get(slug, {}).get("name")
         mac = matching.get(slug, {}).get("scanner_mac")

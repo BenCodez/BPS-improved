@@ -443,3 +443,26 @@ test('multiple aliases belonging to one Bermuda owner still resolve liveness', (
     assert.equal(c._computeReceiverStatuses().get('old_station'), true);
     assert.equal(c._computeReceiverStatuses().get('current_station'), true);
 });
+
+test('saved identity conflicts cannot borrow automatic liveness from a reused scanner name', () => {
+    for (const conflict of ['mac', 'owner']) for (const age of [0, 90]) for (const override of [undefined, false, 'heuristic']) {
+        const c = card(); c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+        if (override !== undefined) c._config.receiver_status.station = override;
+        const mac = 'aa:bb:cc:11:22:33';
+        const rec = {entity_id: 'station', scanner_mac: mac, scanner_config_entry_id: 'owner-a'};
+        if (conflict === 'mac') rec.scanner_mac = 'dd:ee:ff:11:22:33';
+        else rec.scanner_config_entry_id = 'owner-b';
+        c._receivers = [rec];
+        c._receiverMatching = new Map([['station', {name: 'Station', scanner_mac: mac, config_entry_ids: ['owner-a']}]]);
+        c._bermudaScanners = new Map([['station', age]]); c._bermudaScannerMacAges = new Map([[mac, age]]); c._bermudaDumpAt = Date.now();
+        c._hass.states['binary_sensor.station_status'] = {state: 'on', attributes: {device_class: 'connectivity'}};
+        c._hass.states['sensor.tag_distance_to_station'] = {state: '3'};
+        assert.equal(c._computeReceiverStatuses().get('station'), null);
+        c._hass.states['binary_sensor.explicit_status'] = {state: 'on'};
+        c._config.receiver_status.station = 'binary_sensor.explicit_status';
+        assert.equal(c._computeReceiverStatuses().get('station'), true, 'explicit user-selected status remains authoritative');
+        delete c._config.receiver_status.station;
+        rec.scanner_mac = mac; rec.scanner_config_entry_id = 'owner-a';
+        assert.equal(c._computeReceiverStatuses().get('station'), age === 0);
+    }
+});

@@ -546,6 +546,19 @@ class BpsMapCard extends HTMLElement {
     for (const rec of this._receivers) {
       const id = rec.entity_id;
       const statusEntity = this._config.receiver_status[id];
+      if (statusEntity && statusEntity !== "heuristic") {
+        const value = states[statusEntity]?.state;
+        statuses.set(id, value == null || ["", "unknown", "unavailable"].includes(value) ? null : BpsMapCard.stateLooksOnline(value));
+        continue;
+      }
+      const identity = this._receiverMatching?.get(id);
+      const savedMac = typeof rec.scanner_mac === "string" && /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(rec.scanner_mac)
+        ? rec.scanner_mac.toLowerCase() : null;
+      if (identity?.identity_ambiguous || savedMac && (savedMac !== identity?.scanner_mac
+        || rec.scanner_config_entry_id && (identity?.config_entry_ids?.length !== 1 || identity.config_entry_ids[0] !== rec.scanner_config_entry_id))) {
+        statuses.set(id, null);
+        continue;
+      }
       if (statusEntity === false || statusEntity === "heuristic") {
         // Explicit opt-out from the status sensor: the ESPHome status
         // platform only reports API connectivity, so a proxy whose BLE stack
@@ -554,16 +567,10 @@ class BpsMapCard extends HTMLElement {
         heuristic.push({ id, suffix: `_distance_to_${id}` });
         continue;
       }
-      if (statusEntity) {
-        const value = states[statusEntity]?.state;
-        statuses.set(id, value == null || ["", "unknown", "unavailable"].includes(value) ? null : BpsMapCard.stateLooksOnline(value));
-        continue;
-      }
       // Bermuda's own scanner liveness: last advertisement heard within
       // receiver_timeout seconds. Ages were anchored when the dump was
       // fetched, so add the wall time elapsed since.
       if (this._bermudaScanners) {
-        const identity = this._receiverMatching?.get(id);
         const nameAge = identity?.liveness_name_unique === false ? null : this._bermudaScanners.get(id) ??
           (identity ? this._bermudaScanners.get(BpsMapCard.haSlugify(identity.name)) : null);
         const ageAtDump = identity?.identity_ambiguous || (ownersByMac.get(identity?.scanner_mac)?.size || 0) > 1 ? null :
