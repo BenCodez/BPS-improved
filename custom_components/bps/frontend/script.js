@@ -133,6 +133,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const circles = [];
     let receiverName = "";
     let receiverOptions = []; // Receiver names known from Bermuda sensors
+    let receiverMatching = {revision: null, options: []};
+    let receiverInventoryLoaded = false;
+    let unknownReceivers = [];
     let offlineReceivers = []; // scanners Bermuda hasn't heard recently (backend liveness poll)
     // Naming-mismatch diagnostics from read_text (issue #64): placed receivers
     // with no matching Bermuda sensor (each with a suggested live scanner), and
@@ -145,13 +148,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     let scannerLinkingLoading = false;
     let scannerLinkingData = null;
     let debugSubtab = "receivers"; // Debugging tab sub-view: "receivers" | "beacons"
-    // A placed receiver is "offline" when its scanner's distance sensors are
-    // gone (slug no longer in the reported list) OR Bermuda hasn't heard the
-    // scanner recently (backend liveness). Guarded on the list being loaded so
-    // nothing is flagged before the receiver data arrives.
+    // Missing identity or distance readings is distinct from confirmed offline.
     function isReceiverOffline(slug) {
-        if (receiverOptions.length === 0) return false;
-        return !receiverOptions.includes(slug) || offlineReceivers.includes(slug);
+        return offlineReceivers.includes(slug);
+    }
+    function receiverStatusLabel(slug) {
+        if (isReceiverOffline(slug)) return "(Offline) ";
+        if (receiverInventoryLoaded && !receiverOptions.includes(slug)) return "(Unmatched) ";
+        if (unknownReceivers.includes(slug)) return "(Unknown) ";
+        return "";
     }
 
     // Live-refresh the offline set from the backend so (Offline) markers update
@@ -164,9 +169,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!res.ok) return;
             const data = await res.json();
             const next = Array.isArray(data.offline) ? data.offline : [];
+            const nextUnknown = Array.isArray(data.unknown) ? data.unknown : [];
             const changed = next.length !== offlineReceivers.length
-                || next.some(s => !offlineReceivers.includes(s));
+                || next.some(s => !offlineReceivers.includes(s))
+                || JSON.stringify(nextUnknown) !== JSON.stringify(unknownReceivers);
             offlineReceivers = next;
+            unknownReceivers = nextUnknown;
             if (changed && mapReady() && !drawToolActive() && !editTarget && !pollTrackActive) {
                 clearCanvas();
                 drawElements();
@@ -1608,7 +1616,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (r.entity_id === hoveredReceiver && r.entity_id !== focusedReceiver) {
                 let labelY = r.cords.y - iconSize / 2 - 8;
                 if (labelY < 24) labelY = r.cords.y + iconSize / 2 + 24;
-                drawCenteredLabel((recOffline ? "(Offline) " : "") + r.entity_id, r.cords.x, labelY,
+                drawCenteredLabel(receiverStatusLabel(r.entity_id) + r.entity_id, r.cords.x, labelY,
                     "600 22px system-ui, sans-serif", recOffline ? OFFLINE_RED : "#111111");
             }
         });
@@ -2791,8 +2799,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             // Read the receiver list before parsing the coordinates: on a
             // fresh install bpsdata.txt is empty and JSON.parse would throw,
             // yet the receiver picker is needed exactly then.
+            receiverInventoryLoaded = true;
+            receiverMatching = data.receiver_matching || {revision: null, options: []};
             receiverOptions = Array.isArray(data.receivers) ? [...data.receivers].sort() : [];
             offlineReceivers = Array.isArray(data.offline_receivers) ? data.offline_receivers : [];
+            unknownReceivers = Array.isArray(data.unknown_receivers) ? data.unknown_receivers : [];
             scannerDiagnostics = (data.scanner_diagnostics && typeof data.scanner_diagnostics === 'object')
                 ? data.scanner_diagnostics : { unmatched_receivers: [], unplaced_scanners: [] };
             console.log("Known receivers:", receiverOptions);
@@ -3239,6 +3250,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             return;
         }
+        // Match targets one placement by selected floor and index, even when
+        // a damaged layout contains repeated IDs or co-located stations.
+        if (event.target.closest('[data-type="matchrec"]')) {
+            const el = event.target.closest('[data-type="matchrec"]');
+            const floor = currentFloor();
+            const index = Number(el.getAttribute('data-index'));
+            const rec = floor && Number.isInteger(index) && (floor.receivers || [])[index];
+            if (rec && rec.entity_id === el.getAttribute('data-id')) openReceiverMatching(floor, rec, index);
+            return;
+        }
         // Clicking a receiver row focuses it on the map (only that receiver and
         // its circle stay visible); clicking it again clears the focus. Mirrors
         // clicking the receiver's icon on the map. Checked after removerec so
@@ -3248,32 +3269,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             focusedReceiver = recId === focusedReceiver ? null : recId;
             focusedRecDistLink = null; // a receiver focus supersedes a single-link highlight
             redrawAll();
-            return;
-        }
-        // Re-link a mismatched placement to a live scanner slug (issue #64):
-        // rename its entity_id + record the scanner's hardware token, then reveal
-        // Save. Only its name changes — position and everything else stay.
-        if (event.target.closest('[data-type="relinkrec"]')) {
-            const el = event.target.closest('[data-type="relinkrec"]');
-            const oldId = el.getAttribute('data-id');
-            const newId = el.getAttribute('data-target');
-            if (!newId || newId === oldId) return;
-            // A stale sidebar (e.g. after Clear Canvas) must not fake a save.
-            if (!finalcords.floor.some(f => sameFloorName(f.name, SelMapName))) return;
-            let changed = false;
-            finalcords.floor.forEach(f => (f.receivers || []).forEach(r => {
-                if (r && r.entity_id === oldId) {
-                    r.entity_id = newId;
-                    r.scanner_uid = scannerTokenJs(newId);
-                    changed = true;
-                }
-            }));
-            if (changed) {
-                savebuttondiv.appendChild(saveButton);
-                clearCanvas();
-                drawElements(); // re-renders the tree + scanner issues
-                bpsToast(`Re-linked "${oldId}" → "${newId}". Save Floor Plan to keep it.`);
-            }
             return;
         }
         // Debugging tab Refresh — re-fetch the receiver-linking snapshot (issue #64).
@@ -4296,11 +4291,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         placeholder.textContent = "-- Select receiver --";
         receiverSelect.appendChild(placeholder);
         availableReceiverNames
-            .filter(name => !q || name.toLowerCase().includes(q))
+            .filter(name => !q || (receiverMatching.options.find(o => o.entity_id === name)?.label || name).toLowerCase().includes(q))
             .forEach(name => {
                 const option = document.createElement("option");
                 option.value = name;
-                option.textContent = name;
+                const identity = receiverMatching.options.find(o => o.entity_id === name);
+                option.textContent = identity?.label || name;
+                option.disabled = identity?.selectable === false;
                 receiverSelect.appendChild(option);
             });
         const custom = document.createElement("option");
@@ -4316,13 +4313,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function populateReceiverSelect() {
-        // A receiver physically exists on one floor: placing the same name on
-        // several floors makes them compete for the tracker's floor. Hide
-        // names placed on ANY floor; "Custom name…" remains the escape hatch.
+        // A scanner may be placed on other floors. Hide same-floor bindings.
         const placedAnywhere = new Set();
         if (Array.isArray(finalcords.floor)) {
             finalcords.floor.forEach(floor => {
-                (floor.receivers || []).forEach(r => placedAnywhere.add(r.entity_id));
+                if (sameFloorName(floor.name, SelMapName)) (floor.receivers || []).forEach(r => placedAnywhere.add(r.entity_id));
             });
         }
         availableReceiverNames = receiverOptions.filter(name => !placedAnywhere.has(name));
@@ -4354,7 +4349,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // otherwise never repaints until the first floorplan click.) Set the
         // instructions AFTER this — clearCanvas() blanks the message panel.
         clearCanvas(); drawElements();
-        messdiv.innerHTML = '<h4 class="font-medium mb-2">Instructions</h4><p class="text-sm text-gray-500">Place a BLE receiver by clicking its location on the floorplan, then pick it from the list. The list shows every receiver Bermuda currently reports (the part after "_distance_to_" in its sensors); receivers already placed on any floor are hidden, since a receiver belongs to one floor. Pick "Custom name…" to type a name manually, then press ✓ Save. Press Esc or ✕ Cancel to back out.</p>';
+        messdiv.innerHTML = '<h4 class="font-medium mb-2">Instructions</h4><p class="text-sm text-gray-500">Place a BLE receiver by clicking its location on the floorplan, then pick it from the list. The list shows every receiver Bermuda currently reports (the part after "_distance_to_" in its sensors); receivers already placed on this floor are hidden. The same scanner may be placed on other floors. Pick "Custom name…" to type a name manually, then press ✓ Save. Press Esc or ✕ Cancel to back out.</p>';
     });
 
     // =================================================================
@@ -4911,8 +4906,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // Loopa through all receivers in floor
             floor.receivers.forEach((receiver, index) => {
-                receiver.type = "receiver";
-                tmpdrawcords.push(receiver);
+                tmpdrawcords.push({...receiver, type: "receiver"});
             });
             // Loopa through all zones in floor
             floor.zones.forEach((zone, index) => {
@@ -4971,7 +4965,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     if (labelY < 24) {
                         labelY = y + iconSize / 2 + 24;
                     }
-                    drawCenteredLabel((recOffline ? "(Offline) " : "") + item.entity_id, x, labelY,
+                    drawCenteredLabel(receiverStatusLabel(item.entity_id) + item.entity_id, x, labelY,
                         "600 22px system-ui, sans-serif", recOffline ? OFFLINE_RED : "#111111");
                 }
             }
@@ -5104,46 +5098,118 @@ document.addEventListener('DOMContentLoaded', async () => {
         return /^[0-9a-f]{5,12}$/.test(last) ? last : null;
     }
 
-    // Naming-mismatch warnings (issue #64). "Unmatched" is recomputed live from
-    // finalcords + the known scanner slugs so a re-link/remove clears it at once;
-    // the re-link suggestion comes from the backend diagnostics.
+    async function freshReceiverMatching() {
+        const res = await bpsFetch('/api/bps/scanner_linking');
+        if (!res.ok) throw new Error("Unable to load Bermuda receivers. Try again.");
+        const data = await res.json();
+        const matching = data && data.matching;
+        if (!matching || typeof matching.revision !== 'string' || !Array.isArray(matching.options)) {
+            throw new Error("Receiver inventory is unavailable. Refresh and try again.");
+        }
+        return matching;
+    }
+
+    function receiverPlacementSignature(rec) {
+        const stored = {...rec};
+        for (const key of ["type", "r", "distance", "_diagnostic_reading", "_outdoor_reading"]) delete stored[key];
+        return JSON.stringify(stored);
+    }
+
+    async function openReceiverMatching(floor, rec, index) {
+        if (document.querySelector('.bps-modal-overlay')) return;
+        const snapshot = receiverPlacementSignature(rec);
+        let matching;
+        try { matching = await freshReceiverMatching(); }
+        catch (error) { bpsToast(error.message); return; }
+        if (currentFloor() !== floor || floor.receivers[index] !== rec || receiverPlacementSignature(rec) !== snapshot
+            || document.querySelector('.bps-modal-overlay')) return;
+        const overlay = document.createElement('div'); overlay.className = 'bps-modal-overlay';
+        const dialog = document.createElement('div'); dialog.className = 'bps-modal';
+        const title = document.createElement('div'); title.className = 'bps-modal-msg';
+        title.textContent = `Match “${rec.entity_id}” to a Bermuda receiver`;
+        const help = document.createElement('p');
+        help.textContent = 'Choose the physical station by its Bermuda name, scanner slug and hardware identity. Its position and properties stay in place. Save Floor Plan after applying.';
+        const select = document.createElement('select'); select.id = 'receiverMatchChoice';
+        const empty = document.createElement('option'); empty.value = ''; empty.textContent = 'Choose a receiver…'; select.appendChild(empty);
+        for (const option of matching.options) {
+            const el = document.createElement('option'); el.value = option.entity_id;
+            el.textContent = (option.label || option.entity_id) + (option.warning ? ` · ${option.warning}` : ""); el.disabled = option.selectable === false;
+            select.appendChild(el);
+        }
+        // Suggestions are informational hardware evidence, never a selection.
+        const placementToken = rec.scanner_uid || scannerTokenJs(rec.entity_id);
+        const proof = matching.options.filter(option => {
+            if (option.selectable === false) return false;
+            if (rec.scanner_mac && option.scanner_mac) return rec.scanner_mac === option.scanner_mac;
+            const token = option.token || scannerTokenJs(option.entity_id);
+            return placementToken && placementToken === token
+                && matching.options.filter(o => (o.token || scannerTokenJs(o.entity_id)) === token).length === 1;
+        });
+        const hint = document.createElement('p');
+        hint.textContent = proof.length === 1 ? `Hardware match: ${proof[0].label || proof[0].entity_id}` : 'No unique hardware match. Verify the station before choosing.';
+        const error = document.createElement('p'); error.setAttribute('role', 'alert');
+        const actions = document.createElement('div'); actions.className = 'bps-modal-actions';
+        const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.className = 'bps-btn bps-btn-outline';
+        const apply = document.createElement('button'); apply.type = 'button'; apply.textContent = 'Apply match'; apply.className = 'bps-btn bps-btn-primary';
+        actions.append(cancel, apply); dialog.append(title, help, select, hint, error, actions); overlay.appendChild(dialog); document.body.appendChild(overlay);
+        let active = true, busy = false;
+        const close = () => { active = false; overlay.remove(); document.removeEventListener('keydown', onKey); };
+        function onKey(event) { if (event.key === 'Escape') close(); }
+        document.addEventListener('keydown', onKey);
+        cancel.addEventListener('click', close);
+        overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+        apply.addEventListener('click', async () => {
+            if (!active || busy) return;
+            const choice = select.value;
+            const option = matching.options.find(o => o.entity_id === choice && o.selectable !== false);
+            if (!option) { error.textContent = 'Choose a known Bermuda receiver.'; return; }
+            busy = true; apply.disabled = true;
+            try {
+                const fresh = await freshReceiverMatching();
+                if (!active) return;
+                if (fresh.revision !== matching.revision || !fresh.options.some(o => o.entity_id === choice && o.selectable !== false)) {
+                    throw new Error('Bermuda receiver inventory changed. Cancel and reopen the chooser.');
+                }
+                if (currentFloor() !== floor || floor.receivers[index] !== rec || receiverPlacementSignature(rec) !== snapshot) {
+                    throw new Error('The selected floor or placement changed. Cancel and reopen the chooser.');
+                }
+                const bySlug = new Map(fresh.options.map(o => [o.entity_id, o]));
+                const duplicate = floor.receivers.some(other => {
+                    if (other === rec) return false;
+                    const identity = bySlug.get(other.entity_id);
+                    return other.entity_id === choice || option.scanner_mac &&
+                        (other.scanner_mac === option.scanner_mac || identity?.scanner_mac === option.scanner_mac)
+                        || option.token && !identity?.identity_ambiguous &&
+                        !(option.scanner_mac && (other.scanner_mac || identity?.scanner_mac))
+                        && fresh.options.filter(o => o.token === option.token).length === 1
+                        && option.token === (other.scanner_uid || identity?.token || scannerTokenJs(other.entity_id));
+                });
+                if (duplicate) throw new Error('This scanner is already bound to another placement on this floor.');
+                if (rec.entity_id === choice) { close(); return; }
+                const oldId = rec.entity_id;
+                rec.entity_id = choice;
+                rec.scanner_uid = option.token || scannerTokenJs(choice);
+                if (option.scanner_mac) rec.scanner_mac = option.scanner_mac; else delete rec.scanner_mac;
+                receiverMatching = fresh; receiverOptions = fresh.options.map(o => o.entity_id); receiverInventoryLoaded = true;
+                close(); savebuttondiv.appendChild(saveButton); clearCanvas(); drawElements();
+                bpsToast(`Matched “${oldId}” to “${option.name || choice}”. Save Floor Plan to keep it.`);
+            } catch (failure) { if (active) error.textContent = failure.message; }
+            finally { busy = false; if (active) apply.disabled = false; }
+        });
+        select.focus();
+    }
+
     function renderScannerIssues() {
         const host = document.getElementById("scannerissues");
         if (!host) return;
-        const known = new Set(receiverOptions);
-        const placed = new Set();
-        (finalcords.floor || []).forEach(f => (f.receivers || []).forEach(r => { if (r && r.entity_id) placed.add(r.entity_id); }));
-        const suggestOf = {};
-        (scannerDiagnostics.unmatched_receivers || []).forEach(u => { suggestOf[u.entity_id] = u.suggested; });
-
-        const unmatched = [];
-        // Only flag once the scanner list has actually loaded (mirrors isReceiverOffline).
-        if (known.size) {
-            (finalcords.floor || []).forEach(f => (f.receivers || []).forEach(r => {
-                if (r && r.entity_id && !known.has(r.entity_id)) {
-                    unmatched.push({ entity_id: r.entity_id, floor: f.name, suggested: suggestOf[r.entity_id] || null });
-                }
-            }));
-        }
-        const unplaced = (scannerDiagnostics.unplaced_scanners || []).filter(s => !placed.has(s));
-
-        if (!unmatched.length && !unplaced.length) { host.innerHTML = ""; return; }
-        let html = '<div class="bps-scanner-issues"><div class="bps-issues-title">Scanner issues</div>';
-        unmatched.forEach(u => {
-            html += '<div class="bps-issue">'
-                + `<span class="bps-issue-msg" title="${escHtml(u.entity_id)}">No Bermuda sensor for “${escHtml(u.entity_id)}”${u.floor ? " ("+escHtml(u.floor)+")" : ""}</span>`;
-            if (u.suggested) {
-                html += `<button class="bps-btn bps-btn-outline bps-relink-btn" data-type="relinkrec" data-id="${escHtml(u.entity_id)}" data-target="${escHtml(u.suggested)}" title="Rename this placement to the live scanner ${escHtml(u.suggested)}">Re-link → ${escHtml(u.suggested)}</button>`;
-            } else {
-                html += '<span class="bps-issue-hint">no match — remove or re-place</span>';
-            }
-            html += '</div>';
-        });
-        if (unplaced.length) {
-            html += `<div class="bps-issue-note">Reporting a distance but not placed: ${unplaced.map(escHtml).join(", ")}</div>`;
-        }
-        html += '</div>';
-        host.innerHTML = html;
+        const floor = currentFloor();
+        const unmatched = receiverInventoryLoaded && floor ? (floor.receivers || []).map((r, index) => ({r, index}))
+            .filter(({r}) => r && r.entity_id && !receiverOptions.includes(r.entity_id)) : [];
+        if (!unmatched.length) { host.innerHTML = ''; return; }
+        host.innerHTML = '<div class="bps-scanner-issues"><div class="bps-issues-title">Unmatched receivers</div>'
+            + unmatched.map(({r, index}) => '<div class="bps-issue">'
+                + `<span class="bps-issue-msg">No known Bermuda identity for “${escHtml(r.entity_id)}”</span>`
+                + `<button class="bps-btn bps-btn-outline" data-type="matchrec" data-id="${escHtml(r.entity_id)}" data-index="${index}">Match receiver…</button></div>`).join('') + '</div>';
     }
 
     // Distance-sensor states that mean "no reading right now" (mirrors the
@@ -5179,8 +5245,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         renderDebugView();
     }
 
-    const LINKING_STATUS_LABEL = { live: "Live", silent: "No reading", unmatched: "Unmatched" };
-    const LINKING_STATUS_RANK = { unmatched: 0, silent: 1, live: 2 };
+    const LINKING_STATUS_LABEL = { live: "Live", silent: "No reading", unmatched: "Unmatched", unknown: "Unknown", offline: "Offline" };
+    const LINKING_STATUS_RANK = { unmatched: 0, offline: 0, unknown: 1, silent: 1, live: 2 };
     const linkingStatusOf = r => (LINKING_STATUS_RANK.hasOwnProperty(r && r.status) ? r.status : "unmatched");
 
     // Map-view sidebar: a compact heads-up listing only placed receivers on the
@@ -5217,13 +5283,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             (LINKING_STATUS_RANK[linkingStatusOf(a)] - LINKING_STATUS_RANK[linkingStatusOf(b)])
             || String(a.floor || "").localeCompare(String(b.floor || ""))
             || String(a.entity_id).localeCompare(String(b.entity_id)));
-        const counts = { live: 0, silent: 0, unmatched: 0 };
+        const counts = { live: 0, silent: 0, unmatched: 0, unknown: 0, offline: 0 };
         rows.forEach(r => { counts[linkingStatusOf(r)]++; });
 
         let html = '<div class="bps-debug-summary">'
             + '<span class="bps-linking-chip bps-chip-live">' + counts.live + ' Live</span>'
             + '<span class="bps-linking-chip bps-chip-silent">' + counts.silent + ' No reading</span>'
             + '<span class="bps-linking-chip bps-chip-unmatched">' + counts.unmatched + ' Unmatched</span>'
+            + '<span class="bps-linking-chip bps-chip-unknown">' + counts.unknown + ' Unknown</span>'
+            + '<span class="bps-linking-chip bps-chip-offline">' + counts.offline + ' Offline</span>'
             + '</div>';
 
         if (!rows.length) {
@@ -5238,7 +5306,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (status === "unmatched") {
                     cell = '<span class="bps-debug-none">No distance sensor carries this name</span>';
                 } else if (!(r.sensors || []).length) {
-                    cell = '<span class="bps-debug-none">no sensors</span>';
+                    cell = '<span class="bps-debug-none">' + escHtml(r.matching?.warning || (r.matching?.disabled_sensors?.length ? "Distance entities disabled in Home Assistant" : "Known scanner; no distance entities currently publish readings")) + '</span>';
                 } else {
                     cell = '<div class="bps-debug-readings">' + r.sensors.map(s => {
                         // Three states, worst to mildest: a real reading (live, green);
@@ -5256,10 +5324,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                     }).join("") + '</div>';
                 }
                 html += '<tr class="bps-debug-row bps-status-' + status + '">'
-                    + '<td class="bps-debug-name" title="' + escHtml(r.entity_id) + '">' + escHtml(r.entity_id) + '</td>'
+                    + '<td class="bps-debug-name" title="' + escHtml(r.entity_id) + '">' + escHtml(r.matching?.name || r.entity_id) + '<br><small>' + escHtml(r.entity_id) + '</small></td>'
                     + '<td>' + (r.floor ? escHtml(r.floor) : "—") + '</td>'
                     + '<td><span class="bps-linking-chip bps-chip-' + status + '">' + LINKING_STATUS_LABEL[status] + '</span></td>'
-                    + '<td class="bps-debug-hw">' + (r.token ? escHtml(r.token) : "—") + '</td>'
+                    + '<td class="bps-debug-hw">' + (r.matching?.scanner_mac ? escHtml(r.matching.scanner_mac) : r.token ? escHtml(r.token) : "—") + '</td>'
                     + '<td>' + cell + '</td>'
                     + '</tr>';
             });
@@ -5283,7 +5351,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         html += '<p class="bps-debug-help"><strong>No reading</strong> = the name matches a Bermuda distance sensor but it has no value right now — usually just no recent BLE contact, not a naming problem. '
-            + '<strong>Unmatched</strong> = no distance sensor carries that name at all; fix it with the <em>Re-link</em> button in the Map view’s “Scanner issues” panel, or rename the entity in Bermuda.</p>';
+            + '<strong>Unmatched</strong> = no distance sensor carries that name at all; use <em>Match receiver</em> in the Map view. <strong>Unknown</strong> = known scanner without current liveness proof; disabled or renamed distance entities are reported separately. <strong>Offline</strong> requires scanner age or connectivity evidence.</p>';
         return html;
     }
 
@@ -5448,7 +5516,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         };
         const receiverRow = r => {
             const off = isReceiverOffline(r.entity_id);
-            const label = (off ? "(Offline) " : "") + r.entity_id;
+            const identity = receiverMatching.options.find(o => o.entity_id === r.entity_id);
+            const label = receiverStatusLabel(r.entity_id) + (identity?.name || r.entity_id);
             // The whole row focuses that receiver on the map (only it and its
             // circle stay visible), mirroring a click on its icon. The trash
             // button's handler runs first, so removing never focuses.
@@ -5464,6 +5533,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 + `<span title="${escHtml(r.entity_id)}"${off ? ' style="color:#d32f2f"' : ''}>${escHtml(label)}</span>`
                 + `<span class="bps-zone-actions">`
                 + hBadge
+                + `<button class="bps-icon-btn" title="Match Bermuda receiver" data-type="matchrec" data-id="${escHtml(r.entity_id)}" data-index="${(floor.receivers || []).indexOf(r)}">↔</button>`
                 + `<button class="bps-icon-btn" title="Receiver properties: mount height, hardware and antenna" data-type="recheight" data-id="${escHtml(r.entity_id)}">${rulerSvg}</button>`
                 + `<button class="bps-icon-btn" title="Remove receiver" data-type="removerec" data-id="${escHtml(r.entity_id)}">${trashSvg}</button>`
                 + `</span></li>`;

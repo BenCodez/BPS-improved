@@ -447,8 +447,9 @@ class BpsMapCard extends HTMLElement {
         if (!dev || (dev._is_scanner !== true && dev.is_scanner !== true)) continue;
         const slug = BpsMapCard.haSlugify(dev.name);
         if (!slug) continue;
-        const age = typeof dev.last_seen === "number" ? newest - dev.last_seen : Infinity;
-        bySlug.set(slug, age);
+        if (typeof dev.last_seen === "number" && Number.isFinite(dev.last_seen)) {
+          bySlug.set(slug, Math.max(0, newest - dev.last_seen));
+        }
       }
       this._bermudaScanners = bySlug;
       this._bermudaDumpAt = now;
@@ -502,7 +503,7 @@ class BpsMapCard extends HTMLElement {
     for (const entityId of entityIds) {
       const stateObj = states[entityId];
       if (stateObj?.state != null && stateObj.attributes?.device_class === "connectivity") {
-        return BpsMapCard.stateLooksOnline(stateObj.state);
+        return ["", "unknown", "unavailable"].includes(stateObj.state) ? null : BpsMapCard.stateLooksOnline(stateObj.state);
       }
     }
     let sawState = false;
@@ -535,19 +536,22 @@ class BpsMapCard extends HTMLElement {
         // Explicit opt-out from the status sensor: the ESPHome status
         // platform only reports API connectivity, so a proxy whose BLE stack
         // has wedged still reads "on"; this forces the distance heuristic.
-        statuses.set(id, false);
+        statuses.set(id, null);
         heuristic.push({ id, suffix: `_distance_to_${id}` });
         continue;
       }
       if (statusEntity) {
-        statuses.set(id, BpsMapCard.stateLooksOnline(states[statusEntity]?.state));
+        const value = states[statusEntity]?.state;
+        statuses.set(id, value == null || ["", "unknown", "unavailable"].includes(value) ? null : BpsMapCard.stateLooksOnline(value));
         continue;
       }
       // Bermuda's own scanner liveness: last advertisement heard within
       // receiver_timeout seconds. Ages were anchored when the dump was
       // fetched, so add the wall time elapsed since.
       if (this._bermudaScanners) {
-        const ageAtDump = this._bermudaScanners.get(id);
+        const identity = this._receiverMatching?.get(id);
+        const ageAtDump = this._bermudaScanners.get(id) ?? (identity && !identity.identity_ambiguous
+          ? this._bermudaScanners.get(BpsMapCard.haSlugify(identity.name)) : null);
         if (ageAtDump != null) {
           const age = ageAtDump + (Date.now() - this._bermudaDumpAt) / 1000;
           statuses.set(id, age <= this._config.receiver_timeout);
@@ -562,7 +566,7 @@ class BpsMapCard extends HTMLElement {
       // the binary_sensor.<id>_status slug does not hijack the status.
       const autoStatus = states[`binary_sensor.${id}_status`];
       if (autoStatus && autoStatus.attributes?.device_class === "connectivity") {
-        statuses.set(id, BpsMapCard.stateLooksOnline(autoStatus.state));
+        statuses.set(id, autoStatus.state == null || ["", "unknown", "unavailable"].includes(autoStatus.state) ? null : BpsMapCard.stateLooksOnline(autoStatus.state));
         continue;
       }
       // The receiver's HA device: online while any of its entities has a
@@ -572,7 +576,7 @@ class BpsMapCard extends HTMLElement {
         statuses.set(id, deviceOnline);
         continue;
       }
-      statuses.set(id, false);
+      statuses.set(id, null);
       heuristic.push({ id, suffix: `_distance_to_${id}` });
     }
     if (heuristic.length > 0) {
@@ -580,6 +584,8 @@ class BpsMapCard extends HTMLElement {
       // reading through it within Bermuda's ~30 s distance timeout.
       for (const entityId of Object.keys(states)) {
         if (!entityId.startsWith("sensor.") || !entityId.includes("_distance_to_")) continue;
+        const owned = this._hass?.entities?.[entityId];
+        if (owned?.platform && owned.platform !== "bermuda") continue;
         const st = states[entityId]?.state;
         if (st == null || st === "unknown" || st === "unavailable") continue;
         for (const { id, suffix } of heuristic) {
@@ -704,6 +710,7 @@ class BpsMapCard extends HTMLElement {
     }
     const coords = JSON.parse(data.coordinates);
     this._knownBeaconKeys = new Set(Array.isArray(data.entities) ? data.entities : []);
+    this._receiverMatching = new Map((data.receiver_matching?.options || []).map(option => [option.entity_id, option]));
     this._outdoorSettings = BPSOutdoor.settings(coords);
     this._trackerGroups = BPSOutdoor.groups(coords);
     this._trackerIcons = coords.tracker_icons && typeof coords.tracker_icons === "object"
@@ -925,8 +932,8 @@ class BpsMapCard extends HTMLElement {
       const x = Number(rec.cords.x);
       const y = Number(rec.cords.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      const online = this._receiverStatuses.get(rec.entity_id) === true;
-      const color = online ? ONLINE_COLOR : OFFLINE_COLOR;
+      const offline = this._receiverStatuses.get(rec.entity_id) === false;
+      const color = offline ? OFFLINE_COLOR : ONLINE_COLOR;
       const icon = this._tintedIcon("/bps/beacon.svg", color, iconSize);
       if (icon) {
         ctx.drawImage(icon, x - iconSize / 2, y - iconSize / 2, iconSize, iconSize);
@@ -943,14 +950,17 @@ class BpsMapCard extends HTMLElement {
         ctx.fillStyle = color;
         // Centered under the icon, clamped to the canvas so names near the
         // edges stay fully readable; flipped above the icon at the bottom.
-        const textWidth = ctx.measureText(rec.entity_id).width;
+        const unknown = this._receiverStatuses.get(rec.entity_id) == null;
+        const unmatched = this._receiverMatching && !this._receiverMatching.has(rec.entity_id);
+        const label = (offline ? "(Offline) " : unmatched ? "(Unmatched) " : unknown ? "(Unknown) " : "") + rec.entity_id;
+        const textWidth = ctx.measureText(label).width;
         let labelX = x - textWidth / 2;
         labelX = Math.max(2, Math.min(this._canvas.width - textWidth - 2, labelX));
         let labelY = y + iconSize / 2 + fontPx;
         if (labelY > this._canvas.height - 2) {
           labelY = y - iconSize / 2 - fontPx * 0.4;
         }
-        ctx.fillText(rec.entity_id, labelX, labelY);
+        ctx.fillText(label, labelX, labelY);
       }
     }
     ctx.restore();

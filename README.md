@@ -86,7 +86,8 @@ The setup panel
 - [Zone colours](#zone-colours) — each zone tinted a unique colour with a matching name pill; pick or remove one per zone, or toggle all colours off.
 - [Adjust zones](#adjust-zones) — one-click clean-up: square rooms, snap neighbours together, remove overlaps.
 - [Pre-populated receiver picker](#pre-populated-receiver-picker) — pick receivers from a searchable list instead of typing names.
-- [Offline receivers](#offline-receivers) — dead proxies are flagged red in the panel, updating live.
+- [Match an existing receiver](#match-an-existing-receiver) — select Bermuda names and proven hardware identities for one placement; retain its position and properties.
+- [Offline receivers](#offline-receivers) — confirmed offline proxies are red; missing identities and uncertain liveness are shown as Unmatched or Unknown.
 - [Debugging tab](#debugging-tab) — a live view of how every receiver and beacon links to Bermuda, to untangle naming mismatches and quiet nodes.
 - [Diagnostic recordings](#diagnostic-recordings) — export receiver readings and known-position tests for accuracy analysis.
 
@@ -536,7 +537,9 @@ device is near it: the panel uses the same automatic tiers as the
 [map card](#receivers-on-the-map-card) — Bermuda scanner liveness, then a
 `connectivity` status sensor, then the proxy's Home Assistant device
 availability — so a probe that drops off the map only because everyone left the
-house is *not* flagged.
+house is *not* flagged. Missing distance readings alone never mark a receiver
+offline. A placement with no known Bermuda identity is **Unmatched**; a known
+scanner without liveness evidence is **Unknown**.
 
 ### Light or dark theme
 
@@ -656,14 +659,41 @@ out.
 
 Placing a receiver no longer means typing its Bermuda scanner name from memory.
 You now pick it from a **searchable dropdown of every receiver Bermuda currently
-reports** (derived from the `sensor.*_distance_to_*` entities) — type to filter
+reports** (from owned Bermuda distance entities and scanner runtime identities) — type to filter
 the list — with a "Custom name…" option for receivers Bermuda hasn't seen yet.
 
-Receivers already placed on **any** floor are hidden from the list — a receiver
-belongs to exactly one floor, and placing the same one on several floors would
-make those floors compete for the tracker.
+Receivers already placed on the **selected floor** are hidden from the list.
+The same scanner can have a placement on another floor.
 
 ![Placing a receiver: pick its name from the list of receivers Bermuda reports](img/screenshots/receiver-picker.png)
+
+### Match an existing receiver
+
+Use the **↔ Match Bermuda receiver** button beside a placement in **Zones &
+Receivers**, or **Match receiver…** in the selected floor's unmatched list.
+Choose from actual Bermuda scanner slugs with their friendly names and proven
+scanner MACs when available. A unique hardware match is shown as a hint; nothing
+is selected or applied automatically, and similar names are never proof.
+
+**Apply match** changes only that placement's scanner binding and stored hardware
+identity. Coordinates, height, correction, hardware notes and other properties
+stay in place. **Cancel**, Escape and closing the overlay leave it unchanged,
+including cancellation during the fresh inventory check. Use **Save Floor Plan**
+to persist an applied match.
+
+The chooser checks the inventory again before applying and rejects stale choices,
+a changed floor or placement, ambiguous identities and another binding to the
+same scanner on the selected floor. Separate scanners can share coordinates;
+matching never removes a co-located placement. A scanner can be bound on other
+floors. Renamed HA distance entities that BPS cannot address are shown with an
+instruction to restore their Bermuda distance entity IDs and cannot be chosen.
+Disabled distance entities remain known receivers; enable them in Home Assistant
+to restore distance readings.
+
+Scanner linking and **Copy full BPS + Bermuda report** include these read-only
+matching labels and identity diagnostics, including disabled and renamed distance
+entities. Only the public scanner MAC suffix is extracted from Bermuda range
+identities; tracker unique IDs, IRKs and arbitrary Bermuda options are not included.
 
 ## Debugging tab
 
@@ -673,7 +703,7 @@ seems ignored. It's a live snapshot; press **Refresh** to re-check. It has two
 sub-tabs, both laid out as tables.
 
 **Receivers** lists every placed receiver with its floor, a status chip
-(**Live** / **No reading** / **Unmatched**), its hardware token, and the per-device
+(**Live** / **No reading** / **Unmatched** / **Unknown** / **Offline**), its hardware token, and the per-device
 Bermuda distance sensors feeding it. Each sensor is a pill showing the device and
 its current reading, coloured by state:
 

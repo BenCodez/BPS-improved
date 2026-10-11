@@ -357,3 +357,23 @@ test('dedicated group position entity resolves floor and both small member marke
     c._hass.states['sensor.my_dog'] = c._hass.states[eid];
     assert.equal(c._trackerKeyFromEntity('sensor.my_dog'), 'bps_group_rover');
 });
+
+test('receiver status remains unknown without distance contact, respects confirmed offline and resolves Bermuda friendly names after rename', () => {
+    const c = card(); c._config.show_receivers = true; c._config.receiver_status = {}; c._config.receiver_timeout = 30;
+    c._receivers = [{entity_id: 'old_slug', cords: {x: 10, y: 10}}];
+    assert.equal(c._computeReceiverStatuses().get('old_slug'), null);
+    c._config.receiver_status.old_slug = 'heuristic';
+    assert.equal(c._computeReceiverStatuses().get('old_slug'), null, 'explicit distance heuristic cannot infer offline from absence');
+    delete c._config.receiver_status.old_slug;
+    c._hass.states['binary_sensor.old_slug_status'] = {state: 'off', attributes: {device_class: 'connectivity'}};
+    assert.equal(c._computeReceiverStatuses().get('old_slug'), false);
+    c._hass.states['binary_sensor.old_slug_status'].state = 'unknown';
+    assert.equal(c._computeReceiverStatuses().get('old_slug'), null);
+    c._receiverMatching = new Map([['old_slug', {name: 'Workshop', identity_ambiguous: false}]]);
+    c._bermudaScanners = new Map([['workshop', 0]]); c._bermudaDumpAt = Date.now();
+    assert.equal(c._computeReceiverStatuses().get('old_slug'), true);
+    c._bermudaScanners.clear(); delete c._hass.states['binary_sensor.old_slug_status'];
+    c._hass.states['sensor.other_distance_to_old_slug'] = {state: '4'};
+    c._hass.entities = {'sensor.other_distance_to_old_slug': {platform: 'esphome'}};
+    assert.equal(c._computeReceiverStatuses().get('old_slug'), null);
+});

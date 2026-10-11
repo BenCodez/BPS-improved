@@ -23,7 +23,6 @@ import os
 import json
 import re
 import copy
-import difflib
 from functools import partial
 from contextvars import ContextVar
 from shapely.geometry import Point, Polygon
@@ -62,6 +61,7 @@ from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
 from . import bermuda_diagnostics
+from .receiver_matching import inventory as receiver_inventory
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -810,24 +810,19 @@ def _scanner_token(slug):
 def _suggest_scanner(placement_slug, stored_uid, candidates):
     """Best live scanner slug to re-link a stale placement to. Prefer a shared
     hardware token (an explicitly-stored uid, else the placement's own trailing
-    token — the same physical scanner after a rename); otherwise fall back to
-    plain string similarity. Returns a candidate slug or None.
+    token — the same physical scanner after a rename); otherwise require manual selection. Never suggest by
+    string similarity alone. Returns a candidate slug or None.
     """
     token = stored_uid or _scanner_token(placement_slug)
     if token:
         tok_matches = [c for c in candidates if _scanner_token(c) == token]
         if len(tok_matches) == 1:
             return tok_matches[0]
-    best, best_score = None, 0.0
-    for c in candidates:
-        score = difflib.SequenceMatcher(None, str(placement_slug), c).ratio()
-        if score > best_score:
-            best, best_score = c, score
-    return best if best_score >= 0.55 else None
+    return None
 
 
 def _placed_receivers(coordinates_json):
-    """Placed receivers as (floor_name, entity_id slug, stored scanner_uid).
+    """Placed receivers as (floor_name, slug, stored scanner_uid, scanner_mac).
 
     Parsed defensively: a malformed or hand-edited bpsdata.txt yields [] rather
     than raising into a caller (diagnostics must never break read_text). Each
@@ -844,7 +839,7 @@ def _placed_receivers(coordinates_json):
             receivers_ = fl.get("receivers")
             for rec in receivers_ if isinstance(receivers_, list) else []:
                 if isinstance(rec, dict) and isinstance(rec.get("entity_id"), str) and rec["entity_id"]:
-                    placed.append((fl.get("name"), rec["entity_id"], rec.get("scanner_uid")))
+                    placed.append((fl.get("name"), rec["entity_id"], rec.get("scanner_uid"), rec.get("scanner_mac")))
     except Exception:
         return []
     return placed
@@ -864,21 +859,38 @@ def _scanner_diagnostics(hass, coordinates_json):
         aren't placed on any floor.
     """
     slugs, with_reading = _scanner_slugs_and_readings(hass)
+    matching = receiver_inventory(hass)
+    slugs.update(row["entity_id"] for row in matching["options"])
     placed = _placed_receivers(coordinates_json)
     placed_slugs = {p[1] for p in placed}
     # Candidates for a re-link: live scanner slugs not already correctly placed.
-    free = [s for s in slugs if s not in placed_slugs]
+    candidates = {row["entity_id"]: row for row in matching["options"] if row["selectable"]}
     unmatched = []
-    for fname, slug, uid in placed:
+    for fname, slug, uid, mac in placed:
         if slug in slugs:
             continue  # a real sensor exists (offline is a separate concern)
+        free = [option for candidate, option in candidates.items()
+                if candidate not in {p[1] for p in placed if p[0] == fname}]
+        token = uid or _scanner_token(slug)
+        proof = []
+        for option in free:
+            option_mac = option["scanner_mac"]
+            if mac and option_mac:
+                matched = str(mac).lower() == option_mac
+            else:
+                candidate_token = option["token"] or _scanner_token(option["entity_id"])
+                matched = token and token == candidate_token and sum(
+                    (row["token"] or _scanner_token(row["entity_id"])) == token
+                    for row in matching["options"]) == 1
+            if matched:
+                proof.append(option["entity_id"])
         unmatched.append({
             "entity_id": slug,
             "floor": fname,
-            "suggested": _suggest_scanner(slug, uid, free),
+            "suggested": proof[0] if len(proof) == 1 else None,
         })
     unplaced = sorted(with_reading - placed_slugs)
-    return {"unmatched_receivers": unmatched, "unplaced_scanners": unplaced}
+    return {"unmatched_receivers": unmatched, "unplaced_scanners": unplaced, "matching": matching}
 
 
 def _scanner_linking(hass, coordinates_json):
@@ -911,14 +923,18 @@ def _scanner_linking(hass, coordinates_json):
     def _reporting(sensors):
         return [s for s in sensors if s["state"] not in _NO_DISTANCE_STATES]
 
+    matching = receiver_inventory(hass)
+    options = {row["entity_id"]: row for row in matching["options"]}
     placed = _placed_receivers(coordinates_json)
     placed_slugs = {p[1] for p in placed}
     rows = []
-    for fname, slug, uid in placed:
+    for fname, slug, uid, mac in placed:
         sensors = sorted(by_slug.get(slug, []), key=lambda s: s["device"])
         reporting = _reporting(sensors)
-        if not sensors:
-            status = "unmatched"
+        if slug in hass.data.get(DOMAIN, {}).get("rl_offline", []):
+            status = "offline"
+        elif not sensors:
+            status = "unknown" if slug in options else "unmatched"
         elif reporting:
             status = "live"
         else:
@@ -927,11 +943,13 @@ def _scanner_linking(hass, coordinates_json):
             "entity_id": slug,
             "floor": fname,
             "scanner_uid": uid,
-            "token": _scanner_token(slug),
+            "scanner_mac": mac,
+            "token": options.get(slug, {}).get("token") or _scanner_token(slug),
             "status": status,
             "sensor_count": len(sensors),
             "reporting_count": len(reporting),
             "sensors": sensors,
+            "matching": options.get(slug),
         })
     unplaced = []
     for slug, sensors in by_slug.items():
@@ -944,7 +962,7 @@ def _scanner_linking(hass, coordinates_json):
             "reporting_count": len(_reporting(sensors)),
         })
     unplaced.sort(key=lambda u: u["entity_id"])
-    return {"placed": rows, "unplaced": unplaced}
+    return {"placed": rows, "unplaced": unplaced, "matching": matching}
 
 
 def _beacon_links(hass):
@@ -1013,7 +1031,8 @@ def _refresh_dump_ages(hass, dom, devices):
             if not slug:
                 continue
             ls = dev.get("last_seen")
-            ages[slug] = (newest - ls) if isinstance(ls, (int, float)) else float("inf")
+            if isinstance(ls, (int, float)) and not isinstance(ls, bool) and math.isfinite(ls):
+                ages[slug] = max(0.0, newest - ls)
         dom["rl_newest"] = newest
         dom["rl_anchor_wall"] = now
         dom["rl_ages"] = ages
@@ -1050,25 +1069,11 @@ def _build_device_availability(hass):
 
 
 async def update_receiver_liveness(hass):
-    """Recompute the set of offline receivers, mirroring the Lovelace card's
-    tiered status so the panel and the card agree.
+    """Offline requires Bermuda scanner-age or device/connectivity evidence.
 
-    For each receiver slug Bermuda exposes, the first tier that resolves wins:
-      1. Bermuda scanner liveness — last advert heard within RECEIVER_OFFLINE_SECS.
-         Proximity-independent: the probes advertise iBeacons the scanners hear
-         from each other, so a live scanner ages fresh even with no tracked
-         device home. But Bermuda drops a downed proxy from the scanner list, so
-         this tier can't see it at all — hence the fallbacks below.
-      2. A `binary_sensor.<slug>_status` connectivity sensor.
-      3. The receiver's HA device: online while any of its entities is not
-         `unavailable`; a connectivity entity on the device is authoritative.
-      4. Distance heuristic (last resort): working if some tracker got a reading
-         through it recently. Only reached for a scanner with no liveness and no
-         mapped device (6 of this install's receivers, whose device name doesn't
-         slugify to the receiver id). An *up* scanner is caught by tier 1, so
-         this can't misfire when every tracked device leaves home — it only
-         decides a scanner that is both absent from the dump and deviceless.
-    A receiver no tier can resolve at all is left ONLINE (never flagged).
+    Scanner identity survives a name change when its public MAC is proven by
+    Bermuda-owned range entities. Distance readings prove a scanner is working;
+    their absence leaves liveness unknown. Never infer offline from silence.
     """
     dom = hass.data.setdefault(DOMAIN, {})
     try:
@@ -1095,6 +1100,8 @@ async def update_receiver_liveness(hass):
     elapsed = max(0.0, time.time() - dom["rl_anchor_wall"]) if dom.get("rl_anchor_wall") else 0.0
 
     receivers, with_reading = _scanner_slugs_and_readings(hass)
+    matching = {row["entity_id"]: row for row in receiver_inventory(hass)["options"]}
+    receivers.update(matching)
     slug_to_device, device_entities = _build_device_availability(hass)
 
     def device_online(slug):
@@ -1109,8 +1116,8 @@ async def update_receiver_liveness(hass):
         # proxy disconnects, so "any entity not unavailable" would miss it.
         for eid in eids:
             st = hass.states.get(eid)
-            if st and st.attributes.get("device_class") == "connectivity" and st.state is not None:
-                return _state_looks_online(st.state)
+            if st and st.attributes.get("device_class") == "connectivity":
+                return None if st.state in (None, "", "unknown", "unavailable") else _state_looks_online(st.state)
         saw_state = False
         for eid in eids:
             st = hass.states.get(eid)
@@ -1122,20 +1129,24 @@ async def update_receiver_liveness(hass):
         return False if saw_state else None
 
     def is_online(slug):
-        age = ages.get(slug)
+        if matching.get(slug, {}).get("identity_ambiguous"):
+            return None
+        name = matching.get(slug, {}).get("name")
+        age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS
         st = hass.states.get(f"binary_sensor.{slug}_status")
-        if st and st.attributes.get("device_class") == "connectivity":
+        if st and st.attributes.get("device_class") == "connectivity" and st.state not in (None, "", "unknown", "unavailable"):
             return _state_looks_online(st.state)
         resolved = device_online(slug)
         if resolved is not None:
             return resolved
-        # tier 4: distance heuristic (last resort). Matches the card: a receiver
-        # here is online only while some tracker reads a distance through it.
-        return slug in with_reading
+        # Distance readings prove online; absence of BLE contact proves nothing.
+        return True if slug in with_reading else None
 
-    dom["rl_offline"] = sorted(s for s in receivers if not is_online(s))
+    resolved = {s: is_online(s) for s in receivers}
+    dom["rl_offline"] = sorted(s for s, status in resolved.items() if status is False)
+    dom["rl_unknown"] = sorted(s for s, status in resolved.items() if status is None)
 
 
 async def update_receiver_radii(hass, eids):
@@ -2717,15 +2728,19 @@ class BPSReadAPIText(HomeAssistantView):
             # in that case so it never JSON.parses an empty layout.
             layout = get_bps_data(hass)
             content = json.dumps(layout) if layout else ""
+            diagnostics = _scanner_diagnostics(hass, content)
+            matching = diagnostics["matching"]
             return web.json_response({
                 "coordinates": content,
                 "entities": entities,
-                "receivers": receivers,
+                "receivers": [row["entity_id"] for row in matching["options"]],
+                "receiver_matching": matching,
                 "offline_receivers": offline_receivers,
+                "unknown_receivers": list(hass.data.get(DOMAIN, {}).get("rl_unknown", [])),
                 # Naming-mismatch diagnostics (issue #64): placed receivers whose
                 # slug has no Bermuda distance sensor, and reporting scanners not
                 # placed anywhere.
-                "scanner_diagnostics": _scanner_diagnostics(hass, content),
+                "scanner_diagnostics": diagnostics,
             })
 
         except Exception as e:
@@ -2900,6 +2915,7 @@ def _diagnostic_report_snapshot(hass, now):
     snapshot["offline_receivers"] = list(dom.get("rl_offline", []))
     snapshot["inventory"] = _diagnostic_inventory(hass)
     snapshot["scanner_diagnostics"] = _scanner_diagnostics(hass, json.dumps(snapshot["context"]["layout"]))
+    snapshot["scanner_linking"] = _scanner_linking(hass, json.dumps(snapshot["context"]["layout"]))
     updater = hass.data.get("bps_update_task")
     recording = dom.get("_diagnostics")
     snapshot["runtime"] = {"initialized": bool(hass.data.get("bps_initialized")),
@@ -2940,7 +2956,7 @@ class BPSReceiverStatusAPI(HomeAssistantView):
     async def get(self, request):
         hass = request.app["hass"]
         offline = hass.data.get(DOMAIN, {}).get("rl_offline", [])
-        return web.json_response({"offline": list(offline)})
+        return web.json_response({"offline": list(offline), "unknown": list(hass.data.get(DOMAIN, {}).get("rl_unknown", []))})
 
 
 class BPSScannerLinkingAPI(HomeAssistantView):
