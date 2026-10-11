@@ -967,6 +967,10 @@ def _scanner_linking(hass, coordinates_json):
             if sources.registry is not None:
                 key = binding["identity"] or slug
                 owned = {eid for (tracker, identity), eids in sources.readings.items() if identity == key for eid in eids}
+                for tracker in {sensor["device"] for sensor in sensors}:
+                    source, state = sources.source(tracker, rec, binding)
+                    if state is not None:
+                        owned.add(source)
                 sensors = [sensor for sensor in sensors if sensor["entity_id"] in owned]
             reporting = _reporting(sensors)
             matched = next((options[alias] for alias in binding["aliases"] if alias in options), options.get(slug))

@@ -304,6 +304,10 @@ def test_exact_owned_legacy_reading_survives_runtime_identity_without_unproven_a
     hass.data["bps"]["layout"] = data
     row = bps._diagnostic_snapshot(hass, ["tag"], 1000)["readings"][0]
     assert row["entity_id"] == old and row["observed"] == 995 and row["age_s"] == 5
+    linked = bps._scanner_linking(hass, json.dumps(data))["placed"][0]
+    assert linked["status"] == "live" and linked["sensor_count"] >= 1
+    assert old in {sensor["entity_id"] for sensor in linked["sensors"]}
+    assert linked["selected_sources"] == {"tag": old}
     states[old].last_updated = timestamp(900)
     asyncio.run(bps.update_receiver_radii(hass, {"entity": "tag", "data": data}))
     assert "distance" not in rec, 'legacy source does not rejuvenate its original clock'
@@ -324,3 +328,5 @@ def test_runtime_identity_does_not_admit_unowned_or_disabled_exact_legacy_source
     assert resolver.source("tag", data["floor"][0]["receivers"][0])[1] is None
     asyncio.run(bps.update_receiver_radii(hass, {"entity": "tag", "data": data}))
     assert "distance" not in data["floor"][0]["receivers"][0]
+    linked = bps._scanner_linking(hass, json.dumps(data))["placed"][0]
+    assert linked["sensor_count"] == 0 and linked["selected_sources"] == {}
