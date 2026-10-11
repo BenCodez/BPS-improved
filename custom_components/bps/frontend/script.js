@@ -6716,7 +6716,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
-    if (globalThis.BPSDiagnostics) globalThis.BPSDiagnostics.init(bpsFetch);
+    if (globalThis.BPSDiagnostics) globalThis.BPSDiagnostics.init(bpsFetch, () => {
+        const keys = ['outdoor_tracking', 'tracker_groups', 'tracker_height', 'tracker_heights',
+            'tracker_ref_offsets', 'reading_max_age', 'position_timeout', 'history_enabled', 'history_max_age',
+            'history_min_interval', 'history_min_move_m', 'history_max_points', 'history_heartbeat'];
+        const editor = Object.fromEntries(keys.filter(key => finalcords[key] !== undefined).map(key => [key, finalcords[key]]));
+        editor.floor = (finalcords.floor || []).map(floor => Object.fromEntries(
+            ['name', 'scale', 'receivers', 'zones', 'subzones', 'environment'].filter(key => floor[key] !== undefined).map(key => [key, floor[key]])));
+        return {collected_at: Date.now() / 1000, selected_floor: SelMapName, selected_map: mapSelector.value,
+            image_size_px: {width: img.naturalWidth, height: img.naturalHeight},
+            canvas_size_px: {width: canvas.width, height: canvas.height}, view: {...view},
+            selected_tracker: activeDevice, displayed_trackers: [...trackedDevices],
+            displayed_positions: [...lastTracks.entries()].map(([entity, position]) => ({entity,
+                floor: position.floor, x_px: position.x, y_px: position.y,
+                raw_uncertainty_m: position.outdoor?.estimated_uncertainty_m,
+                display_uncertainty_m: position.outdoor?.display_uncertainty_m,
+                received_at: position.receivedAt / 1000})),
+            editor_layout: editor};
+    });
 
     // With a single configured floor there is nothing to choose: open it
     // right away. This must run LAST — drawElements touches state declared

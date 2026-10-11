@@ -4,7 +4,7 @@ const {readFileSync} = require('node:fs');
 const {join} = require('node:path');
 const vm = require('node:vm');
 
-function panel() {
+function panel(panelSnapshot) {
     const elements = new Map(), requests = [], timers = new Map(), downloads = [];
     let nextTimer = 1;
     function element(tag = 'div') {
@@ -28,7 +28,7 @@ function panel() {
     const el = name => elements.get('diagnostic' + name);
     const sandbox = vm.createContext({document: {getElementById: key => elements.get(key),
         createElement: element, body: element()},
-        URL: {createObjectURL: blob => {assert.equal(blob, 'diagnostic-blob'); return 'blob:local';}, revokeObjectURL: url => downloads.push({revoked: url})},
+        TextEncoder, URL: {createObjectURL: blob => {assert.equal(blob, 'diagnostic-blob'); return 'blob:local';}, revokeObjectURL: url => downloads.push({revoked: url})},
         setInterval: (cb, ms) => {const id = nextTimer++; timers.set(id, {cb, ms}); return id;}, clearInterval: id => timers.delete(id),
         navigator: {clipboard: {writeText: async text => {if (network.clipboardError) throw new Error('denied'); copied.push(text);}}},
         setTimeout: cb => {cb();}});
@@ -46,9 +46,36 @@ function panel() {
             if (body.action === 'annotate') network.status.annotations++;
         }
         return {ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(network.status)), blob: async () => 'diagnostic-blob'};
-    });
+    }, panelSnapshot);
     return {el, network, timers, requests, downloads, copied};
 }
+
+test('panel context is frozen separately before the server fetch and is included in copied text', async () => {
+    const editor = {selected_floor: 'Barn', editor_layout: {floor: [{name: 'Barn', receivers: [{cords: {x: 2, y: 3}}]}]}};
+    const p = panel(() => editor);
+    let release; p.network.pending = new Promise(resolve => {release = resolve;});
+    const action = p.el('CopyAll').fire();
+    editor.editor_layout.floor[0].receivers[0].cords.x = 20;
+    release(); p.network.pending = null; await action;
+    const text = p.copied[0];
+    const report = JSON.parse(text.slice(text.indexOf('{')));
+    assert.deepEqual(report.trackers, ['tag', 'tag2']);
+    const copiedPanel = report.panel_context;
+    assert.equal(copiedPanel.editor_layout.floor[0].receivers[0].cords.x, 2);
+    assert.equal(p.el('ReportText').value, text);
+});
+
+test('oversized combined reports preserve the previous report and do not copy incomplete output', async () => {
+    let extra = '';
+    const p = panel(() => ({extra}));
+    await p.el('CopyAll').fire();
+    const previous = p.el('ReportText').value;
+    extra = 'x'.repeat(4 * 1024 * 1024);
+    await p.el('CopyAll').fire();
+    assert.match(p.el('ReportStatus').textContent, /exceeds 4 MiB.*previous report/);
+    assert.equal(p.el('ReportText').value, previous);
+    assert.equal(p.copied.length, 1);
+});
 
 test('full report is copied on demand without loading trackers or starting capture', async () => {
     const p = panel();

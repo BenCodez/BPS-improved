@@ -648,11 +648,30 @@ For an easy copy/paste report, open **BPS → Debugging → Full diagnostics** a
 click **Copy full diagnostics**. It gathers all current beacons and groups,
 receiver readings and corrections, uncertainty and fusion details, saved floor
 geometry/wall materials, scanner mismatches, calibration apply/skip reasons,
-and version/runtime information. No recording or tracker selection is needed.
+and version/runtime information. Bermuda diagnostics include its configured and
+runtime distance settings (reference power, attenuation, smoothing, velocity,
+sensor update interval and scanner RSSI offsets), per-beacon reference-power
+number entities, enabled/disabled Bermuda sensors, raw and filtered distances,
+and per-receiver RSSI/advert ages when exposed by the installed version.
+Registry ownership includes renamed Bermuda entities and excludes sensors from
+other integrations. Missing runtime data and collection limits are identified;
+defaults are shown only when available from the installed Bermuda version.
+No settings are changed and no additional Bluetooth scan or dump is requested.
+
+The BPS section includes saved receiver coordinates, heights and corrections,
+zones/sub-zones, building/tree outlines and wall materials, tracker tuning,
+entity states, history settings and tracking/calibration task health. A separate
+**BPS panel context** shows the selected map, image/canvas dimensions, viewport,
+displayed tracker positions and smoothed circle sizes, plus editor placements
+that may contain unsaved changes. These are separate from the saved layout used
+by the backend; a map image or Lovelace card configuration is not embedded.
+No recording or tracker selection is needed.
 If clipboard access is unavailable, use the selectable text box and
 **Select report for manual copy**. Paste the report into your support message.
 It contains property geometry and tracker locations, but excludes map images,
-icons, authentication tokens and unrelated entity states. This is a live
+icons, authentication tokens, BLE identity-resolving keys and unrelated entity
+states. Bermuda scanner MAC identifiers are included to link offsets and paths.
+This is a live
 snapshot; use a recording below to diagnose intermittent jumps or measure
 accuracy over time.
 
