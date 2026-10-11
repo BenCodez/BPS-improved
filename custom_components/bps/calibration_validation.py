@@ -97,11 +97,15 @@ def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_
             "outdoor": {**quality, "observed": max(r["observed"] for r in readings)}}
 
 
-def compare_tracking(bundle, floor_name, corrections, current_floor, solver):
+def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
+                     baseline_corrections=None, current_layout=None):
     if not corrections or any(not number(v) or not .2 <= v <= 5 for v in corrections.values()):
         raise ValueError("No valid calibration corrections for this floor")
     if bundle.get("format") != "bps-diagnostics-v1":
         raise ValueError("No diagnostic recording available")
+    if baseline_corrections is not None and any(not number(v) or not .2 <= v <= 5
+                                               for v in baseline_corrections.values()):
+        raise ValueError("No valid current receiver corrections for this floor")
     before, after, failures, locations, seen = [], [], 0, set(), set()
     reports, samples = {}, []
     context_id, context_since = None, bundle["started"]
@@ -111,6 +115,9 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver):
         if context_id != frame["context_id"]:
             context_id, context_since = frame["context_id"], frame["time"]
         layout = context["layout"]
+        if (current_layout is not None
+                and layout.get("outdoor_tracking", {}) != current_layout.get("outdoor_tracking", {})):
+            continue
         floor = next((f for f in layout.get("floor", []) if f.get("name") == floor_name), None)
         if floor is None or geometry(floor) != geometry(current_floor):
             continue
@@ -142,7 +149,7 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver):
     if eligible > MAX_REPLAYS:
         samples = [samples[round(i * (eligible - 1) / (MAX_REPLAYS - 1))] for i in range(MAX_REPLAYS)]
     for target, truth, now, floor, rows, layout, scale, gate in samples:
-        baseline = replay(floor, rows, {}, scale, layout, now, solver, max_age_s=gate)
+        baseline = replay(floor, rows, baseline_corrections or {}, scale, layout, now, solver, max_age_s=gate)
         proposed = replay(floor, rows, corrections, scale, layout, now, solver, max_age_s=gate)
         stats = reports.setdefault(target, {"baseline": [], "candidate": [], "candidate_failures": 0})
         if baseline is None:
@@ -169,12 +176,15 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver):
         "eligible_samples": eligible, "replayed_samples": len(samples), "truncated": eligible > MAX_REPLAYS,
         "trackers": {key: {"baseline": metrics(s["baseline"]), "candidate": metrics(s["candidate"]),
             "candidate_failures": s["candidate_failures"]} for key, s in reports.items()},
-        "scope": "Paired raw beacon fixes on the marked floor, using recorded corrections as baseline. "
+        "scope": "Paired raw beacon fixes on the marked floor, using "
+            + ("current layout corrections" if baseline_corrections is not None else "recorded corrections") + " as baseline. "
             "Group recordings test their member beacons. Includes obstruction weights and height projection; "
             "excludes temporal jump weights, Kalman smoothing, group fusion, floor election and zone snapping. "
             "At least 5 distinct observations at 2 measured locations are needed. No calibration changed."}
 
 
-def compare_tracking_export(payload, floor_name, corrections, current_floor, solver):
+def compare_tracking_export(payload, floor_name, corrections, current_floor, solver,
+                            baseline_corrections=None, current_layout=None):
     """Decode and compare a potentially 16 MiB recording in the executor."""
-    return compare_tracking(json.loads(payload), floor_name, corrections, current_floor, solver)
+    return compare_tracking(json.loads(payload), floor_name, corrections, current_floor, solver,
+                            baseline_corrections, current_layout)

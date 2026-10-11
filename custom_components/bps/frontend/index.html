@@ -394,7 +394,7 @@
                         <span>Auto calibration</span>
                     </label>
                     <span class="tooltip">❓
-                        <span class="tooltip-text">Continuously samples in the background, re-solves every 15 minutes for every floor, and re-applies corrections whenever they change. Survives Home Assistant restarts.</span>
+                        <span class="tooltip-text">Samples in the background and checks every 15 minutes. Requires fresh, stable observations from at least four connected receivers, validates on a separate sampling period, and limits accepted changes to 10%. Keeps current corrections when evidence is weak. Survives Home Assistant restarts.</span>
                     </span>
                     <div class="bps-btnrow" id="calibManualControls">
                         <select id="calibDuration" class="bps-input">

@@ -6288,6 +6288,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const calibManualControls = document.getElementById('calibManualControls');
     let calibTimer = null;
     let calibLastResults = {};
+    let calibLastStatus = null;
 
     // Calibration-tab callers key off the Floor-name box (mapname.value); the
     // map overlay passes SelMapName instead, so mid-rename typing can't detach
@@ -6340,7 +6341,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const missingCount = miss.missUnmatched.length + miss.missNoData.length;
         calibStatus.textContent =
             `Floor ${result.floor}: ${result.pairs_used} pairs (${result.bidirectional_pairs} bidirectional), ` +
-            `typical error ×${result.error_factor_before} → ×${result.error_factor_after} predicted after correction.` +
+            `receiver/transmitter model error ×${result.error_factor_before} → ×${result.error_factor_after} (not tracking accuracy).` +
             (missingCount ? ` ${missingCount} placed receiver${missingCount > 1 ? "s" : ""} missing — see below.` : "");
 
         const slugs = Object.keys(result.receivers).sort();
@@ -6410,6 +6411,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function renderCalibration(status) {
+        calibLastStatus = status;
         const auto = status.mode === 'auto';
         const manualSampling = status.mode === 'manual' && status.state === 'sampling';
         calibLastResults = status.results || {};
@@ -6433,13 +6435,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             else line += ' · first solve after a few minutes of data';
             if (result) {
                 line += ` · floor ${result.floor}: ${result.pairs_used} pairs used, `
-                    + `typical error ×${result.error_factor_before} → ×${result.error_factor_after}`;
+                    + `model error ×${result.error_factor_before} → ×${result.error_factor_after}`;
                 // Keep the missing-receiver pointer (issue #63) — this line
                 // replaces the one renderCalibrationResult just wrote. Same
                 // reconciled lists so a replaced receiver isn't counted.
                 const m = calibMissingNow(result);
                 const missing = m.missUnmatched.length + m.missNoData.length;
                 if (missing) line += ` · ${missing} placed receiver${missing > 1 ? "s" : ""} missing — see below`;
+            }
+            const decision = Object.entries(status.auto_status || {}).find(([name]) =>
+                name.toLowerCase() === mapname.value.toLowerCase())?.[1];
+            if (decision) {
+                line += ` · ${decision.state}: ${decision.reason}`;
+                if (decision.updated_receivers) line += ` · ${decision.updated_receivers} receivers, maximum change ${decision.max_change_pct}%`;
+                if (decision.unchanged_receivers?.length) line += ` · ${decision.unchanged_receivers.length} unsupported receivers unchanged`;
             }
             calibStatus.textContent = line;
             return;
@@ -6498,6 +6507,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Switching floors should switch the displayed matrix too.
     mapSelector.addEventListener('change', () => {
+        if (calibLastStatus?.mode === 'auto') {
+            renderCalibration(calibLastStatus);
+            return;
+        }
         const result = selectedFloorResult(calibLastResults);
         if (result) renderCalibrationResult(result);
         else calibResults.innerHTML = '';

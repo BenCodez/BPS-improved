@@ -525,3 +525,19 @@ test('calibration tracking test uses the authenticated read-only action', async 
     assert.match(p.el('calibTrackingTest').textContent, /3.00 m → 1.00 m/);
     assert.ok(!p.requests.some(r => r.url === '/api/bps/save_text'));
 });
+
+test('auto calibration displays apply and skip reasons even before a first result', async () => {
+    const p = await panel(layout());
+    p.hooks.select('Property');
+    p.network.calibration = {mode: 'auto', auto_status: {Property: {
+        state: 'skipped', reason: 'Collecting fresh, independent receiver observations', updated_receivers: 0}}};
+    p.el('calibAuto').checked = true;
+    await p.el('calibAuto').fire('change');
+    assert.match(p.el('calibStatus').textContent, /skipped: Collecting fresh/);
+    p.network.calibration.auto_status.Property = {state: 'applied', reason: 'Stable estimate',
+        updated_receivers: 4, max_change_pct: 10, unchanged_receivers: ['weak_receiver']};
+    await p.el('calibAuto').fire('change');
+    assert.match(p.el('calibStatus').textContent, /applied: Stable estimate/);
+    assert.match(p.el('calibStatus').textContent, /4 receivers, maximum change 10%/);
+    assert.match(p.el('calibStatus').textContent, /1 unsupported receivers unchanged/);
+});
