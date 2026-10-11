@@ -1,7 +1,7 @@
 /* Authenticated, opt-in diagnostic capture controls. No polling until requested. */
 (function (root) {
     'use strict';
-    function init(apiFetch) {
+    function init(apiFetch, panelSnapshot) {
         const el = name => document.getElementById('diagnostic' + name);
         if (!el('Start')) return;
         let reportBusy = false;
@@ -15,14 +15,23 @@
             reportBusy = true; el('CopyAll').disabled = true;
             el('ReportStatus').textContent = 'Collecting full diagnostics…';
             try {
+                const panel = panelSnapshot ? JSON.stringify(panelSnapshot(), null, 2) : null;
                 const response = await apiFetch('/api/bps/diagnostics?report=1');
                 const body = await response.json();
                 if (!response.ok) throw new Error(body.error || `Diagnostic request failed (${response.status})`);
                 if (typeof body.text !== 'string' || !body.text.trim()) throw new Error('The diagnostic report was empty. Try again.');
-                el('ReportText').value = body.text;
+                let text = body.text;
+                if (panel) {
+                    const start = text.indexOf('{');
+                    const report = JSON.parse(text.slice(start));
+                    report.panel_context = {guide: 'Editor state may contain unsaved changes; the backend uses context.layout.', ...JSON.parse(panel)};
+                    text = text.slice(0, start) + JSON.stringify(report, null, 2);
+                }
+                if (new TextEncoder().encode(text).length > 4 * 1024 * 1024) throw new Error('Combined diagnostic report exceeds 4 MiB.');
+                el('ReportText').value = text;
                 el('ReportPanel').hidden = false;
                 try {
-                    await root.navigator.clipboard.writeText(body.text);
+                    await root.navigator.clipboard.writeText(text);
                     el('ReportStatus').textContent = 'Full diagnostics copied. Paste them into your support message.';
                 } catch (_) {
                     selectReport();

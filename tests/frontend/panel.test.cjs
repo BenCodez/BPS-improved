@@ -20,6 +20,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     function element(tag = 'div') {
         const events = new Map();
         const el = {tagName: tag.toUpperCase(), value: '', checked: false, style: {}, dataset: {}, children: [], width: 2000, height: 1000,
+            focus() {}, select() {this.selected = true;},
             offsetWidth: 100, offsetHeight: 30, classList: {add() {}, remove() {}, toggle() {}, contains: () => false},
             get options() {return this.children;}, get selectedOptions() {return this.children.filter(e => e.selected);},
             appendChild(child) {child.parentElement = this; this.children.push(child); if (child.id) ids.set(child.id, child); return child;},
@@ -43,7 +44,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         addEventListener: (name, cb) => listeners.set(name, cb), body: element(), documentElement: element()};
     const window = {location: {origin: 'https://home.test'}, scrollX: 0, scrollY: 0, innerHeight: 1000,
         addEventListener: (name, cb) => listeners.set(`window:${name}`, cb)}; window.parent = window;
-    const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date: ClockDate, URL, FormData, Response,
+    const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date: ClockDate, URL, FormData, Response, TextEncoder,
         Image: class {constructor() {this.naturalWidth = iconsLoaded ? 24 : 0; this.complete = iconsLoaded;}}, setTimeout: () => 1, clearTimeout() {}, setInterval: (cb, ms) => {intervals.push({cb, ms}); return intervals.length;}, clearInterval() {},
         requestAnimationFrame: () => 1, localStorage: {getItem: () => null, setItem() {}},
         fetch: async (url, options) => {
@@ -51,7 +52,8 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             if (url === '/api/bps/cords' && network.failCords) throw new Error('connection lost');
             const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: []}
                 : url === '/api/bps/cords' ? network.cords
-                : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration : [];
+                : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration
+                : url === '/api/bps/diagnostics?report=1' ? {text: 'BPS full diagnostics\n{"context":{"layout":{"floor":[]}}}'} : [];
             const status = url === '/api/bps/cords' ? network.cordsStatus : 200;
             return {ok: status === 200, status, json: async () => body};
         }});
@@ -73,6 +75,23 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
 }
 const layout = () => ({floor: [{name: 'Property', scale: 20, zones: [], receivers: []}]});
 const points = [{x: 100, y: 100}, {x: 200, y: 100}, {x: 200, y: 200}, {x: 100, y: 200}];
+
+test('full report includes selected map and unsaved placements separately without images or auth tokens', async () => {
+    const source = layout();
+    source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, height: 2}];
+    source.tracker_icons = {beacon: 'data:image/private'};
+    const p = await panel(source); p.hooks.select('Property');
+    p.hooks.layout().floor[0].receivers[0].cords.x = 150;
+    await p.el('diagnosticCopyAll').fire('click');
+    const text = p.el('diagnosticReportText').value;
+    const editor = JSON.parse(text.slice(text.indexOf('{'))).panel_context;
+    assert.equal(editor.selected_floor, 'Property');
+    assert.equal(editor.image_size_px.width, 2000);
+    assert.equal(editor.editor_layout.floor[0].receivers[0].cords.x, 150);
+    assert.ok(!text.includes('data:image/private') && !text.includes('test-token'));
+    assert.ok(!p.requests.some(r => r.url === '/api/bps/save_text'));
+    assert.equal(p.el('diagnosticReportText').selected, true);
+});
 
 test('panel smooths the group circle without adding member circles or altering raw diagnostics', async () => {
     const source = layout(); source.outdoor_tracking = {enabled: true};

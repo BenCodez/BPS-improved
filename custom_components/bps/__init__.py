@@ -59,6 +59,7 @@ from .solver_settings import MIN_WEIGHT_RADIUS_M, SOLVER_ROBUST_F_SCALE
 from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
+from . import bermuda_diagnostics
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2834,7 +2835,8 @@ def _diagnostic_report_snapshot(hass, now):
     # Saved settings only; omit map/icon assets and unrelated entity state.
     if isinstance(layout, dict):
         snapshot["context"]["layout"].update({key: copy.deepcopy(layout[key]) for key in (
-            "history_enabled", "history_max_age") if key in layout})
+            "history_enabled", "history_max_age", "history_min_interval", "history_min_move_m",
+            "history_max_points", "history_heartbeat") if key in layout})
     snapshot["context"]["defaults"].update(kalman_measurement_noise_m=KF_MEAS_NOISE_M,
         kalman_acceleration_noise_ms2=KF_ACCEL_NOISE_MS2, radius_jump_tolerance=RADIUS_JUMP_TOL,
         min_weight_radius_m=MIN_WEIGHT_RADIUS_M, solver_robust_f_scale=SOLVER_ROBUST_F_SCALE)
@@ -2850,6 +2852,29 @@ def _diagnostic_report_snapshot(hass, now):
     snapshot["runtime"] = {"initialized": bool(hass.data.get("bps_initialized")),
         "tracking_task_running": updater is not None and not updater.done(),
         "recording": copy.deepcopy(recording.status()) if recording else {"active": False, "available": False}}
+    snapshot["runtime"]["effective_history_settings"] = history_mod.history_config(layout)
+    task = cal.get("task")
+    snapshot["runtime"].update(calibration_task_running=task is not None and not task.done(),
+        tracking_update_interval_s=secToUpdate, max_concurrent_trackers=MAX_CONCURRENT_TRACKERS,
+        receiver_offline_after_s=RECEIVER_OFFLINE_SECS, receiver_liveness_poll_interval_s=RECEIVER_DUMP_INTERVAL,
+        queued_tracking_updates=update_queue.qsize())
+    snapshot["bermuda"] = bermuda_diagnostics.snapshot(hass, now)
+    try:
+        snapshot["bps_entities"], _, snapshot["bps_entity_counts"] = bermuda_diagnostics.entity_snapshot(hass, DOMAIN, now)
+    except (AttributeError, KeyError, TypeError):
+        snapshot["bps_entities"] = []
+        snapshot["runtime"]["bps_entities_unavailable"] = True
+    # Snapshot fixes keep observation timestamps, but report age/staleness at
+    # collection time rather than the frozen values from their original solve.
+    for position in snapshot["positions"]:
+        quality = position.get("outdoor")
+        if not isinstance(quality, dict):
+            continue
+        observed = position.get("updated") if quality.get("use_observation_age") is False else quality.get("observed", position.get("updated"))
+        observed = finite_number(observed, minimum=0.0)
+        if observed is not None:
+            age = max(0.0, now - observed)
+            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0))
     return snapshot
 
 
