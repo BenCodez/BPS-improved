@@ -573,6 +573,13 @@ def _refresh_auto_history(cal):
         unchanged = {s for s in receivers if receivers[s] == previous.get(s)} if geometry is receivers else set()
         cal["samples"] = {k: v for k, v in cal["samples"].items()
                           if all(s in unchanged for s in k.split("|", 1))}
+        cal["matched_placed"] = {s: stamp for s, stamp in (cal.get("matched_placed") or {}).items()
+                                 if s in unchanged}
+        # A solve before the next successful dump must not certify retained
+        # observations with provenance for the old receiver map.
+        cal.pop("_bermuda_source", None)
+        if cal.get("mode") == "manual":
+            cal["_manual_solve_generation"] = object()
     cal["_auto_geometry"] = copy.deepcopy(geometry)
     cal["_auto_samples"] = {}
     cal["_advert_stamps"] = {}
@@ -1090,6 +1097,7 @@ async def start_calibration(hass, floor_name: str, duration: int) -> dict:
     )
     for key in ("_auto_floor_receivers", "_auto_routes", "_auto_sources", "_auto_ambiguous_slugs", "_auto_geometry"):
         cal.pop(key, None)
+    _refresh_auto_history(cal)
     cal["task"] = hass.async_create_task(_sample_loop(hass, cal))
     return cal
 
@@ -1182,6 +1190,10 @@ def refresh_receivers_from_coords(hass, coordinates_json) -> None:
         if cal.get("mode") == "auto":
             _set_auto_receivers(hass, cal, coords)
         else:
+            # Establish the old map as the baseline even for a window that
+            # predates geometry bookkeeping. The first edit must not baseline
+            # the replacement hardware against observations from the old map.
+            _refresh_auto_history(cal)
             cal["receivers"] = new_map
         _refresh_auto_history(cal)
         cal["all_placed_slugs"] = _all_placed_slugs(coords)

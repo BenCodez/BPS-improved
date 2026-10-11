@@ -181,6 +181,105 @@ def test_real_manual_solve_retains_identity_after_rename_and_old_entity_removal(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("replacement", ["mac", "owner"])
+@pytest.mark.parametrize("missing_baseline", [False, True])
+@pytest.mark.parametrize("solve_path", ["immediate", "final_dump_failure", "pending"])
+def test_manual_rematch_drops_old_hardware_samples_before_any_new_dump(
+        hass, monkeypatch, replacement, missing_baseline, solve_path):
+    async def scenario():
+        data, macs, devices = fixture(hass, monkeypatch)
+        await save_bps_data(hass, data)
+        final_loop = C._sample_loop
+        async def no_sampling(*args):
+            pass
+        monkeypatch.setattr(C, "_sample_loop", no_sampling)
+        hass.async_create_task = asyncio.create_task
+        cal = await C.start_calibration(hass, "Ground", 60)
+        release, pending = asyncio.Event(), None
+        try:
+            for index in range(C.MIN_SAMPLES_PER_PAIR):
+                sampled_dump(hass, cal, data, macs, 100 + index)
+            assert len(cal["samples"]) == 12 and cal["_bermuda_source"]
+            assert "shared_old" in cal["matched_placed"]
+            if missing_baseline:
+                # Older in-memory windows may not have initialized this cache.
+                cal.pop("_auto_geometry", None)
+            async def body():
+                return {"action": "solve", "floor": "Ground"}
+            request = NS(app={"hass": hass}, json=body)
+            if solve_path == "pending":
+                started = asyncio.Event()
+                original_executor = hass.async_add_executor_job
+                async def blocked_executor(func, *args):
+                    started.set()
+                    await release.wait()
+                    return func(*args)
+                hass.async_add_executor_job = blocked_executor
+                pending = asyncio.create_task(C.BPSCalibrationAPI().post(request))
+                await started.wait()
+            registry = bps.er.async_get(hass).entities
+            current = data["floor"][0]["receivers"][0]
+            owner, mac = "entry", macs["shared_old"]
+            if replacement == "mac":
+                mac = "dd:ee:ff:10:20:00"
+                devices["shared_old"].address = mac
+            else:
+                owner = "replacement-owner"
+                devices.pop("shared_old")
+            for slug in ("shared_old", "shared_current"):
+                registry[f"sensor.tag_distance_to_{slug}"].unique_id = "synthetic-tag_" + mac + "_range"
+                registry[f"sensor.tag_distance_to_{slug}"].config_entry_id = owner
+            current.update(scanner_mac=mac, scanner_config_entry_id=owner)
+            await save_bps_data(hass, data)
+            C.refresh_receivers_from_coords(hass, json.dumps(data))
+            assert cal["receivers"]["shared_old"]["scanner_mac"] == mac
+            assert cal["receivers"]["shared_old"]["scanner_config_entry_id"] == owner
+            assert len(cal["samples"]) == 6
+            assert all("shared_old" not in pair.split("|") for pair in cal["samples"])
+            assert "shared_old" not in cal["matched_placed"]
+            assert cal.get("_bermuda_source") is None and cal["_auto_samples"] == {}
+            if solve_path == "final_dump_failure":
+                async def failed_dump(*args):
+                    raise OSError("synthetic dump failure")
+                monkeypatch.setattr(C, "_dump_devices", failed_dump)
+                cal["ends_at"] = NOW
+                await final_loop(hass, cal)
+                assert cal["state"] == "done"
+            else:
+                if pending is not None:
+                    release.set()
+                    assert (await pending).status == 409
+                    assert "Ground" not in cal["results"]
+                    hass.async_add_executor_job = original_executor
+                response = await C.BPSCalibrationAPI().post(request)
+                assert response.status == 200
+            result = cal["results"]["Ground"]
+            assert "shared_old" not in result["receivers"]
+            assert "shared_old" not in result["receiver_identities"]
+            assert result["bermuda_source"] is None
+            assert await C.apply_corrections(hass, cal, "Ground") == 3
+            assert get_bps_data_for_edit(hass)["floor"][0]["receivers"][0]["correction"] == 1.
+        finally:
+            release.set()
+            if pending is not None:
+                await pending
+            await C._stop_task(cal)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("missing_baseline", [False, True])
+def test_unchanged_manual_save_retains_samples_and_provenance(hass, monkeypatch, missing_baseline):
+    data, macs, devices = fixture(hass, monkeypatch)
+    cal = C.get_calibration_state(hass)
+    cal.update(mode="manual", state="sampling", floor="Ground", receivers=C._build_receiver_map(data, "Ground", hass=hass))
+    sampled_dump(hass, cal, data, macs, 100)
+    before = copy.deepcopy((cal["samples"], cal["_bermuda_source"], cal["matched_placed"]))
+    if missing_baseline:
+        cal.pop("_auto_geometry", None)
+    C.refresh_receivers_from_coords(hass, json.dumps(data))
+    assert (cal["samples"], cal["_bermuda_source"], cal["matched_placed"]) == before
+
+
 @pytest.mark.parametrize("conflict", ["cords", "correction", "outdoor_policy", "owner"])
 def test_manual_apply_never_repairs_preexisting_conflicting_alias_properties(hass, monkeypatch, conflict):
     async def scenario():
