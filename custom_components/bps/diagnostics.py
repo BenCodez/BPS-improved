@@ -57,6 +57,8 @@ def format_report(snapshot):
               "home_assistant_version": getattr(ha_const, "__version__", "unknown"),
               "python_version": sys.version.split()[0], **snapshot}
     recent = report.pop("_recent_tracking_snapshot", None)
+    panel_bytes = report.pop("_panel_bytes", 256 * 1024)
+    limit = MAX_REPORT_BYTES - panel_bytes
     header = ("BPS full diagnostics (live snapshot)\n"
             "Positions and current sensor readings have separate timestamps. Coordinates are map pixels; floor scale is pixels/metre.\n"
             )
@@ -66,7 +68,7 @@ def format_report(snapshot):
     if recent is not None:
         # Reserve space for frontend panel context and nested JSON indentation.
         budget = min(recent_tracking.EXPORT_MAX_BYTES,
-                     (MAX_REPORT_BYTES - len(text.encode("utf-8")) - 256 * 1024) // 2)
+                     (limit - len(text.encode("utf-8"))) // 2)
         if budget >= 2048:
             report["recent_tracking"] = recent_tracking.export_snapshot(recent, budget)
             report["recent_tracking"]["guide"] = (
@@ -79,13 +81,13 @@ def format_report(snapshot):
             text = render()
             # Account for the final nested representation, not just the
             # standalone history export. Preserve live data if it cannot fit.
-            while len(text.encode("utf-8")) > MAX_REPORT_BYTES and budget >= 4096:
+            while len(text.encode("utf-8")) > limit and budget >= 4096:
                 guide = report["recent_tracking"]["guide"]
                 budget //= 2
                 report["recent_tracking"] = recent_tracking.export_snapshot(recent, budget)
                 report["recent_tracking"]["guide"] = guide
                 text = render()
-            if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
+            if len(text.encode("utf-8")) > limit:
                 report.pop("recent_tracking")
                 text = render()
         else:
@@ -312,7 +314,13 @@ class BPSDiagnosticsAPI(HomeAssistantView):
             try:
                 if self.report is None:
                     raise ValueError("Live diagnostic report is unavailable")
+                panel = request.query.get("panel_bytes")
+                if panel is not None and (not isinstance(panel, str) or len(panel) > 7
+                        or not panel.isascii() or not panel.isdigit() or int(panel) > MAX_REPORT_BYTES):
+                    raise ValueError("Invalid diagnostic panel byte reservation")
                 snapshot = self.report(hass, time.time())
+                if panel is not None:
+                    snapshot["_panel_bytes"] = int(panel)
                 text = await hass.async_add_executor_job(format_report, snapshot)
             except (ValueError, TypeError) as err:
                 return web.json_response({"error": str(err)}, status=400)

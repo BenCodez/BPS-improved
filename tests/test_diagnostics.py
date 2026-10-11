@@ -67,6 +67,7 @@ def test_automatic_history_retains_stale_member_clocks_and_context_changes(hass,
         exported = recent.export_snapshot(history.snapshot(142))
         assert len(exported["frames"]) == 2 and len(exported["contexts"]) == 2
         first = exported["frames"][0]
+        first["positions"].sort(key=lambda p: {"tag": 0, "tag2": 1, "bps_group_dog": 2}[p["ent"]])
         assert first["positions"][0]["updated"] == first["positions"][0]["outdoor"]["observed"] == 100
         assert first["positions"][0]["outdoor"]["stale"] is True
         assert first["positions"][0]["outdoor"]["receiver_diagnostics"][0]["observed"] == 100
@@ -184,6 +185,41 @@ def test_recent_bermuda_context_allowlists_settings_without_state_scan(hass):
     assert context["entries"][0]["configured_settings"] == {"attenuation": 3,
         "rssi_offsets": {"00:11:22:33:44:55": -3}}
     assert "excluded-secret" not in json.dumps(context)
+
+
+def test_recent_inventory_cap_preserves_groups_and_members(hass, monkeypatch):
+    configure(hass, monkeypatch)
+    positions = [{"ent": "other" + str(i)} for i in range(140)]
+    positions.extend([{"ent": "tag"}, {"ent": "tag2"},
+                      {"ent": "bps_group_dog", "group": True}])
+    hass.data["bps"]["apitricords"] = positions
+    frame = bps._recent_tracking_snapshot(hass, 100)
+    assert [p["ent"] for p in frame["positions"][:3]] == ["bps_group_dog", "tag", "tag2"]
+    assert len(frame["positions"]) == 128 and frame["omitted_positions"] == 15
+
+
+def test_recent_history_reserves_actual_large_panel_context():
+    history = recent.RecentTrackingHistory()
+    for now in range(100, 180, 2):
+        history.append(recent.pack({"time": now, "context": {}, "positions": [{"payload": "x" * 40000}]}))
+    panel = {"editor_layout": "x" * 1100000}
+    panel_bytes = len(json.dumps({"panel_context": panel}, indent=2).encode()) + 256
+    text = diag.format_report({"live": "x" * 2200000, "_panel_bytes": panel_bytes,
+                              "_recent_tracking_snapshot": history.snapshot(180)})
+    report = json.loads(text[text.index("{"):])
+    report["panel_context"] = panel
+    assert len(json.dumps(report, indent=2).encode()) + text.index("{") < diag.MAX_REPORT_BYTES
+    assert report["recent_tracking"]["metadata"]["export_truncated"] is True
+    assert "_panel_bytes" not in report
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "99999999", "", "１２３"])
+def test_full_report_rejects_invalid_panel_byte_reservation(hass, value):
+    async def scenario():
+        api = diag.BPSDiagnosticsAPI(None, None, lambda *_: pytest.fail("should validate before snapshot"))
+        response = await api.get(SimpleNamespace(app={"hass": hass}, query={"report": "1", "panel_bytes": value}))
+        assert response.status == 400
+    asyncio.run(scenario())
 
 
 def test_snapshot_contains_raw_units_corrected_ranges_staleness_and_missing(hass, monkeypatch):

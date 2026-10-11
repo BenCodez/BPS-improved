@@ -2907,6 +2907,13 @@ def _recent_tracking_snapshot(hass, now):
         "position_timeout_s": STALE_POSITION_SECS, "tracker_height_m": TRACKER_HEIGHT_M,
         "tracking_update_interval_s": secToUpdate}
     positions = dom.get("apitricords", [])
+    members = {beacon for group in layout.get("tracker_groups", [])
+               for beacon in group.get("beacons", [])}
+    # Groups are appended after originals at publication. Retain their
+    # decisions and member solver inputs before unrelated beacon fixes.
+    positions = ([p for p in positions if p.get("group")]
+        + [p for p in positions if not p.get("group") and p.get("ent") in members]
+        + [p for p in positions if not p.get("group") and p.get("ent") not in members])
     keys = ("ent", "group", "floor", "zone", "cords", "updated", "outdoor",
             "beacons_reporting", "total_beacons", "beacon_positions", "anchor_beacon",
             "anchor_switch_pending", "motion_gate", "fusion_confidence", "beacon_disagreement_m")

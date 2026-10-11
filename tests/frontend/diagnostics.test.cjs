@@ -37,7 +37,7 @@ function panel(panelSnapshot) {
         requests.push({url, options});
         if (network.pending) await network.pending;
         if (network.error) return {ok: false, status: 400, json: async () => ({error: network.error})};
-        if (url.endsWith('?report=1')) return {ok: true, status: 200, json: async () => ({text: network.report})};
+        if (url.includes('?report=1')) return {ok: true, status: 200, json: async () => ({text: network.report})};
         if (options) {
             const body = JSON.parse(options.body);
             if (body.action === 'start') Object.assign(network.status, {active: true, available: true, targets: body.targets, frames: 1, reason: 'Recording', seconds_left: 600});
@@ -60,6 +60,8 @@ test('panel context is frozen separately before the server fetch and is included
     const text = p.copied[0];
     const report = JSON.parse(text.slice(text.indexOf('{')));
     assert.deepEqual(report.trackers, ['tag', 'tag2']);
+    const reservation = Number(new URL(p.requests[0].url, 'https://synthetic.invalid').searchParams.get('panel_bytes'));
+    assert.equal(reservation, new TextEncoder().encode(JSON.stringify({panel_context: report.panel_context}, null, 2)).length + 256);
     const copiedPanel = report.panel_context;
     assert.equal(copiedPanel.editor_layout.floor[0].receivers[0].cords.x, 2);
     assert.equal(p.el('ReportText').value, text);
