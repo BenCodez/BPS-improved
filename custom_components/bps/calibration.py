@@ -350,6 +350,9 @@ def _equivalent_updates(hass, floor, updates, *, identities=None):
         if binding["status"] not in ("matched", "unmatched", "duplicate_scanner_alias"):
             continue
         slug = str(rec.get("entity_id"))
+        identity = captured(slug)
+        if identity is not None and identity != binding["identity"]:
+            continue
         values = proven.get(binding["identity"], set())
         if len(values) == 1:
             expanded[slug] = next(iter(values))
@@ -944,6 +947,7 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
     changed = False
     applied = {}
     accepted = {}
+    pending_identities = {}
     statuses = cal.setdefault("auto_status", {})
     current_floors = {f.get("name") for f in coords.get("floor", [])}
     for name in list(statuses):
@@ -973,8 +977,9 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
             cal["last_solved_at"] = result["solved_at"]
         if not updates:
             continue
-        updates = _equivalent_updates(hass, floor, updates)
-        current = _equivalent_updates(hass, floor, current)
+        solved_updates = copy.deepcopy(updates)
+        updates = _equivalent_updates(hass, floor, updates, identities=snapshot["receivers"])
+        current = _equivalent_updates(hass, floor, current, identities=snapshot["receivers"])
         if not updates:
             decision.update(state="skipped", updated_receivers=0,
                             reason="Receiver identities or equivalent placements changed; match conflicting placements before applying")
@@ -1015,9 +1020,22 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
         }
         applied[floor_name] = {**current, **updates}
         accepted[floor_name] = decision
+        pending_identities[floor_name] = (solved_updates, snapshot["receivers"], updates)
         changed = True
 
     if changed:
+        # Tracking replay and later floors await executors too. Recheck the
+        # original canonical solve keys for every accepted floor before saving
+        # the batch; expanded alias keys must not re-seed replacement hardware.
+        for floor in coords.get("floor", []):
+            name = floor.get("name")
+            if name not in pending_identities:
+                continue
+            solved_updates, identities, expected = pending_identities[name]
+            if _equivalent_updates(hass, floor, solved_updates, identities=identities) != expected:
+                for accepted_name in accepted:
+                    statuses[accepted_name] = {"state": "skipped", "reason": "Scanner identities changed while calibrating; current corrections retained"}
+                return
         try:
             await save_bps_data(hass, coords)
         except BaseException:

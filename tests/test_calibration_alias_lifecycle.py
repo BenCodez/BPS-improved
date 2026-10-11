@@ -205,6 +205,47 @@ def test_manual_apply_never_repairs_preexisting_conflicting_alias_properties(has
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("replacement", ["mac", "owner"])
+@pytest.mark.parametrize("phase", ["assess", "tracking", "later_floor"])
+def test_auto_never_applies_old_hardware_factor_after_executor_identity_change(hass, monkeypatch, replacement, phase):
+    async def scenario():
+        data, macs, devices = fixture(hass, monkeypatch, upstairs=phase == "later_floor", renamed=True)
+        await save_bps_data(hass, data)
+        cal = C.get_calibration_state(hass); cal.update(mode="auto", state="sampling")
+        seed_history(hass, monkeypatch, cal, data, macs)
+        registry = bps.er.async_get(hass).entities
+        changed = False
+        def replace():
+            nonlocal changed
+            changed = True
+            for slug in ["shared_old", "shared_current"]:
+                entry = registry[f"sensor.tag_distance_to_{slug}"]
+                if replacement == "mac": entry.unique_id = "synthetic-tag_dd:ee:ff:10:20:00_range"
+                else: entry.config_entry_id = "replacement-owner"
+        async def executor(func, *args):
+            if func is C.assess_update:
+                result = func(*args)
+                if phase == "assess" or phase == "later_floor" and args[3] == "Upstairs": replace()
+                return result
+            from bps.calibration_validation import compare_tracking_export
+            if func is compare_tracking_export:
+                replace()
+                return {"verdict": "inconclusive", "baseline": {}, "candidate": {}, "locations": 0, "candidate_failures": 0}
+            return func(*args)
+        hass.async_add_executor_job = executor
+        await C._auto_solve_and_apply_locked(hass, cal, b"synthetic-recording" if phase == "tracking" else None)
+        assert changed
+        saved = get_bps_data_for_edit(hass)
+        assert saved["floor"][0]["receivers"][0]["correction"] == 1.
+        assert "shared_old" not in cal["applied"].get("Ground", {})
+        assert cal["results"]["Ground"]["receiver_identities"]["shared_old"]["scanner_mac"] == macs["shared_old"]
+        if phase != "assess":
+            assert saved == data
+            assert not cal["applied"]
+            assert all(cal["auto_status"][floor["name"]]["state"] == "skipped" for floor in data["floor"])
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("renamed", [False, True])
 def test_auto_calibrates_each_four_receiver_floor_with_shared_physical_scanner_and_own_geometry(hass, monkeypatch, renamed):
     async def scenario():
