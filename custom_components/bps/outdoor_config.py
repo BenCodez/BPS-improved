@@ -1,4 +1,4 @@
-"""Validate only the optional extension at the existing atomic save boundary.
+"""Validate layout limits and optional extensions at the atomic save boundary.
 
 Runtime readers normalize defensively and leave old layouts untouched. Editor
 saves reject malformed new fields before any map upload or Store write, rather
@@ -12,6 +12,8 @@ from .environment import (BUILDING_BOUNDARY_WEIGHTS, ENVIRONMENT_TYPES,
 from .tracker_groups import MAX_GROUPS, MAX_BEACONS_PER_GROUP
 
 SLUG = re.compile(r"[a-z0-9_]{1,64}\Z", re.ASCII)
+MAX_RECEIVERS_PER_FLOOR = 256
+MAX_RECEIVER_PLACEMENTS = 1024
 
 
 def validate_outdoor_layout(layout, known_trackers=None):
@@ -33,9 +35,17 @@ def validate_outdoor_layout(layout, known_trackers=None):
                 settings["hide_uncertainty_below_m"], minimum=0, maximum=10000) is None:
             return "Uncertainty hide threshold must be a finite number from 0 to 10000 metres"
     floors = layout.get("floor", [])
+    receiver_count = 0
     for floor in floors if isinstance(floors, list) else []:
         if not isinstance(floor, dict):
             continue
+        receivers = floor.get("receivers", [])
+        if isinstance(receivers, list):
+            if len(receivers) > MAX_RECEIVERS_PER_FLOOR:
+                return f"Each floor supports at most {MAX_RECEIVERS_PER_FLOOR} receiver placements"
+            receiver_count += len(receivers)
+            if receiver_count > MAX_RECEIVER_PLACEMENTS:
+                return f"A layout supports at most {MAX_RECEIVER_PLACEMENTS} receiver placements"
         if "environment" in floor:
             regions = floor["environment"]
             if not isinstance(regions, list) or len(regions) > MAX_ENVIRONMENT_POLYGONS:
@@ -70,7 +80,6 @@ def validate_outdoor_layout(layout, known_trackers=None):
                         return "Building wall materials need one valid material or null per polygon edge"
             if len(normalize_environment(regions)) != len(regions):
                 return "Environment polygons must be finite, nonempty and free of self-intersections"
-        receivers = floor.get("receivers", [])
         for receiver in receivers if isinstance(receivers, list) else []:
             if not isinstance(receiver, dict):
                 continue

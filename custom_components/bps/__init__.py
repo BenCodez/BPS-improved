@@ -893,18 +893,28 @@ def _scanner_diagnostics(hass, coordinates_json):
     slugs.update(row["entity_id"] for row in aliases)
     placed = _placed_receivers(coordinates_json)
     placed_slugs = {p[1] for p in placed}
+    placed_by_floor = {}
+    for fname, slug, _uid, _mac in placed:
+        key = fname if isinstance(fname, str) else None
+        placed_by_floor.setdefault(key, set()).add(slug)
     # Candidates for a re-link: live scanner slugs not already correctly placed.
     candidates = {row["entity_id"]: row for row in matching["options"] if row["selectable"]}
+    free_by_floor, identities_by_token = {}, {}
+    for row in matching["options"]:
+        token = row["token"] or _scanner_token(row["entity_id"])
+        identities_by_token.setdefault(token, set()).add((tuple(row["config_entry_ids"]), row["scanner_mac"] or row["entity_id"]))
     unmatched = []
     for fname, slug, uid, mac in placed:
         if slug in slugs:
             continue  # a real sensor exists (offline is a separate concern)
-        free = [option for candidate, option in candidates.items()
-                if candidate not in {p[1] for p in placed if p[0] == fname}]
+        key = fname if isinstance(fname, str) else None
+        if key not in free_by_floor:
+            free_by_floor[key] = [option for candidate, option in candidates.items()
+                                 if candidate not in placed_by_floor[key]]
+        free = free_by_floor[key]
         token = uid or _scanner_token(slug)
         proof = []
-        identities = {(tuple(row["config_entry_ids"]), row["scanner_mac"] or row["entity_id"]) for row in matching["options"]
-                      if (row["token"] or _scanner_token(row["entity_id"])) == token}
+        identities = identities_by_token.get(token, set()) if isinstance(token, str) else set()
         for option in free:
             option_mac = option["scanner_mac"]
             if mac and option_mac:
