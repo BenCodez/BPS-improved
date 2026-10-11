@@ -12,6 +12,7 @@ import pytest
 
 import bps
 from bps import diagnostics as diag
+from bps import recent_tracking as recent
 from bps.storage import get_bps_data
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -38,6 +39,213 @@ def configure(hass, monkeypatch):
 def state(value, observed=100, unit="m"):
     return SimpleNamespace(state=value, attributes={"unit_of_measurement": unit},
         last_updated=datetime.datetime.fromtimestamp(observed, datetime.timezone.utc))
+
+
+def test_automatic_history_retains_stale_member_clocks_and_context_changes(hass, monkeypatch):
+    async def scenario():
+        data, _ = configure(hass, monkeypatch)
+        hass.states.async_all = lambda _domain: []
+        clock = [140.0]
+        monkeypatch.setattr(bps.time, "time", lambda: clock[0])
+        positions = [{"ent": "tag", "updated": 100, "cords": [10, 10],
+            "outdoor": {"observed": 100, "stale_after_s": 30,
+                "receiver_diagnostics": [{"receiver": "proxy", "observed": 100,
+                    "measured_distance_m": 3, "used": True}]}},
+            {"ent": "tag2", "updated": 139, "cords": [300, 10], "outdoor": {"observed": 139}},
+            {"ent": "bps_group_dog", "group": True, "updated": 139, "cords": [300, 10],
+                "anchor_beacon": "tag2", "beacon_positions": [{"ent": "tag2", "used": True,
+                    "selection_reason": "anchor", "observed": 139}]}]
+        hass.data["bps"]["apitricords"] = positions
+        before = copy.deepcopy(positions)
+        await bps._capture_recent_tracking(hass)
+        clock[0] = 141
+        await bps._capture_recent_tracking(hass)
+        data["floor"][0]["receivers"][0]["correction"] = 4
+        clock[0] = 142
+        await bps._capture_recent_tracking(hass)
+        history = hass.data["bps"]["_recent_tracking"]
+        exported = recent.export_snapshot(history.snapshot(142))
+        assert len(exported["frames"]) == 2 and len(exported["contexts"]) == 2
+        first = exported["frames"][0]
+        first["positions"].sort(key=lambda p: {"tag": 0, "tag2": 1, "bps_group_dog": 2}[p["ent"]])
+        assert first["positions"][0]["updated"] == first["positions"][0]["outdoor"]["observed"] == 100
+        assert first["positions"][0]["outdoor"]["stale"] is True
+        assert first["positions"][0]["outdoor"]["receiver_diagnostics"][0]["observed"] == 100
+        assert first["positions"][2]["member_status"] == {"tag": "no_eligible_fix", "tag2": "anchor"}
+        assert positions == before and not hass._store_saves
+        report = diag.format_report(bps._diagnostic_report_snapshot(hass, 142))
+        parsed = json.loads(report[report.index("{"):])
+        assert parsed["recent_tracking"]["metadata"]["sample_count"] == 2
+        assert "private.png" not in report and "data:private" not in report
+        await diag.shutdown(hass)
+        assert "_recent_tracking" not in hass.data["bps"]
+        assert recent.export_snapshot(history.snapshot(142))["frames"] == []
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("change", ["unload", "layout"])
+def test_automatic_history_discards_executor_result_after_context_change(hass, monkeypatch, change):
+    async def scenario():
+        configure(hass, monkeypatch)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def executor(fn, *args):
+            entered.set()
+            await release.wait()
+            return fn(*args)
+        hass.async_add_executor_job = executor
+        task = asyncio.create_task(bps._capture_recent_tracking(hass))
+        await entered.wait()
+        old = hass.data["bps"]["_recent_tracking"]
+        if change == "unload":
+            await diag.shutdown(hass)
+        else:
+            hass.data["bps"]["layout"] = copy.deepcopy(hass.data["bps"]["layout"])
+        release.set()
+        await task
+        assert recent.export_snapshot(old.snapshot(bps.time.time()))["frames"] == []
+    asyncio.run(scenario())
+
+
+def test_automatic_history_failure_is_rate_limited_and_disabled_clears(hass, monkeypatch):
+    async def scenario():
+        data, _ = configure(hass, monkeypatch)
+        clock = [140.0]
+        monkeypatch.setattr(bps.time, "time", lambda: clock[0])
+        calls = []
+        def failure(_):
+            calls.append(1)
+            raise recent.PackError("oversize", "synthetic oversized frame")
+        monkeypatch.setattr(recent, "pack", failure)
+        await bps._capture_recent_tracking(hass)
+        clock[0] = 141
+        await bps._capture_recent_tracking(hass)
+        exported = recent.export_snapshot(hass.data["bps"]["_recent_tracking"].snapshot(141))
+        assert calls == [1] and exported["metadata"]["oversize_samples"] == 1
+        data["outdoor_tracking"]["enabled"] = False
+        await bps._capture_recent_tracking(hass)
+        assert recent.export_snapshot(hass.data["bps"]["_recent_tracking"].snapshot(141))["metadata"]["oversize_samples"] == 0
+    asyncio.run(scenario())
+
+
+def test_recent_report_budget_preserves_large_live_snapshot():
+    history = recent.RecentTrackingHistory()
+    history.append(recent.pack({"time": 100, "context": {}, "positions": []}))
+    snapshot = {"live": "x" * (diag.MAX_REPORT_BYTES - 2000),
+                "_recent_tracking_snapshot": history.snapshot(100)}
+    text = diag.format_report(snapshot)
+    assert len(text.encode()) <= diag.MAX_REPORT_BYTES
+    parsed = json.loads(text[text.index("{"):])
+    assert parsed["live"] == snapshot["live"]
+    assert parsed["recent_tracking"]["metadata"]["export_truncated"] is True
+
+
+def test_recent_unicode_history_keeps_live_report_within_byte_budget():
+    history = recent.RecentTrackingHistory()
+    positions = [{"ent": "tag" + str(i), "floor": "é" * 128, "zone": "é" * 128}
+                 for i in range(64)]
+    for now in range(100, 180, 2):
+        history.append(recent.pack({"time": now, "context": {}, "positions": positions}))
+    snapshot = {"live": "x" * 2500000, "_recent_tracking_snapshot": history.snapshot(180)}
+    text = diag.format_report(snapshot)
+    assert len(text.encode()) <= diag.MAX_REPORT_BYTES
+    report = json.loads(text[text.index("{"):])
+    assert report["live"] == snapshot["live"]
+    assert report["recent_tracking"]["frames"][-1]["positions"] == positions
+    assert report["recent_tracking"]["metadata"]["export_truncated"] is True
+
+
+def test_recent_history_samples_completed_batch_and_group_once(hass, monkeypatch):
+    async def scenario():
+        configure(hass, monkeypatch)
+        calls = []
+        async def tracker(_hass, _data, eids):
+            await asyncio.sleep(0)
+            calls.append(eids["entity"])
+        async def group(_hass):
+            assert set(calls) == {"tag", "tag2"}
+            calls.append("group")
+        async def capture(_hass):
+            assert calls[-1] == "group"
+            calls.append("capture")
+        monkeypatch.setattr(bps, "process_single_entity", tracker)
+        monkeypatch.setattr(bps, "update_tracker_groups", group)
+        monkeypatch.setattr(bps, "_capture_recent_tracking", capture)
+        await bps.process_entities(hass, [{"entity": "tag"}, {"entity": "tag2"}])
+        assert calls.count("capture") == 1
+    asyncio.run(scenario())
+
+
+def test_recent_bermuda_context_allowlists_settings_without_state_scan(hass):
+    entry = SimpleNamespace(entry_id="synthetic", options={"attenuation": 3,
+        "token": "excluded-secret", "rssi_offsets": {"00:11:22:33:44:55": -3, "private-key": 8}},
+        runtime_data=SimpleNamespace(coordinator=SimpleNamespace(options={"smoothing_samples": 5})))
+    hass.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
+    context = bps.bermuda_diagnostics.settings_snapshot(hass)
+    assert context["entries"][0]["effective_settings"] == {"smoothing_samples": 5}
+    assert context["entries"][0]["configured_settings"] == {"attenuation": 3,
+        "rssi_offsets": {"00:11:22:33:44:55": -3}}
+    assert "excluded-secret" not in json.dumps(context)
+
+
+def test_recent_inventory_cap_preserves_groups_and_members(hass, monkeypatch):
+    configure(hass, monkeypatch)
+    positions = [{"ent": "other" + str(i)} for i in range(140)]
+    positions.extend([{"ent": "tag"}, {"ent": "tag2"},
+                      {"ent": "bps_group_dog", "group": True}])
+    hass.data["bps"]["apitricords"] = positions
+    frame = bps._recent_tracking_snapshot(hass, 100)
+    assert [p["ent"] for p in frame["positions"][:3]] == ["bps_group_dog", "tag", "tag2"]
+    assert len(frame["positions"]) == 128 and frame["omitted_positions"] == 15
+
+
+def test_recent_inventory_cap_does_not_prioritize_disabled_group_members(hass, monkeypatch):
+    data, _ = configure(hass, monkeypatch)
+    positions = [{"ent": "other" + str(i)} for i in range(144)]
+    disabled = [{"id": "disabled" + str(i), "enabled": False,
+                 "beacons": ["other" + str(j) for j in range(i * 16, (i + 1) * 16)]}
+                for i in range(9)]
+    data["tracker_groups"] = disabled + data["tracker_groups"]
+    positions.extend([{"ent": "tag"}, {"ent": "tag2"},
+                      {"ent": "bps_group_dog", "group": True}])
+    hass.data["bps"]["apitricords"] = positions
+    frame = bps._recent_tracking_snapshot(hass, 100)
+    assert [p["ent"] for p in frame["positions"][:3]] == ["bps_group_dog", "tag", "tag2"]
+
+
+def test_recent_history_reserves_actual_large_panel_context():
+    history = recent.RecentTrackingHistory()
+    for now in range(100, 180, 2):
+        history.append(recent.pack({"time": now, "context": {}, "positions": [{"payload": "x" * 40000}]}))
+    panel = {"editor_layout": "x" * 1100000}
+    panel_bytes = len(json.dumps({"panel_context": panel}, indent=2).encode()) + 256
+    text = diag.format_report({"live": "x" * 2200000, "_panel_bytes": panel_bytes,
+                              "_recent_tracking_snapshot": history.snapshot(180)})
+    report = json.loads(text[text.index("{"):])
+    report["panel_context"] = panel
+    assert len(json.dumps(report, indent=2).encode()) + text.index("{") < diag.MAX_REPORT_BYTES
+    assert report["recent_tracking"]["metadata"]["export_truncated"] is True
+    assert "_panel_bytes" not in report
+
+
+def test_recent_omission_notice_respects_explicit_panel_budget():
+    history = recent.RecentTrackingHistory()
+    history.append(recent.pack({"time": 100, "context": {}, "positions": []}))
+    snapshot = {"live": "x" * 3200000}
+    baseline = diag.format_report(snapshot)
+    reservation = diag.MAX_REPORT_BYTES - len(baseline.encode()) - 10
+    text = diag.format_report({**snapshot, "_panel_bytes": reservation,
+                              "_recent_tracking_snapshot": history.snapshot(100)})
+    assert len(text.encode()) + reservation <= diag.MAX_REPORT_BYTES
+    assert text == baseline
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "99999999", "", "１２３"])
+def test_full_report_rejects_invalid_panel_byte_reservation(hass, value):
+    async def scenario():
+        api = diag.BPSDiagnosticsAPI(None, None, lambda *_: pytest.fail("should validate before snapshot"))
+        response = await api.get(SimpleNamespace(app={"hass": hass}, query={"report": "1", "panel_bytes": value}))
+        assert response.status == 400
+    asyncio.run(scenario())
 
 
 def test_snapshot_contains_raw_units_corrected_ranges_staleness_and_missing(hass, monkeypatch):

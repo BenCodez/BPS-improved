@@ -10,6 +10,7 @@ import time
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
+from . import recent_tracking
 
 LOGGER = logging.getLogger(__name__)
 INTERVAL_S = 2
@@ -55,9 +56,47 @@ def format_report(snapshot):
     report = {"format": "bps-support-report-v1", "bps_version": version,
               "home_assistant_version": getattr(ha_const, "__version__", "unknown"),
               "python_version": sys.version.split()[0], **snapshot}
-    text = ("BPS full diagnostics (live snapshot)\n"
+    recent = report.pop("_recent_tracking_snapshot", None)
+    explicit_panel = "_panel_bytes" in report
+    panel_bytes = report.pop("_panel_bytes", 256 * 1024)
+    limit = MAX_REPORT_BYTES - panel_bytes
+    header = ("BPS full diagnostics (live snapshot)\n"
             "Positions and current sensor readings have separate timestamps. Coordinates are map pixels; floor scale is pixels/metre.\n"
-            + json.dumps(report, indent=2, allow_nan=False))
+            )
+    def render():
+        return header + json.dumps(report, indent=2, allow_nan=False, ensure_ascii=False)
+    text = render()
+    if recent is not None:
+        # Reserve space for frontend panel context and nested JSON indentation.
+        budget = min(recent_tracking.EXPORT_MAX_BYTES,
+                     (limit - len(text.encode("utf-8"))) // 2)
+        if budget >= 2048:
+            report["recent_tracking"] = recent_tracking.export_snapshot(recent, budget)
+            report["recent_tracking"]["guide"] = (
+                "Automatic local memory history of completed tracking batches. Sampling time is not a new BLE observation. "
+                "Source updated/observed timestamps and receiver_diagnostics retain the solver input clocks. "
+                "Missing group members can be stale, missing or invalid; check their original fixes and context. "
+                "Grey mini icons mean stale or excluded, not known physical accuracy. "
+                "Contexts are saved backend settings; unsaved panel placements are only in the live panel context. "
+                "Window, byte limits and export truncation can shorten coverage. Restart/unload clears history.")
+            text = render()
+            # Account for the final nested representation, not just the
+            # standalone history export. Preserve live data if it cannot fit.
+            while len(text.encode("utf-8")) > limit and budget >= 4096:
+                guide = report["recent_tracking"]["guide"]
+                budget //= 2
+                report["recent_tracking"] = recent_tracking.export_snapshot(recent, budget)
+                report["recent_tracking"]["guide"] = guide
+                text = render()
+            if len(text.encode("utf-8")) > limit:
+                report.pop("recent_tracking")
+                text = render()
+        else:
+            report["recent_tracking"] = {"metadata": {"export_truncated": True},
+                "reason": "Live report leaves insufficient space for recent history"}
+            candidate = render()
+            if len(candidate.encode("utf-8")) <= (limit if explicit_panel else MAX_REPORT_BYTES):
+                text = candidate
     if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
         raise ValueError("Full diagnostic report exceeds 4 MiB; reduce tracker/receiver scope before retrying")
     return text
@@ -245,6 +284,10 @@ def get_recording(hass, snapshot):
 
 
 async def shutdown(hass):
+    hass.data.get("bps", {}).pop("_recent_tracking_last_attempt", None)
+    recent = hass.data.get("bps", {}).pop("_recent_tracking", None)
+    if recent is not None:
+        recent.clear()
     recording = hass.data.get("bps", {}).get("_diagnostics")
     if recording:
         recording.accepting = False
@@ -272,7 +315,13 @@ class BPSDiagnosticsAPI(HomeAssistantView):
             try:
                 if self.report is None:
                     raise ValueError("Live diagnostic report is unavailable")
+                panel = request.query.get("panel_bytes")
+                if panel is not None and (not isinstance(panel, str) or len(panel) > 7
+                        or not panel.isascii() or not panel.isdigit() or int(panel) > MAX_REPORT_BYTES):
+                    raise ValueError("Invalid diagnostic panel byte reservation")
                 snapshot = self.report(hass, time.time())
+                if panel is not None:
+                    snapshot["_panel_bytes"] = int(panel)
                 text = await hass.async_add_executor_job(format_report, snapshot)
             except (ValueError, TypeError) as err:
                 return web.json_response({"error": str(err)}, status=400)

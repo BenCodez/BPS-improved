@@ -27,6 +27,9 @@ Quick list of changes in this fork:
 - Fresh close readings from receivers inside buildings supply soft indoor
   evidence. Optional per-station expected distance error reduces noisy readings'
   influence; receiver and individual beacon hardware notes appear in diagnostics.
+- Outdoor receiver trust favors fresh, reliable readings within 5 metres and
+  reduces the influence of more distant ranges beyond 10 metres, while retaining
+  distant receivers for direction and coverage.
 - Receiver height controls accept metres or feet. Outdoor estimates can extend
   beyond the map; one or two reporting stations still show a clearly labelled
   receiver-centred detection with unknown direction.
@@ -306,6 +309,24 @@ Outdoor settings are stored under `outdoor_tracking`:
 
 The environmental model changes how much BPS trusts a measurement; it does not
 rewrite Bermuda's measured distance or the receiver's calibration correction.
+Outdoor tracking also applies soft distance trust to receiver inputs. Corrected
+slant ranges within **5 m** receive the strongest trust, falling smoothly to half
+trust at **10 m** and a nonzero floor at **30 m**. Trust is relative to the best
+eligible receiver on that floor, so a dog heard only by distant stations remains
+trackable. Only fresh observations with adequate jump, accuracy and policy trust
+can establish that reference. Missing timestamps, stale readings, ignored stations
+and noisy close receivers do not establish the distance-priority reference.
+The weighting is applied once alongside the existing range variance, station
+accuracy, freshness and obstruction controls; it does not change measured ranges
+or Bermuda/BPS calibration. Receiver diagnostics show **distance trust**, its
+corrected slant range and the reference range. One or two receivers still report
+unknown direction. A short RSSI-derived distance remains an estimate, and one
+close station alone cannot determine an accurate position or prove a building.
+Floor election scores the solved position with this extra distance priority
+removed, retaining jump, accuracy, freshness, policy and path trust. Distant
+contradictory readings still count as evidence against a wrong floor. Sparse
+detection likewise uses reception evidence independent of its display anchor.
+
 The optional diagnostics show measured and corrected distances separately,
 reading age, path classification, boundary crossings, and reliability. For a
 metal building path, `reflection_risk` flags possible multipath. It does not
@@ -792,9 +813,30 @@ If clipboard access is unavailable, use the selectable text box and
 It contains property geometry and tracker locations, but excludes map images,
 icons, authentication tokens, BLE identity-resolving keys and unrelated entity
 states. Bermuda scanner MAC identifiers are included to link offsets and paths.
-This is a live
-snapshot; use a recording below to diagnose intermittent jumps or measure
-accuracy over time.
+With Outdoor Tracking enabled, the report also includes **recent_tracking**:
+an automatic rolling history of completed tracking batches, sampled at most
+once every two seconds. After an unexpected jump or grey mini beacon, copy the
+report promptly. It retains original beacon and group positions, source
+timestamps, solver receiver inputs, selection weights/reasons and motion gates.
+Saved map placements, wall/fence materials, receiver corrections/hardware,
+calibration status and allowlisted Bermuda settings are versioned alongside it.
+Grey means stale or excluded from fusion; it does not establish which beacon
+was physically correct. Last-known original fixes remain identifiable even
+when a group excludes them.
+
+Recent history stays in Home Assistant memory and clears on integration unload,
+restart or disabling Outdoor Tracking. Retention is up to **10 minutes, 300
+samples and 2 MiB**, whichever limit is reached first; each sample is limited to
+64 KiB, settings contexts to 256 KiB, and includes up to 128 positions. Oversized
+or malformed samples are skipped and counted. The copy report exports the newest
+history fitting a 1 MiB history budget (less when the live report is large), with
+actual time coverage and truncation/drop counters. It does not upload anything,
+write additional history files, trigger extra Bluetooth scans or change tracking.
+Sampling timestamps never refresh the underlying BLE observations. Very brief
+events between completed batches can be missed. Current full Bermuda sensors
+and RSSI adverts remain in the live snapshot, rather than being polled again for
+each history sample. Use a recording below for longer sessions and measured
+known-position accuracy tests; its controls are independent of recent history.
 
 Open **BPS → Debugging → Diagnostic recording**, click **Load trackers / refresh**,
 choose an original Bermuda tracker or an enabled dog group, and start a 5, 10,
@@ -1300,8 +1342,9 @@ both error metrics must improve by at least 0.25 m or 10%, whichever is larger,
 without additional candidate solve failures. Otherwise it reports worse or
 inconclusive. The result names the candidate solve time.
 
-This is a read-only raw-fix comparison using the live solver, height projection
-and obstruction weights. It omits temporal jump weights, Kalman smoothing,
+This is a read-only raw-fix comparison using the live solver, height projection,
+nearby range trust when Outdoor tracking is enabled, and obstruction weights.
+It omits temporal jump weights, Kalman smoothing,
 group fusion, floor election and zone snapping, so field tracking can still
 differ. It does not apply corrections or suspend auto calibration; auto mode
 continues checking for accepted updates every 15 minutes. For testing before application,
