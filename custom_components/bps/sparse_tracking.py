@@ -8,11 +8,11 @@ import math
 
 from .environment import (MAX_COORDINATE_PX, CompiledEnvironment, finite_number,
                           measurement_reliability)
-from .outdoor_tracking import receiver_accuracy
+from .outdoor_tracking import nearby_range_trust, receiver_accuracy
 
 
 def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
-                           now, position_timeout_s=300.0):
+                           now, position_timeout_s=300.0, nearby_trust=False):
     """Return a solver-shaped detection candidate for 1–2 distinct receivers.
 
     Inputs have the same ordering/units as ``solve_outdoor``: each weighted
@@ -60,6 +60,8 @@ def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
                 "excluded": True, "status": "excluded", "reliability_weight": 0.0,
                 "observed": observed, "reading_age_s": age,
                 "measured_distance_m": measured, "corrected_distance_m": distance,
+                "range_trust_weight": 1.0, "range_trust_distance_m": distance,
+                "nearby_priority_reference_m": None,
                 "classification": "malformed"}
         diagnostics.append(diag)
         if rec.get("outdoor_policy") == "ignore":
@@ -94,6 +96,7 @@ def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
             CompiledEnvironment(()), pt[:2], pt[:2], policy=rec.get("outdoor_policy", "auto"),
             age_s=age, max_age_s=limit, base_weight=pt[3] * accuracy["accuracy_weight"])
         diag.update(reliability, **accuracy, classification="direction_unknown", path_assessed=False,
+                    base_jump_weight=pt[3], range_trust_distance_m=pt[4] / scale,
                     horizontal_distance_m=pt[2] / scale, radius_px=pt[2])
         prior = selected.get(slug)
         # A repeated placement cannot count as a second scanner. Prefer the
@@ -113,9 +116,19 @@ def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
             diagnostics.append({"receiver": rec.get("entity_id", ""), "used": False,
                 "excluded": True, "status": "excluded", "classification": "manual_ignore",
                 "reliability_weight": 0.0,
+                "range_trust_weight": 1.0,
+                "range_trust_distance_m": finite_number(rec.get("distance"), minimum=0.0),
+                "nearby_priority_reference_m": None,
                 "observed": finite_number(reading.get("observed"), minimum=0.0) if isinstance(reading, dict) else None})
     if not 1 <= len(selected) <= 2:
         return None
+
+    trusts = nearby_range_trust([d for _pt, d in selected.values()], limit, enabled=nearby_trust)
+    for (pt, diagnostic), trust in zip(selected.values(), trusts):
+        diagnostic.update(trust)
+        diagnostic["reliability_weight"] *= trust["range_trust_weight"]
+        if diagnostic["reliability_weight"] < 0.999:
+            diagnostic["status"] = "downweighted"
 
     def rank(item):
         _pt, diag = item
@@ -138,10 +151,13 @@ def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
                "detection_range_px": pt[2], "confidence": "poor",
                "estimated_uncertainty_m": max(3.0, radius_m * 1.5),
                "uncertainty_method": "sparse_receiver_detection",
-               "receivers_used": len(selected), "clear_paths": 0,
+               "receivers_used": len(selected), "observations_used": len(selected),
+               "range_trust_enabled": bool(nearby_trust), "clear_paths": 0,
                "building_crossings": 0, "receiver_diagnostics": diagnostics,
                "observed": diag["observed"], "newest_reading_age_s": min(d["reading_age_s"] for _, d in selected.values()),
                "position_age_s": diag["reading_age_s"], "stale_after_s": limit,
                "use_observation_age": True, "stale": False,
                "geometry_degenerate": True, "boundary_hit": False}
-    return {"fix": pt[:2], "weighted": [p for p, _d in selected.values()], "outdoor": quality}
+    weights = [(*p[:3], d["reliability_weight"], p[4]) if nearby_trust else p
+               for p, d in selected.values()]
+    return {"fix": pt[:2], "weighted": weights, "outdoor": quality}

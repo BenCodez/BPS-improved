@@ -24,6 +24,9 @@ Quick list of changes in this fork:
 - Fresh close readings from receivers inside buildings supply soft indoor
   evidence. Optional per-station expected distance error reduces noisy readings'
   influence; receiver and individual beacon hardware notes appear in diagnostics.
+- Outdoor receiver trust favors fresh, reliable readings within 5 metres and
+  reduces the influence of more distant ranges beyond 10 metres, while retaining
+  distant receivers for direction and coverage.
 - Receiver height controls accept metres or feet. Outdoor estimates can extend
   beyond the map; one or two reporting stations still show a clearly labelled
   receiver-centred detection with unknown direction.
@@ -302,6 +305,20 @@ Outdoor settings are stored under `outdoor_tracking`:
 
 The environmental model changes how much BPS trusts a measurement; it does not
 rewrite Bermuda's measured distance or the receiver's calibration correction.
+Outdoor tracking also applies soft distance trust to receiver inputs. Corrected
+slant ranges within **5 m** receive the strongest trust, falling smoothly to half
+trust at **10 m** and a nonzero floor at **30 m**. Trust is relative to the best
+eligible receiver on that floor, so a dog heard only by distant stations remains
+trackable. Only fresh observations with adequate jump, accuracy and policy trust
+can establish that reference. Missing timestamps, stale readings, ignored stations
+and noisy close receivers do not establish the distance-priority reference.
+The weighting is applied once alongside the existing range variance, station
+accuracy, freshness and obstruction controls; it does not change measured ranges
+or Bermuda/BPS calibration. Receiver diagnostics show **distance trust**, its
+corrected slant range and the reference range. One or two receivers still report
+unknown direction. A short RSSI-derived distance remains an estimate, and one
+close station alone cannot determine an accurate position or prove a building.
+
 The optional diagnostics show measured and corrected distances separately,
 reading age, path classification, boundary crossings, and reliability. For a
 metal building path, `reflection_risk` flags possible multipath. It does not

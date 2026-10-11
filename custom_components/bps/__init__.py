@@ -1375,6 +1375,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 solve_outdoor, floor, weighted, floor_bounds, scale, min_wr,
                 _reading_max_age(entity_layout), prior, trilaterate,
                 position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS),
+                nearby_trust=True,
             ))
             # Map saves replace the cached layout. Do not feed an obsolete
             # snapshot into election, smoothing, history or sensor state.
@@ -1418,7 +1419,8 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
             weighted = [(x, y, radius, _jump_weight(radius, last_r.get((floor_name, x, y)), min_wr), slant)
                         for x, y, radius, slant in cand["cords"]]
             detection = solve_sparse_detection(floor, weighted, scale, _reading_max_age(entity_layout),
-                previous_payload, now=time.time(), position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS))
+                previous_payload, now=time.time(), position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS),
+                nearby_trust=True)
             if detection is not None:
                 quality = detection["outdoor"]
                 # Election compares reception floors only; this is not a

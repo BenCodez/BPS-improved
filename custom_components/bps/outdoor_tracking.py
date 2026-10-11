@@ -1,8 +1,9 @@
 """Bounded, executor-side extension of the existing BPS weighted solver.
 
-No calibration state or measurements are changed here. Environmental trust is
-computed from the preliminary fix and multiplied into the original jump weight
-once. At most two solves are performed; a failed refinement retains the first.
+No calibration state or measurements are changed here. Optional accuracy and
+relative slant-range trust form the base weight. Environmental trust is computed
+from the preliminary fix and applied once to that base. At most two solves are
+performed; a failed refinement retains the first.
 """
 import math
 
@@ -23,6 +24,10 @@ INDOOR_CLEARANCE_SLACK_M = 0.5
 INDOOR_FAR_RANGE_M = 6.0
 MIN_INDOOR_RANGE_WEIGHT = 0.25
 MIN_ACCURACY_WEIGHT = 0.05
+NEARBY_PRIORITY_RANGE_M = 5.0
+LOWER_TRUST_RANGE_M = 10.0
+MIN_RANGE_TRUST = 0.15
+MIN_RANGE_TRUST_DISTANCE_M = 30.0
 
 
 def receiver_accuracy(receiver, slant_m):
@@ -40,6 +45,58 @@ def receiver_accuracy(receiver, slant_m):
         radius = max(slant, MIN_WEIGHT_RADIUS_M)
         factor = max(MIN_ACCURACY_WEIGHT, 1.0 / (1.0 + (accuracy / radius) ** 2))
     return {"receiver_accuracy_m": accuracy, "accuracy_weight": factor}
+
+
+def nearby_range_trust(observations, max_age_s, *, enabled=False):
+    """Return bounded relative trust for corrected slant ranges in metres.
+
+    The original inverse-variance weighting already favors short ranges. This
+    additional soft factor never boosts a reading or removes a distant bearing.
+    Normalize by the strongest fresh, reliable station so uniformly distant
+    readings do not lose global trust. A stale, weak, inaccurate or untimed
+    close reading cannot establish that reference. Measurements stay unchanged.
+    """
+    def factor(distance):
+        if distance is None or distance <= NEARBY_PRIORITY_RANGE_M:
+            return 1.0
+        if distance >= MIN_RANGE_TRUST_DISTANCE_M:
+            return MIN_RANGE_TRUST
+        start, end, high, low = (
+            (NEARBY_PRIORITY_RANGE_M, LOWER_TRUST_RANGE_M, 1.0, 0.5)
+            if distance <= LOWER_TRUST_RANGE_M else
+            (LOWER_TRUST_RANGE_M, MIN_RANGE_TRUST_DISTANCE_M, 0.5, MIN_RANGE_TRUST))
+        t = (distance - start) / (end - start)
+        return high + (low - high) * t * t * (3.0 - 2.0 * t)
+
+    maximum = finite_number(max_age_s, 30.0, minimum=0.0)
+    fresh_limit = min(maximum / 2 if maximum > 0 else 15.0, 15.0)
+    distances = [finite_number(d.get("range_trust_distance_m"), minimum=0.0)
+                 for d in observations]
+    candidates = []
+    if enabled:
+        for index, diagnostic in enumerate(observations):
+            age = finite_number(diagnostic.get("reading_age_s"), minimum=0.0)
+            observed = finite_number(diagnostic.get("observed"), minimum=0.0)
+            jump = finite_number(diagnostic.get("base_jump_weight"), 0.0, minimum=0.0)
+            accuracy = finite_number(diagnostic.get("accuracy_weight"), 0.0, minimum=0.0)
+            policy = diagnostic.get("policy", "auto")
+            if (distances[index] is None or age is None or observed is None
+                    or age > fresh_limit or jump < 0.5 or accuracy < 0.5
+                    or policy not in {"auto", "normal", "prefer"}):
+                continue
+            # Combined jump and accuracy guards also reject two individually
+            # borderline factors whose product is already unreliable.
+            neutral = measurement_reliability(CompiledEnvironment(()), (0, 0), (0, 0),
+                policy=policy, age_s=age, max_age_s=maximum, base_weight=jump * accuracy)
+            if neutral["reliability_weight"] >= 0.5:
+                candidates.append(index)
+    reference = min((distances[i] for i in candidates), default=None)
+    strongest = factor(reference) if reference is not None else 1.0
+    return [{"range_trust_weight": min(1.0, factor(distance) / strongest)
+             if reference is not None else 1.0,
+             "range_trust_distance_m": distance,
+             "nearby_priority_reference_m": reference}
+            for distance in distances]
 
 
 def _boundary_clearance(point, region):
@@ -144,7 +201,7 @@ def _indoor_support(environment, selected, diagnostics, scale, max_age_s):
 
 
 def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
-                  previous, solver, *, position_timeout_s=300.0):
+                  previous, solver, *, position_timeout_s=300.0, nearby_trust=False):
     """Return an outdoor candidate, or None with fewer than three usable inputs.
 
     ``weighted`` and ``floor.receivers`` share the ordering of the live candidate
@@ -173,11 +230,17 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
         return None
     accuracies = [receiver_accuracy(rec, pt[4] / scale) for pt, rec in selected]
     jump_weights = [pt[3] for pt, _rec in selected]
-    # Accuracy is a base variance term, included in BOTH solves exactly once.
+    ranges = nearby_range_trust([
+        {"range_trust_distance_m": pt[4] / scale, "base_jump_weight": pt[3],
+         "policy": rec.get("outdoor_policy", "auto"), **rec.get("_outdoor_reading", {}),
+         **accuracy}
+        for (pt, rec), accuracy in zip(selected, accuracies)], max_age_s, enabled=nearby_trust)
+    # Accuracy and relative range trust are base terms included in BOTH solves
+    # exactly once; refinement and geometry fallback retain these same inputs.
     # Preserve the original tuples when unset, including weak jump weights.
-    selected = [(pt if accuracy["accuracy_weight"] == 1 else
-                 (*pt[:3], pt[3] * accuracy["accuracy_weight"], pt[4]), rec)
-                for (pt, rec), accuracy in zip(selected, accuracies)]
+    selected = [(pt if accuracy["accuracy_weight"] * trust["range_trust_weight"] == 1 else
+                 (*pt[:3], pt[3] * accuracy["accuracy_weight"] * trust["range_trust_weight"], pt[4]), rec)
+                for (pt, rec), accuracy, trust in zip(selected, accuracies, ranges)]
     base = [pt for pt, _rec in selected]
     fix = solver(base, bounds=bounds, min_weight_radius=min_weight_radius)
     if fix is None:
@@ -192,7 +255,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
         compilation_error = type(error).__name__
         environment = CompiledEnvironment(())
     diagnostics = []
-    for (pt, rec), accuracy, jump_weight in zip(selected, accuracies, jump_weights):
+    for (pt, rec), accuracy, trust, jump_weight in zip(selected, accuracies, ranges, jump_weights):
         reading = rec.get("_outdoor_reading", {})
         diagnostic = measurement_reliability(
             environment, pt[:2], fix, policy=rec.get("outdoor_policy", "auto"),
@@ -208,6 +271,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
             "observed": reading.get("observed"),
             "base_jump_weight": jump_weight,
             **accuracy,
+            **trust,
         })
         diagnostics.append(diagnostic)
     try:
@@ -244,6 +308,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
         fix, base, scale, diagnostics, bounds=bounds, previous=previous,
     )
     quality["receiver_diagnostics"] = diagnostics
+    quality["range_trust_enabled"] = bool(nearby_trust)
     quality["fence_paths"] = sum(d.get("fence_paths", 0) > 0 for d in diagnostics)
     quality["fence_crossings"] = sum(d.get("fence_crossings", 0) for d in diagnostics)
     quality.update(indoor)
@@ -275,6 +340,9 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
                 **rec.get("_outdoor_reading", {}),
                 "corrected_distance_m": rec["distance"],
                 **receiver_accuracy(rec, rec["distance"]),
+                "range_trust_weight": 1.0,
+                "range_trust_distance_m": finite_number(rec["distance"], minimum=0.0),
+                "nearby_priority_reference_m": ranges[0]["nearby_priority_reference_m"],
             })
     return {"fix": fix, "weighted": base, "outdoor": quality}
 
