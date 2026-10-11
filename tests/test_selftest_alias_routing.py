@@ -96,6 +96,44 @@ def test_raw_window_does_not_follow_replacement_hardware(hass, monkeypatch, repl
     assert heard == {"shared_old": 0, "g1": 2, "g2": 2, "g3": 2}
 
 
+@pytest.mark.parametrize("upstairs", [False, True])
+@pytest.mark.parametrize("replacement", ["unchanged", "mac", "owner", "legacy"])
+def test_restored_off_mode_selftest_uses_observation_identity_and_routes(hass, monkeypatch, upstairs, replacement):
+    data, cal, _, devices = _sampled(hass, monkeypatch, upstairs=upstairs, renamed=upstairs)
+    expected = bps.run_selftest(hass)
+
+    async def restore():
+        await C.save_calibration_state(hass)
+        if replacement == "legacy":
+            hass._store_backing["bps_calibration_state"].pop("sample_geometry")
+        del hass.data["bps"]["calibration"]
+        await C.async_restore_calibration_state(hass)
+
+    asyncio.run(restore())
+    restored = C.get_calibration_state(hass)
+    assert restored["mode"] == "off" and not restored["receivers"]
+    if replacement in ("mac", "owner"):
+        entries = bps.er.async_get(hass).entities
+        for slug in ("shared_old", "shared_current"):
+            entry = entries[f"sensor.tag_distance_to_{slug}"]
+            if replacement == "mac":
+                entry.unique_id = "synthetic-tag_dd:ee:ff:10:20:00_range"
+            else:
+                entry.config_entry_id = "replacement-owner"
+        if replacement == "mac":
+            devices["shared_old"].address = "dd:ee:ff:10:20:00"
+    before = copy.deepcopy(restored["_auto_geometry"])
+    result = bps.run_selftest(hass)
+    assert restored["_auto_geometry"] == before and restored["mode"] == "off"
+    if replacement == "unchanged":
+        assert result == expected
+    else:
+        assert result["counts"]["solved"] == 0
+        assert result["counts"]["unsolved"] == result["counts"]["placed"]
+        for row in result["unsolved"]:
+            assert row["heard_by"] == (0 if replacement == "legacy" or row["entity"] in ("shared_old", "shared_current") else 2)
+
+
 def test_legacy_exact_samples_and_explicit_samples_override_remain_supported():
     hass = _hass_with(SQUARE, {})
     samples = _exact_samples(SQUARE)

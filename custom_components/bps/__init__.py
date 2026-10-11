@@ -3543,6 +3543,22 @@ def _selftest_snapshot(hass, samples=None):
     cal = get_calibration_state(hass)
     captured = cal.get("receivers") or {}
     routes = cal.get("_auto_routes") or {}
+    # Restore deliberately leaves live receiver maps empty until calibration
+    # starts. The persisted observation baseline still owns these raw samples.
+    # Its canonical routes and hardware proof also apply while auto is off.
+    baseline = cal.get("_auto_geometry")
+    require_proof = baseline is not None
+    if isinstance(baseline, dict):
+        if isinstance(baseline.get("floors"), dict) and isinstance(baseline.get("routes"), dict):
+            routes = baseline["routes"]
+            captured = {}
+            for floor, placements in baseline["floors"].items():
+                for slug, row in placements.items():
+                    canonical = routes.get(floor, {}).get(slug)
+                    if canonical is not None:
+                        captured.setdefault(canonical, row)
+        else:
+            captured, routes = baseline, {}
     by_identity, claims = {}, {}
     for slug, row in captured.items():
         identity = (row.get("scanner_config_entry_id"), row["scanner_mac"]) if row.get("scanner_mac") else None
@@ -3559,7 +3575,9 @@ def _selftest_snapshot(hass, samples=None):
         if len(proven) == 1:
             sample_slug = next(iter(proven))
         previous = captured.get(sample_slug)
-        if previous is not None:
+        if previous is None and require_proof:
+            sample_slug = None
+        elif previous is not None:
             identity = (previous.get("scanner_config_entry_id"), previous["scanner_mac"]) if previous.get("scanner_mac") else None
             if identity != row["identity"]:
                 sample_slug = None
