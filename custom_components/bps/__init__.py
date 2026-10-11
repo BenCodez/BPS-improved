@@ -671,13 +671,13 @@ async def update_tracked_entities(hass):
 
         # Runs on the first tick too, so a fresh deploy shows a value quickly.
         # The scipy solves run in the executor so the loop is never blocked; the
-        # calibration sample deques are snapshotted here on the loop thread first
-        # to avoid a "mutated during iteration" race with calibration's ingest.
+        # bindings, geometry and calibration deques are snapshotted here on the
+        # loop thread first, before calibration ingest or layout edits can run.
         if now_ts - getattr(update_tracked_entities, "last_selftest", 0.0) >= SELFTEST_SENSOR_INTERVAL:
             update_tracked_entities.last_selftest = now_ts
             try:
-                samples = {k: list(v) for k, v in get_calibration_state(hass).get("samples", {}).items()}
-                result = await hass.async_add_executor_job(run_selftest, hass, samples)
+                snapshot = _selftest_snapshot(hass)
+                result = await hass.async_add_executor_job(run_selftest, None, None, snapshot)
                 state, attrs = _selftest_summary(result)
                 update_bps_sensor_state(hass, ACCURACY_ENTITY_ID, state, attrs)
             except Exception as e:  # never let the diagnostic sensor stall tracking
@@ -968,6 +968,12 @@ def _scanner_linking(hass, coordinates_json):
     matching = receiver_inventory(hass)
     options = {row["entity_id"]: row for row in matching["options"]}
     sources = ReceiverSources(hass)
+    owned_by_identity = {}
+    if sources.registry is not None:
+        # Group the snapshot once; scanning every tracker/scanner reading for
+        # each placement would block the event loop with quadratic work.
+        for (_tracker, identity), eids in sources.readings.items():
+            owned_by_identity.setdefault(identity, set()).update(eids)
     rows, placed_slugs = [], set()
     for floor in _receiver_floors(coordinates_json):
         for index, (rec, binding) in enumerate(zip(floor.get("receivers", []), sources.floor_bindings(floor))):
@@ -976,7 +982,9 @@ def _scanner_linking(hass, coordinates_json):
             sensors = sorted((sensor for alias in binding["aliases"] for sensor in by_slug.get(alias, [])), key=lambda row: row["entity_id"])
             if sources.registry is not None:
                 key = binding["identity"] or slug
-                owned = {eid for (tracker, identity), eids in sources.readings.items() if identity == key for eid in eids}
+                # Malformed legacy slugs may be lists/dicts. Copy the group so
+                # exact legacy fallbacks remain local to this placement.
+                owned = set(owned_by_identity.get(key, ())) if isinstance(key, (str, tuple)) else set()
                 for tracker in {sensor["device"] for sensor in sensors}:
                     source, state = sources.source(tracker, rec, binding)
                     if state is not None:
@@ -1287,7 +1295,7 @@ async def update_receiver_liveness(hass):
     dom["rl_unknown"] = sorted(s for s, status in resolved.items() if status is None)
 
 
-async def update_receiver_radii(hass, eids):
+async def update_receiver_radii(hass, eids, receiver_sources=None):
     """Update receiver 'r' values (pixels) and raw 'distance' (meters) for an entity"""
     tracker_h = _tracker_height(eids["data"], eids["entity"])
     tracker_factor = _tracker_distance_factor(eids["data"], eids["entity"])
@@ -1297,7 +1305,7 @@ async def update_receiver_radii(hass, eids):
     capture = bool(recording and recording.active and eids["entity"] in recording.sources)
     if outdoor:
         max_age = finite_number(max_age, READING_MAX_AGE_SECS, minimum=0.0, maximum=1e6)
-    sources = ReceiverSources(hass)
+    sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass)
     for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
         for receiver, binding in zip(floor["receivers"], sources.floor_bindings(floor)):
             receiver.pop("distance", None)
@@ -1987,9 +1995,9 @@ def update_bps_sensor_state(hass, entity_id, state, attributes=None, *, only_cha
         return
     sensor.async_write_ha_state()
 
-async def process_single_entity(hass, new_global_data, eids):
+async def process_single_entity(hass, new_global_data, eids, receiver_sources=None):
     """Process a single entity: first receivers, then trilateration"""
-    await update_receiver_radii(hass, eids)  # Wait for the receivers to update
+    await update_receiver_radii(hass, eids, receiver_sources)  # Wait for the receivers to update
     await update_trilateration_and_zone(hass, new_global_data, eids["entity"])  # When it is complete → perform trilateration
 
 async def process_entities(hass, new_global_data):
@@ -2000,13 +2008,14 @@ async def process_entities(hass, new_global_data):
     async with lock:
         if not _tracking_context_current(context):
             return
+        receiver_sources = ReceiverSources(hass)
         token = _tracking_context.set(context)
         slots = asyncio.Semaphore(MAX_CONCURRENT_TRACKERS)
 
         async def process(eids):
             async with slots:
                 if _tracking_context_current(context):
-                    await process_single_entity(hass, new_global_data, eids)
+                    await process_single_entity(hass, new_global_data, eids, receiver_sources)
 
         try:
             # gather's default raises before surviving siblings finish, letting
@@ -3393,7 +3402,7 @@ SELFTEST_SENSOR_INTERVAL = 1800  # refresh the accuracy sensor every 30 min
 
 
 def _selftest_receivers(coords):
-    """slug -> {entity, x, y, scale, floor, height, correction} for every placement."""
+    """(floor, slug) -> geometry for each usable floor-local placement."""
     out = {}
     if not isinstance(coords, dict):
         return out
@@ -3408,7 +3417,7 @@ def _selftest_receivers(coords):
                 continue
             height = rec.get("height")
             corr = rec.get("correction")
-            out[str(eid)] = {
+            out[(floor.get("name"), str(eid))] = {
                 "entity": str(eid),
                 "x": float(cords["x"]),
                 "y": float(cords["y"]),
@@ -3416,8 +3425,53 @@ def _selftest_receivers(coords):
                 "floor": floor.get("name"),
                 "height": float(height) if isinstance(height, (int, float)) and 0 <= height <= 10 else None,
                 "correction": float(corr) if isinstance(corr, (int, float)) and corr > 0 else 1.0,
+                "identity": (rec.get("scanner_config_entry_id"), rec["scanner_mac"])
+                if rec.get("scanner_mac") else None,
             }
     return out
+
+
+def _selftest_snapshot(hass, samples=None):
+    """Detach registry bindings, current geometry and raw distances on the loop.
+
+    Calibration stores each physical scanner under one canonical sample slug;
+    placements on other floors retain their own geometry and displayed slug.
+    Captured hardware proof keeps an old window from following a replacement
+    scanner merely because it inherited the same label.
+    """
+    coords = get_bps_data(hass)
+    coords = ReceiverSources(hass).calibration_layout(coords if isinstance(coords, dict) else {})
+    receivers = _selftest_receivers(coords)
+    cal = get_calibration_state(hass)
+    captured = cal.get("receivers") or {}
+    routes = cal.get("_auto_routes") or {}
+    by_identity, claims = {}, {}
+    for slug, row in captured.items():
+        identity = (row.get("scanner_config_entry_id"), row["scanner_mac"]) if row.get("scanner_mac") else None
+        if identity:
+            by_identity.setdefault(identity, set()).add(slug)
+    for (_, slug), row in receivers.items():
+        claims.setdefault(slug, set()).add(row["identity"] or ("exact", slug))
+    ambiguous = {slug for slug, identities in claims.items() if len(identities) != 1}
+    ambiguous.update(cal.get("_auto_ambiguous_slugs") or ())
+    receivers = {key: row for key, row in receivers.items() if key[1] not in ambiguous}
+    for (floor, slug), row in receivers.items():
+        sample_slug = routes.get(floor, {}).get(slug, slug)
+        proven = by_identity.get(row["identity"], ())
+        if len(proven) == 1:
+            sample_slug = next(iter(proven))
+        previous = captured.get(sample_slug)
+        if previous is not None:
+            identity = (previous.get("scanner_config_entry_id"), previous["scanner_mac"]) if previous.get("scanner_mac") else None
+            if identity != row["identity"]:
+                sample_slug = None
+        row["sample_slug"] = sample_slug
+    return {
+        "receivers": receivers,
+        "bounds": _selftest_floor_bounds(coords, receivers),
+        "samples": {key: list(values) for key, values in
+                    (samples if samples is not None else cal.get("samples", {})).items()},
+    }
 
 
 def _selftest_floor_bounds(coords, receivers):
@@ -3448,24 +3502,22 @@ def _selftest_floor_bounds(coords, receivers):
     return out
 
 
-def run_selftest(hass, samples=None):
+def run_selftest(hass, samples=None, snapshot=None):
     """Leave-one-out receiver self-localization accuracy against known positions.
 
     Solves on the RAW inter-receiver distances BPS collects for calibration
     (median per link), not the Bermuda-filtered distance sensor the live tracker
     reads — so the numbers also exclude Bermuda's own smoothing.
 
-    ``samples`` may be a pre-snapshotted ``{"tx|rx": [floats]}`` taken on the
-    event loop; callers running this in the executor MUST pass one, since the
-    live calibration deques are appended to on the loop and iterating them off
-    thread would race ("deque mutated during iteration"). Defaults to the live
-    samples for direct/synchronous callers.
+    Direct/synchronous callers may pass ``samples={"tx|rx": [floats]}`` or use
+    the live window. Executor callers MUST pass ``_selftest_snapshot(hass)``
+    taken on the event loop as ``snapshot``: registry/model access and copying
+    the sample deques must finish before calibration or the layout can change.
     """
-    coords = get_bps_data(hass)
-    receivers = _selftest_receivers(coords)
-    floor_bounds = _selftest_floor_bounds(coords, receivers)
-    if samples is None:
-        samples = get_calibration_state(hass).get("samples", {})
+    snapshot = snapshot if snapshot is not None else _selftest_snapshot(hass, samples)
+    receivers = snapshot["receivers"]
+    floor_bounds = snapshot["bounds"]
+    samples = snapshot["samples"]
 
     def _measured_m(target, rx):
         # The live tracker sees the beacon (target) transmit and a receiver hear
@@ -3477,12 +3529,15 @@ def run_selftest(hass, samples=None):
         return float(np.median(vals))
 
     solved, unsolved = [], []
-    for slug, tgt in receivers.items():
+    for key, tgt in receivers.items():
+        slug = tgt["entity"]
         pts = []
-        for oslug, o in receivers.items():
-            if oslug == slug or o["floor"] != tgt["floor"]:
+        for other_key, o in receivers.items():
+            if other_key == key or o["floor"] != tgt["floor"]:
                 continue
-            raw = _measured_m(slug, oslug)
+            if tgt["sample_slug"] is None or o["sample_slug"] is None:
+                continue
+            raw = _measured_m(tgt["sample_slug"], o["sample_slug"])
             if raw is None:
                 continue
             d = raw * o["correction"]  # receiving scanner's correction (live path)
@@ -3760,9 +3815,7 @@ class BPSSelfTestAPI(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request):
-        # One scipy solve per receiver; run off the event loop. Snapshot the
-        # calibration sample deques HERE (on the loop) before handing to the
-        # executor, so iterating them off-thread can't race calibration's ingest.
-        samples = {k: list(v) for k, v in get_calibration_state(self.hass).get("samples", {}).items()}
-        data = await self.hass.async_add_executor_job(run_selftest, self.hass, samples)
+        # Bind aliases and detach geometry/samples before leaving the loop.
+        snapshot = _selftest_snapshot(self.hass)
+        data = await self.hass.async_add_executor_job(run_selftest, None, None, snapshot)
         return web.json_response(data)

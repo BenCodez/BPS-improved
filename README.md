@@ -704,6 +704,8 @@ at the same location remain independent. Receiver calibration uses the same
 identity evidence and deduplicates physical scanner observations.
 Applying a correction keeps equivalent same-floor aliases synchronized. Automatic
 calibration uses each floor's own geometry when a scanner is shared between floors.
+The receiver self-test also uses each floor's placements and routes raw sample
+links through proven aliases, counting equivalent same-floor placements once.
 Manual results capture the scanner MAC and owner so their corrections follow the
 same hardware after a rename. Legacy results without that proof need a fresh
 solve before applying to a renamed placement.

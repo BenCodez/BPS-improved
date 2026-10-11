@@ -20,7 +20,8 @@ class ReceiverSources:
         # expand aliases. Real HA always supplies the entity registry.
         self.matching = inventory(hass) if self.registry is not None else {"options": []}
         self.options = {o["entity_id"]: o for o in self.matching["options"]}
-        self.by_identity, self.owners_by_mac, self.readings, self.tracker_ids = {}, {}, {}, {}
+        self.by_identity, self.owners_by_mac, self.readings, self.tracker_ids, self.reading_proofs = {}, {}, {}, {}, {}
+        self.tracker_proofs = {}
         self.owners_by_mac.update({mac: set(owners) for mac, owners in self.matching.get("mac_owners", {}).items()})
         for option in self.options.values():
             key = self.option_identity(option)
@@ -37,9 +38,11 @@ class ReceiverSources:
             # Disabled exact entities remain identity evidence for the beacon,
             # but never contribute a reading or expand the source inventory.
             self.tracker_ids[eid] = uid[:match.start()] if match else None
+            self.tracker_proofs[eid] = (uid, getattr(ent, "config_entry_id", None))
             if getattr(ent, "disabled_by", None) is not None:
                 continue
             owner = getattr(ent, "config_entry_id", None)
+            self.reading_proofs[eid] = (uid, owner)
             key = (owner, match[1].lower()) if match and isinstance(owner, str) and owner else None
             self.readings.setdefault((tracker, key or slug), []).append(eid)
 
@@ -116,6 +119,12 @@ class ReceiverSources:
             return direct, None
         if self.registry is None:
             return direct, self.hass.states.get(direct)
+        exact = self.registry.entities.get(direct)
+        if exact is not None and (exact.platform != "bermuda" or
+                (getattr(exact, "unique_id", "") or "", getattr(exact, "config_entry_id", None)) != self.tracker_proofs.get(direct)):
+            # Even a disabled exact entity anchors tracker identity. Changed or
+            # newly introduced proof takes effect in the next batch only.
+            return direct, None
         key = binding["identity"] or receiver.get("entity_id", "")
         candidates = list(self.readings.get((tracker, key), []))
         # Runtime identity can upgrade an exact legacy entity whose unique ID
@@ -134,6 +143,10 @@ class ReceiverSources:
             identities = {self.tracker_ids.get(eid) for eid in candidates}
             if len(identities) > 1 or None in identities:
                 candidates = [eid for eid in candidates if eid == direct]
+        # The index is shared across a tracking batch. Registry edits while
+        # another tracker awaits its solver must not lend replacement hardware
+        # the captured source identity. These are constant-time candidate checks.
+        candidates = [eid for eid in candidates if self._reading_current(eid)]
         clock = time.time() if now is None else now
         future = set()
         valid = []
@@ -165,6 +178,11 @@ class ReceiverSources:
         # numeric tracking consumers reject it without rejuvenating its clock.
         fallback = direct if direct in candidates else next(iter(sorted(candidates)), direct)
         return fallback, self.hass.states.get(fallback) if fallback in candidates and fallback not in future else None
+
+    def _reading_current(self, eid):
+        entry = self.registry.entities.get(eid)
+        return (entry is not None and entry.platform == "bermuda" and getattr(entry, "disabled_by", None) is None
+                and (getattr(entry, "unique_id", "") or "", getattr(entry, "config_entry_id", None)) == self.reading_proofs.get(eid))
 
     def calibration_layout(self, coords):
         """Augment detached geometry with proven owner/MAC, exclude duplicates."""
