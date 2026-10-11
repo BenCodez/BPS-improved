@@ -138,6 +138,21 @@ def test_recent_report_budget_preserves_large_live_snapshot():
     assert parsed["recent_tracking"]["metadata"]["export_truncated"] is True
 
 
+def test_recent_unicode_history_keeps_live_report_within_byte_budget():
+    history = recent.RecentTrackingHistory()
+    positions = [{"ent": "tag" + str(i), "floor": "é" * 128, "zone": "é" * 128}
+                 for i in range(64)]
+    for now in range(100, 180, 2):
+        history.append(recent.pack({"time": now, "context": {}, "positions": positions}))
+    snapshot = {"live": "x" * 2500000, "_recent_tracking_snapshot": history.snapshot(180)}
+    text = diag.format_report(snapshot)
+    assert len(text.encode()) <= diag.MAX_REPORT_BYTES
+    report = json.loads(text[text.index("{"):])
+    assert report["live"] == snapshot["live"]
+    assert report["recent_tracking"]["frames"][-1]["positions"] == positions
+    assert report["recent_tracking"]["metadata"]["export_truncated"] is True
+
+
 def test_recent_history_samples_completed_batch_and_group_once(hass, monkeypatch):
     async def scenario():
         configure(hass, monkeypatch)

@@ -61,7 +61,7 @@ def format_report(snapshot):
             "Positions and current sensor readings have separate timestamps. Coordinates are map pixels; floor scale is pixels/metre.\n"
             )
     def render():
-        return header + json.dumps(report, indent=2, allow_nan=False)
+        return header + json.dumps(report, indent=2, allow_nan=False, ensure_ascii=False)
     text = render()
     if recent is not None:
         # Reserve space for frontend panel context and nested JSON indentation.
@@ -77,6 +77,17 @@ def format_report(snapshot):
                 "Contexts are saved backend settings; unsaved panel placements are only in the live panel context. "
                 "Window, byte limits and export truncation can shorten coverage. Restart/unload clears history.")
             text = render()
+            # Account for the final nested representation, not just the
+            # standalone history export. Preserve live data if it cannot fit.
+            while len(text.encode("utf-8")) > MAX_REPORT_BYTES and budget >= 4096:
+                guide = report["recent_tracking"]["guide"]
+                budget //= 2
+                report["recent_tracking"] = recent_tracking.export_snapshot(recent, budget)
+                report["recent_tracking"]["guide"] = guide
+                text = render()
+            if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
+                report.pop("recent_tracking")
+                text = render()
         else:
             report["recent_tracking"] = {"metadata": {"export_truncated": True},
                 "reason": "Live report leaves insufficient space for recent history"}
