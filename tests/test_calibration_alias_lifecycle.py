@@ -95,6 +95,40 @@ def test_manual_and_auto_apply_keep_equivalent_alias_corrections_equal_and_track
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("alias_kind", ["same", "different", "ambiguous", "absent"])
+def test_manual_apply_after_rematch_uses_only_proven_alias_identity(hass, monkeypatch, alias_kind):
+    async def scenario():
+        data, macs, devices = fixture(hass, monkeypatch)
+        cal = C.get_calibration_state(hass)
+        cal["results"]["Ground"] = {"floor": "Ground", "receivers": {"shared_old": .8, "g1": .9},
+            "pairs_used": 6, "error_factor_before": 2., "error_factor_after": 1.}
+        current = data["floor"][0]["receivers"][0]
+        current.update(entity_id="shared_current", scanner_mac=macs["shared_current"], scanner_config_entry_id="entry")
+        registry = bps.er.async_get(hass).entities
+        if alias_kind == "different":
+            registry["sensor.tag_distance_to_shared_old"].unique_id = "synthetic-tag_aa:bb:cc:99:88:77_range"
+        elif alias_kind == "ambiguous":
+            registry["sensor.other_distance_to_shared_old"] = NS(entity_id="sensor.other_distance_to_shared_old",
+                unique_id="synthetic-tag_aa:bb:cc:99:88:77_range", platform="bermuda", config_entry_id="entry", disabled_by=None)
+        elif alias_kind == "absent":
+            del registry["sensor.tag_distance_to_shared_old"]
+        await save_bps_data(hass, data)
+        assert await C.apply_corrections(hass, cal, "Ground") == (2 if alias_kind == "same" else 1)
+        saved = get_bps_data_for_edit(hass)["floor"][0]["receivers"]
+        assert saved[0]["correction"] == (.8 if alias_kind == "same" else 1.)
+        assert saved[1]["correction"] == .9
+        assert saved[0]["cords"] == current["cords"]
+        assert cal["applied"]["Ground"] == ({"shared_current": .8, "g1": .9} if alias_kind == "same" else {"g1": .9})
+    asyncio.run(scenario())
+
+
+def test_rematched_alias_updates_do_not_resolve_contradictory_solved_values(hass, monkeypatch):
+    data, macs, devices = fixture(hass, monkeypatch)
+    floor = data["floor"][0]
+    floor["receivers"][0]["entity_id"] = "shared_current"
+    assert C._equivalent_updates(hass, floor, {"shared_old": .8, "shared_current": 1.2}) == {}
+
+
 @pytest.mark.parametrize("conflict", ["cords", "correction", "outdoor_policy", "owner"])
 def test_manual_apply_never_repairs_preexisting_conflicting_alias_properties(hass, monkeypatch, conflict):
     async def scenario():

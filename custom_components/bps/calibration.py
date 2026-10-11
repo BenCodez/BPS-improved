@@ -320,6 +320,16 @@ def _equivalent_updates(hass, floor, updates):
     sources = ReceiverSources(hass)
     bindings = sources.floor_bindings(floor)
     proven = {}
+    placed = {str(rec.get("entity_id")) for rec in floor.get("receivers", [])}
+    # A manual result may still use the old slug after an explicit rematch.
+    # Only current full MAC + owner proof can carry that result to a new alias;
+    # absent or ambiguous inventory evidence must never guess a replacement.
+    for slug, correction in updates.items():
+        if slug in placed:
+            continue
+        binding = sources.binding({"entity_id": slug})
+        if binding["status"] == "matched" and binding["identity"]:
+            proven.setdefault(binding["identity"], set()).add(correction)
     for rec, binding in zip(floor.get("receivers", []), bindings):
         slug = str(rec.get("entity_id"))
         if binding["status"] in ("matched", "duplicate_scanner_alias") and binding["identity"] and slug in updates:
