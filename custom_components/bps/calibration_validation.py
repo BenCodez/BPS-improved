@@ -21,7 +21,8 @@ def number(value):
 def geometry(floor):
     return {"scale": floor.get("scale"), "zones": floor.get("zones", []),
             "environment": floor.get("environment", []),
-            "receivers": [{k: r.get(k) for k in ("entity_id", "scanner_uid", "height", "outdoor_policy", "distance_accuracy_m")} |
+            "receivers": [{k: r.get(k) for k in ("entity_id", "scanner_uid", "scanner_mac",
+                "scanner_config_entry_id", "height", "outdoor_policy", "distance_accuracy_m")} |
                 {"cords": {k: r.get("cords", {}).get(k) for k in ("x", "y")}}
                 for r in floor.get("receivers", [])]}
 
