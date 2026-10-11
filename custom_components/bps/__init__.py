@@ -2846,7 +2846,7 @@ def _diagnostic_inventory(hass):
 async def _calibration_tracking_check(hass, floor_name):
     """Compare detached diagnostic samples without touching live calibration."""
     from .calibration_validation import compare_tracking_export
-    from .calibration import _build_receiver_map
+    from .calibration import _build_receiver_map, _equivalent_updates
     dom = hass.data.setdefault(DOMAIN, {})
     if dom.get("calibration_validation_busy"):
         raise ValueError("A tracking comparison is already running")
@@ -2862,7 +2862,8 @@ async def _calibration_tracking_check(hass, floor_name):
     if floor is None:
         raise ValueError("Solve calibration for the selected floor first")
     # Freeze candidate and geometry before awaiting export/executor work.
-    corrections, floor = copy.deepcopy(result["receivers"]), copy.deepcopy(floor)
+    floor = copy.deepcopy(floor)
+    corrections = _equivalent_updates(hass, floor, copy.deepcopy(result["receivers"]))
     current_layout = copy.deepcopy(layout)
     eligible_receivers = set(_build_receiver_map(current_layout, floor["name"], hass=hass))
     baseline_corrections = {receiver.get("entity_id"): receiver.get("correction", 1)

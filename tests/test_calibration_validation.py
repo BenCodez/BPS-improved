@@ -183,6 +183,34 @@ def test_authenticated_calibration_test_uses_detached_recording(hass, monkeypatc
         asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
 
 
+def test_tracking_comparison_uses_corrections_apply_saves_after_proven_rematch(hass, monkeypatch):
+    from test_receiver_matching import configure
+    from bps import calibration as calibration
+    entries, states, devices, add = configure(hass, monkeypatch)
+    data, floor = recording()
+    floor['receivers'][0]['entity_id'] = 'r0_current'
+    for frame in data['frames']:
+        for row in frame['readings']:
+            if row['receiver'] == 'r0':
+                row['receiver'] = 'r0_current'
+    for index, slug in enumerate(['r0', 'r0_current', 'r1', 'r2', 'r3']):
+        mac = 'aa:bb:cc:11:22:33' if index < 2 else f'aa:bb:cc:44:55:{index:02x}'
+        add(f'sensor.tag_distance_to_{slug}', '4', uid='synthetic-tag_' + mac + '_range')
+    current = copy.deepcopy(data['contexts']['c']['layout'])
+    async def export():
+        return json.dumps(data).encode()
+    hass.data['bps'] = {'layout': current,
+        '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
+        'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS, 'solved_at': 'solve-date'}}}}
+    result = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
+    applied = calibration._equivalent_updates(hass, current['floor'][0], FACTORS)
+    assert result['candidate_corrections'] == applied == {'r0_current': .5, 'r1': 2., 'r2': 1., 'r3': 1.}
+    assert result['candidate_solved_at'] == 'solve-date'
+    assert result['verdict'] == 'improves'
+    assert result['candidate']['p95_m'] < .01
+    assert result['baseline']['samples'] == 20
+
+
 def test_tracking_test_compares_candidate_to_current_installed_corrections(hass):
     data, floor = recording()
     current = copy.deepcopy(data['contexts']['c']['layout'])
