@@ -10,7 +10,7 @@ import time
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
-from . import recent_tracking
+from . import recent_tracking, snapshot_truth
 
 LOGGER = logging.getLogger(__name__)
 INTERVAL_S = 2
@@ -100,6 +100,18 @@ def format_report(snapshot):
     if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
         raise ValueError("Full diagnostic report exceeds 4 MiB; reduce tracker/receiver scope before retrying")
     return text
+
+
+def format_known_position_report(snapshot, markers):
+    """Analyze and render one detached full report in the executor."""
+    comparison = snapshot_truth.analyse(snapshot, markers)
+    report = {**snapshot, "known_positions": [
+        {key: marker[key] for key in ("target", "floor", "x_m", "y_m", "accuracy_m", "label")}
+        for marker in comparison["markers"]], "known_position_comparison": comparison}
+    text = format_report(report)
+    if len(text.encode("utf-8")) + snapshot.get("_panel_bytes", 0) > MAX_REPORT_BYTES:
+        raise ValueError("Full diagnostic report and panel context exceed 4 MiB")
+    return {"text": text, "comparison": comparison, "read_only": True, "time": snapshot["time"]}
 
 
 class Recording:
@@ -308,6 +320,15 @@ class BPSDiagnosticsAPI(HomeAssistantView):
     def __init__(self, snapshot, inventory, report=None):
         self.snapshot, self.inventory = snapshot, inventory
         self.report = report
+        # This view is registered once per HA instance and survives BPS reloads.
+        self._snapshot_job = None
+
+    def _snapshot_finished(self, job):
+        if self._snapshot_job is job:
+            self._snapshot_job = None
+        # A disconnected/cancelled HTTP caller may no longer retrieve failures.
+        if not job.cancelled():
+            job.exception()
 
     async def get(self, request):
         hass = request.app["hass"]
@@ -339,12 +360,29 @@ class BPSDiagnosticsAPI(HomeAssistantView):
 
     async def post(self, request):
         hass = request.app["hass"]
-        recording = get_recording(hass, self.snapshot)
         try:
             body = await request.json()
             if not isinstance(body, dict):
                 raise ValueError("Body must be a JSON object")
             action = body.get("action")
+            if action == "snapshot":
+                if self.report is None:
+                    raise ValueError("Live diagnostic report is unavailable")
+                panel = body.get("panel_bytes", 0)
+                if isinstance(panel, bool) or not isinstance(panel, int) or not 0 <= panel <= MAX_REPORT_BYTES:
+                    raise ValueError("Invalid diagnostic panel byte reservation")
+                if self._snapshot_job is not None and not self._snapshot_job.done():
+                    return web.json_response({"error": "A known-position snapshot is already being prepared; try again after it completes"}, status=429)
+                snapshot = self.report(hass, time.time())
+                snapshot["_panel_bytes"] = panel
+                job = asyncio.ensure_future(hass.async_add_executor_job(format_known_position_report, snapshot, body.get("known_positions")))
+                self._snapshot_job = job
+                job.add_done_callback(self._snapshot_finished)
+                # Cancelling an HTTP request cannot stop its executor thread;
+                # keep the slot until actual completion, rather than queue more.
+                result = await asyncio.shield(job)
+                return web.Response(body=encode(result), content_type="application/json", headers={"Cache-Control": "no-store"})
+            recording = get_recording(hass, self.snapshot)
             if action == "start":
                 updater = hass.data.get("bps_update_task")
                 if not hass.data.get("bps_initialized") or updater is None or updater.done():

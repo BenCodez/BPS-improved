@@ -214,6 +214,7 @@ def test_concave_polygon_multiple_true_crossings():
 def test_settings_opt_in_and_no_layout_mutation():
     old = {"floor": []}
     assert outdoor_settings(old) == {"enabled": False, "show_uncertainty": True,
+                                    "obstruction_strength": 1.0,
                                     "hide_uncertainty_below_m": 0.0}
     assert old == {"floor": []}
     assert outdoor_settings({"outdoor_tracking": {"enabled": "yes"}})["enabled"] is False

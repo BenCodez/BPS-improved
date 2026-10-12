@@ -27,6 +27,9 @@ MAX_ENVIRONMENT_VERTICES = 256
 MAX_COORDINATE_PX = 10_000_000.0
 MIN_RELIABILITY = 0.05
 MIN_ENVIRONMENT_WEIGHT = 0.15
+MAX_OBSTRUCTION_STRENGTH = 4.0
+VEGETATION_DEPTH_REFERENCE_M = 10.0
+MAX_VEGETATION_EXPONENT = 16.0
 BUILDING_BOUNDARY_WEIGHTS = {"unknown": 0.80, "light": 0.90,
                              "wood": 0.90, "heavy": 0.65, "metal": 0.50}
 VEGETATION_WEIGHTS = {"dense_trees": 0.75, "light_vegetation": 0.90,
@@ -75,6 +78,9 @@ def outdoor_settings(layout):
         settings = {}
     return {"enabled": settings.get("enabled") is True,
             "show_uncertainty": settings.get("show_uncertainty", True) is not False,
+            "obstruction_strength": finite_number(
+                settings.get("obstruction_strength"), 1.0,
+                minimum=1.0, maximum=MAX_OBSTRUCTION_STRENGTH),
             "hide_uncertainty_below_m": finite_number(
                 settings.get("hide_uncertainty_below_m"), 0.0,
                 minimum=0.0, maximum=10_000.0)}
@@ -229,8 +235,13 @@ def _crossed_wall(region, point):
             "point": list(point)}
 
 
-def _path_result():
+def _path_result(scale_px_per_m=None, obstruction_strength=1.0):
     return {"environmental_weight": 1.0, "classification": "clear",
+              "mapped_environmental_weight": 1.0,
+              "obstruction_strength": obstruction_strength,
+              "path_scale_px_per_m": scale_px_per_m,
+              "path_start_px": None, "path_end_px": None,
+              "vegetation_depth_m": 0.0 if scale_px_per_m is not None else None,
               "building_crossings": 0, "building_paths": 0,
               "fence_crossings": 0, "fence_paths": 0,
               "vegetation_paths": 0, "custom_paths": 0,
@@ -250,24 +261,38 @@ def report_geometry_failure(error):
                     type(error).__name__, exc_info=True)
 
 
-def path_reliability(compiled, receiver_xy, fix_xy):
-    """Analyze paths; an unexpected geometry failure removes only obstruction trust."""
+def path_reliability(compiled, receiver_xy, fix_xy, *, scale_px_per_m=None,
+                     obstruction_strength=1.0):
+    """Analyze relative path trust, with optional bounded physical-depth tuning.
+
+    Strength one preserves historical map weights. Stronger explicit settings
+    reduce trust per crossed wall/fence and increase vegetation penalties for
+    paths deeper than ten metres. Neither ranges nor receiver data are changed.
+    Missing scale retains the flat vegetation rule rather than guessing metres.
+    """
+    scale = finite_number(scale_px_per_m, minimum=1e-6, maximum=1e6)
+    strength = finite_number(obstruction_strength, 1.0,
+                             minimum=1.0, maximum=MAX_OBSTRUCTION_STRENGTH)
     try:
-        return _path_reliability(compiled, receiver_xy, fix_xy)
+        return _path_reliability(compiled, receiver_xy, fix_xy, scale, strength)
     except Exception as error:
         report_geometry_failure(error)
-        result = _path_result()
+        result = _path_result(scale, strength)
         result.update(classification="unknown", environment_error=type(error).__name__)
         return result
 
 
-def _path_reliability(compiled, receiver_xy, fix_xy):
-    result = _path_result()
+def _path_reliability(compiled, receiver_xy, fix_xy, scale, strength):
+    result = _path_result(scale, strength)
     start, end = _xy(receiver_xy), _xy(fix_xy)
     if start is None or end is None:
         result.update(environmental_weight=MIN_ENVIRONMENT_WEIGHT,
+                      mapped_environmental_weight=MIN_ENVIRONMENT_WEIGHT,
                       classification="unknown", invalid_path=True)
         return result
+    # The live solver evaluates the preliminary fix once; refinement may move
+    # it. Preserve the evaluated path so diagnostics cannot imply re-evaluation.
+    result.update(path_start_px=list(start), path_end_px=list(end))
     if not isinstance(compiled, CompiledEnvironment) or not compiled.regions:
         return result
     kinds = set()
@@ -280,7 +305,8 @@ def _path_reliability(compiled, receiver_xy, fix_xy):
             single_weight = BUILDING_BOUNDARY_WEIGHTS[region.material]
             if region.thickness == "thin":
                 single_weight = 1.0 - 0.25 * (1.0 - single_weight)
-            weight = single_weight ** len(crossings)
+            base_weight = single_weight ** len(crossings)
+            weight = base_weight ** strength
             result["environmental_weight"] *= weight
             result["fence_crossings"] += len(crossings)
             result["fence_paths"] += 1
@@ -288,6 +314,8 @@ def _path_reliability(compiled, receiver_xy, fix_xy):
             result["intersections"].append({"id": region.identifier, "type": "fence",
                 "material": region.material, "thickness": region.thickness,
                 "fence_crossings": len(crossings), "crossing_points": [list(p) for p in crossings],
+                "base_weight": base_weight, "obstruction_strength": strength,
+                "depth_multiplier": 1.0, "path_length_m": None,
                 "weight": weight})
             continue
         inside = region.kind == "building" and point_relation(start, region.edges, region.bounds) == 1
@@ -297,16 +325,28 @@ def _path_reliability(compiled, receiver_xy, fix_xy):
         if interior_length <= 1e-9:
             continue
         kinds.add(region.kind)
+        length_m = interior_length / scale if scale is not None else None
+        depth_multiplier = 1.0
         if region.kind == "building":
             walls = [_crossed_wall(region, p) for p in crossing_points]
-            weight = math.prod(BUILDING_BOUNDARY_WEIGHTS[w["material"]] for w in walls)
+            base_weight = math.prod(BUILDING_BOUNDARY_WEIGHTS[w["material"]] for w in walls)
+            weight = base_weight ** strength
             result["reflection_risk"] |= any(w["material"] == "metal" for w in walls) or (
                 not walls and "metal" in tuple(m or region.material for m in
                     (region.wall_materials or (region.material,))))
             result["building_crossings"] += crossings
             result["building_paths"] += 1
         else:
-            weight = VEGETATION_WEIGHTS[region.kind]
+            base_weight = VEGETATION_WEIGHTS[region.kind]
+            exponent = strength
+            # Custom areas retain their generic flat-trust meaning. Physical
+            # depth applies only to mapped vegetation, never building interiors.
+            if region.kind != "custom" and length_m is not None:
+                result["vegetation_depth_m"] += length_m
+                exponent = min(MAX_VEGETATION_EXPONENT, strength + (strength - 1.0)
+                    * max(0.0, length_m / VEGETATION_DEPTH_REFERENCE_M - 1.0))
+            depth_multiplier = exponent / strength
+            weight = base_weight ** exponent
             key = "custom_paths" if region.kind == "custom" else "vegetation_paths"
             result[key] += 1
         result["environmental_weight"] *= weight
@@ -314,10 +354,15 @@ def _path_reliability(compiled, receiver_xy, fix_xy):
                                          "material": region.material,
                                          "boundary_crossings": crossings,
                                          "path_length_px": interior_length,
+                                         "path_length_m": length_m,
+                                         "base_weight": base_weight,
+                                         "obstruction_strength": strength,
+                                         "depth_multiplier": depth_multiplier,
                                          **({"wall_crossings": walls} if region.kind == "building" else {}),
                                          "weight": weight})
     result["environmental_weight"] = max(MIN_ENVIRONMENT_WEIGHT,
                                            result["environmental_weight"])
+    result["mapped_environmental_weight"] = result["environmental_weight"]
     for kind in ("building", "fence", "dense_trees", "light_vegetation", "custom"):
         if kind in kinds:
             result["classification"] = kind
@@ -326,14 +371,16 @@ def _path_reliability(compiled, receiver_xy, fix_xy):
 
 
 def measurement_reliability(compiled, receiver_xy, fix_xy, *, policy="auto",
-                            age_s=None, max_age_s=30.0, base_weight=1.0):
+                            age_s=None, max_age_s=30.0, base_weight=1.0,
+                            scale_px_per_m=None, obstruction_strength=1.0):
     """Combine optional policy/freshness with path trust, once per measurement.
 
     Missing age retains existing freshness behavior. Known readings past the
     caller's maximum age and the explicit ignore policy are excluded (zero);
     otherwise even heavily obstructed paths retain a safe nonzero weight.
     """
-    result = path_reliability(compiled, receiver_xy, fix_xy)
+    result = path_reliability(compiled, receiver_xy, fix_xy,
+        scale_px_per_m=scale_px_per_m, obstruction_strength=obstruction_strength)
     policy = receiver_policy(policy)
     age = finite_number(age_s, None, minimum=0.0)
     maximum = finite_number(max_age_s, 30.0, minimum=0.0)

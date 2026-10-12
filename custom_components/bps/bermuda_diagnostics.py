@@ -171,6 +171,20 @@ def snapshot(hass, now):
             "scanners": sum(getattr(device, "_is_scanner", None) is True for device in devices.values()),
             "missing_scanner_flag": sum(getattr(device, "_is_scanner", None) is None for device in devices.values()),
         }
+        def address_evidence(value):
+            valid = isinstance(value, str) and MAC.fullmatch(value) is not None
+            return {"value": value.lower() if valid else None, "valid": valid,
+                    "type": type(value).__name__, "length": len(value) if isinstance(value, str) else None,
+                    "colon_count": value.count(":") if isinstance(value, str) else None,
+                    "hyphen_count": value.count("-") if isinstance(value, str) else None}
+        scanners = [device for device in devices.values() if getattr(device, "_is_scanner", None) is True]
+        row["scanner_identity_validation"] = [{
+            "name": scalar(getattr(device, "name", None)),
+            "source_address": address_evidence(getattr(device, "address", None)),
+            "ble_address": address_evidence(getattr(device, "address_ble_mac", None)),
+            "wifi_address": address_evidence(getattr(device, "address_wifi_mac", None)),
+        } for device in scanners[:128]]
+        row["scanner_identity_validation_truncated"] = len(scanners) > 128
         for device in devices.values():
             if len(result["adverts"]) >= MAX_ADVERTS:
                 result["adverts_limit_reached"] = True

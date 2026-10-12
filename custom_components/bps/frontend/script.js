@@ -537,6 +537,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     const createZoneId = () => `zone_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     let isDrawing = false;
     let SelMapName = "";
+    let snapshotMapPick = null;
+    let snapshotMapMarker = null;
+    function cancelSnapshotMapPick() {
+        const pending = snapshotMapPick;
+        snapshotMapPick = null;
+        if (pending) pending.cancel();
+    }
     let new_floor = true;
     let removefile = false;
     let imgfilename = "";
@@ -3166,6 +3173,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     //Reset all buttons
     function buttonreset(){
+        cancelSnapshotMapPick();
         receiverPlacementSession++;
         cancelAdjust(); // starting any other tool drops an open adjust preview
         // Clear the value too (not just hide) so a distance typed then abandoned
@@ -3766,6 +3774,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (e.key !== 'Escape') return;
         // A confirm dialog owns Esc while open — don't also cancel the tool.
         if (document.querySelector('.bps-modal-overlay')) return;
+        if (snapshotMapPick) {cancelSnapshotMapPick(); return;}
         if (anyLayoutToolActive()) cancelActiveTool();
     });
 
@@ -4633,6 +4642,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     canvas.addEventListener("mousedown", (event) => {
+        if (snapshotMapPick) return;
         if (drawToolActive() || dragReceiverRef || panState) return;
         if (!mapReady()) return;
         const pos = zoneMousePos(event);
@@ -4951,6 +4961,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         let floor = finalcords.floor.find(floor => sameFloorName(floor.name, SelMapName)); //Add all existing
         drawEnvironmentPolygons(floor);
+        if (snapshotMapMarker && floor && sameFloorName(snapshotMapMarker.floor, floor.name)
+                && Number.isFinite(floor.scale) && floor.scale > 0) {
+            const x = snapshotMapMarker.x_m * floor.scale, y = snapshotMapMarker.y_m * floor.scale;
+            ctx.save(); ctx.strokeStyle = '#d946ef'; ctx.lineWidth = 2 / (view.zoom || 1);
+            ctx.beginPath(); ctx.moveTo(x - 7, y); ctx.lineTo(x + 7, y);
+            ctx.moveTo(x, y - 7); ctx.lineTo(x, y + 7); ctx.stroke(); ctx.restore();
+        }
 
         // A focused receiver that no longer exists releases the focus.
         if (focusedReceiver && !(floor && (floor.receivers || []).some(r => r.entity_id === focusedReceiver))) {
@@ -6335,14 +6352,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('outdoorControls').hidden = !settings.enabled;
         document.getElementById('outdoorUncertainty').checked = settings.show_uncertainty;
         document.getElementById('outdoorThreshold').value = settings.hide_uncertainty_below_m;
+        const strengthSelect = document.getElementById('outdoorObstructionStrength');
+        for (const option of Array.from(strengthSelect.options)) {
+            if (option.dataset.bpsCustomStrength === 'true') option.remove();
+        }
+        const strengthValue = String(settings.obstruction_strength);
+        if (!['1', '2', '3', '4'].includes(strengthValue)) {
+            const option = document.createElement('option');
+            option.value = strengthValue;
+            option.textContent = `Custom (${strengthValue})`;
+            option.dataset.bpsCustomStrength = 'true';
+            strengthSelect.appendChild(option);
+        }
+        strengthSelect.value = strengthValue;
     }
     function markOutdoorChanged() {
         savebuttondiv.appendChild(saveButton);
         if (mapReady()) redrawAll();
     }
-    for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold']) {
+    for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold', 'outdoorObstructionStrength']) {
         document.getElementById(id).addEventListener('change', () => {
             const threshold = Number(document.getElementById('outdoorThreshold').value);
+            const strength = Number(document.getElementById('outdoorObstructionStrength').value);
+            if (!Number.isFinite(strength) || strength < 1 || strength > 4) {
+                bpsToast('Tree / building influence must be from 1 to 4.'); syncOutdoorSettings(); return;
+            }
             if (!Number.isFinite(threshold) || threshold < 0 || threshold > outdoor.MAX_UNCERTAINTY_THRESHOLD_M) {
                 bpsToast('Uncertainty threshold must be a finite number from 0 to 10000 metres.');
                 syncOutdoorSettings();
@@ -6351,7 +6385,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             finalcords.outdoor_tracking = {...(finalcords.outdoor_tracking || {}),
                 enabled: document.getElementById('outdoorEnabled').checked,
                 show_uncertainty: document.getElementById('outdoorUncertainty').checked,
-                hide_uncertainty_below_m: threshold};
+                hide_uncertainty_below_m: threshold, obstruction_strength: strength};
             syncOutdoorSettings();
             if (!finalcords.outdoor_tracking.enabled && editTarget && editTarget.kind === 'environment') cancelShapeEdit();
             if (!finalcords.outdoor_tracking.enabled) {
@@ -6369,6 +6403,35 @@ document.addEventListener('DOMContentLoaded', async () => {
         renderOutdoorDiagnostics((lastTracks.get(activeDevice) || {}).payload);
         if (mapReady()) redrawAll();
     });
+    const snapshotLocationTools = {
+        validate() {
+            if (savebuttondiv.contains(saveButton)) throw new Error('Save Floor Plan before a known-position snapshot.');
+        },
+        pick(done, cancelled) {
+            if (!mapReady()) throw new Error('Open a saved floor map before picking the dog’s location.');
+            if (savebuttondiv.contains(saveButton)) throw new Error('Save Floor Plan before picking the dog’s actual location.');
+            if (anyLayoutToolActive() || adjustPreview || dragReceiverRef) throw new Error('Finish or cancel the map editing tool first.');
+            cancelSnapshotMapPick(); panState = null; clickCandidate = null; clickDeviceCandidate = null; clickLinkCandidate = null;
+            const cleanup = () => {canvas.removeEventListener('click', pick); snapshotMapPick = null;};
+            const pick = event => {
+                if (event.button !== undefined && event.button !== 0) return;
+                const floor = (finalcords.floor || []).find(f => sameFloorName(f.name, SelMapName));
+                if (!floor || !Number.isFinite(floor.scale) || floor.scale <= 0 || savebuttondiv.contains(saveButton)) {
+                    cleanup(); cancelled(); bpsToast('The saved floor or scale changed. Pick the location again after saving.'); return;
+                }
+                const point = zoneMousePos(event);
+                cleanup(); snapshotMapMarker = {floor: floor.name, x_m: point.x / floor.scale, y_m: point.y / floor.scale};
+                done(snapshotMapMarker); redrawAll();
+                const debug = [...tabButtons].find(b => b.dataset.tab === 'debugging'); debug?.click();
+            };
+            snapshotMapPick = {cancel() {cleanup(); cancelled();}};
+            canvas.addEventListener('click', pick);
+            const map = [...tabButtons].find(b => b.dataset.tab === 'map'); map?.click();
+            bpsToast('Click the dog’s actual location. This does not move receivers or change tracking.');
+            return () => cancelSnapshotMapPick();
+        },
+        clearPoint() {snapshotMapMarker = null; if (mapReady()) redrawAll();},
+    };
     function renderOutdoorDiagnostics(row) {
         const el = document.getElementById('outdoorDiagnosticText');
         el.hidden = !outdoor.settings(finalcords).enabled || !document.getElementById('outdoorDiagnostics').checked;
@@ -7099,7 +7162,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 display_uncertainty_m: position.outdoor?.display_uncertainty_m,
                 received_at: position.receivedAt / 1000})),
             editor_layout: editor};
-    });
+    }, snapshotLocationTools);
 
     // With a single configured floor there is nothing to choose: open it
     // right away. This must run LAST — drawElements touches state declared

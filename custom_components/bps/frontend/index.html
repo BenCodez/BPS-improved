@@ -337,6 +337,9 @@
                             <label class="bps-switch"><input type="checkbox" id="outdoorUncertainty"><span>Show estimated uncertainty</span></label>
                             <label class="bps-label" for="outdoorThreshold">Hide circle below (metres)</label>
                             <input id="outdoorThreshold" type="number" min="0" max="10000" step="0.1" class="bps-input" value="0">
+                            <label class="bps-label" for="outdoorObstructionStrength">Tree / building influence</label>
+                            <select id="outdoorObstructionStrength" class="bps-input"><option value="1">Standard</option><option value="2">Stronger</option><option value="3">Strong</option><option value="4">Maximum</option></select>
+                            <p class="bps-hint">Reduce trust in paths through mapped obstructions. Stronger settings also account for tree depth; distances remain unchanged. Start with Stronger and compare a known-position snapshot before increasing further.</p>
                             <label class="bps-switch"><input type="checkbox" id="outdoorDiagnostics"><span>Show tracking diagnostics</span></label>
                             <p class="bps-hint">Estimated uncertainty is a heuristic radius, not a guaranteed confidence interval. Grey dotted circles mark stale fixes.</p>
                             <p class="bps-hint">Select a saved floor and name the shape. Buildings and tree areas need at least three corners; fences need at least two points and stay open. Press ✓ Save, then Save Floor Plan.</p>
@@ -432,6 +435,17 @@
                 <div class="bps-btn-row">
                     <button type="button" id="diagnosticCopyAll" class="bps-btn bps-btn-primary">Copy full diagnostics</button>
                 </div>
+                <h4>Where is the dog actually?</h4>
+                <p>Keep the dog still, choose its tracker or group, and pick its actual location on the saved map. Capture one full BLE snapshot to compare the receiver ranges and estimated positions with that location. This mark applies only to that snapshot.</p>
+                <div class="bps-btn-row"><button type="button" id="diagnosticSnapshotLoad" class="bps-btn bps-btn-outline">Load dogs / floors</button><button type="button" id="diagnosticSnapshotPick" class="bps-btn bps-btn-outline">Pick actual location on map</button></div>
+                <div class="bps-field"><label for="diagnosticSnapshotTarget">Dog / tracker</label><select id="diagnosticSnapshotTarget"></select></div>
+                <div class="bps-field"><label for="diagnosticSnapshotFloor">Actual floor</label><select id="diagnosticSnapshotFloor"></select></div>
+                <div class="bps-field"><label for="diagnosticSnapshotX">Actual X (metres from map left)</label><input id="diagnosticSnapshotX" type="number" step="any"></div>
+                <div class="bps-field"><label for="diagnosticSnapshotY">Actual Y (metres from map top)</label><input id="diagnosticSnapshotY" type="number" step="any"></div>
+                <div class="bps-field"><label for="diagnosticSnapshotAccuracy">Location tolerance (m)</label><input id="diagnosticSnapshotAccuracy" type="number" value="1" min="0" max="100" step="any"></div>
+                <div class="bps-field"><label for="diagnosticSnapshotLabel">Snapshot note</label><input id="diagnosticSnapshotLabel" type="text" maxlength="240" placeholder="Dog stationary inside barn"></div>
+                <button type="button" id="diagnosticSnapshotCapture" class="bps-btn bps-btn-primary">Capture and copy at this location</button>
+                <div id="diagnosticSnapshotComparison" class="bps-calib-matrix"></div>
                 <p id="diagnosticReportStatus" role="status">After a tracking jump, copy full diagnostics promptly. Outdoor Tracking includes up to 10 minutes of recent local history.</p>
                 <div id="diagnosticReportPanel" hidden>
                     <div class="bps-field"><label for="diagnosticReportText">Diagnostic report</label><textarea id="diagnosticReportText" rows="14" readonly spellcheck="false" style="width:100%"></textarea></div>

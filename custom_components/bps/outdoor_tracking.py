@@ -9,7 +9,8 @@ import math
 
 from .environment import (CompiledEnvironment, compile_environment,
                           measurement_reliability, finite_number, report_geometry_failure,
-                          MIN_ENVIRONMENT_WEIGHT, MIN_RELIABILITY)
+                          MIN_ENVIRONMENT_WEIGHT, MIN_RELIABILITY,
+                          MAX_OBSTRUCTION_STRENGTH)
 from .environment_geometry import point_relation
 from .solver_settings import MIN_WEIGHT_RADIUS_M
 from .uncertainty import estimate_uncertainty
@@ -206,7 +207,8 @@ def _indoor_support(environment, selected, diagnostics, scale, max_age_s):
 
 
 def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
-                  previous, solver, *, position_timeout_s=300.0, nearby_trust=False):
+                  previous, solver, *, position_timeout_s=300.0, nearby_trust=False,
+                  obstruction_strength=1.0):
     """Return an outdoor candidate, or None with fewer than three usable inputs.
 
     ``weighted`` and ``floor.receivers`` share the ordering of the live candidate
@@ -216,6 +218,8 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
                  if r.get("distance") is not None and "r" in r.get("cords", {})]
     if finite_number(scale, minimum=1e-6, maximum=1e6) is None:
         return None
+    obstruction_strength = finite_number(obstruction_strength, 1.0,
+        minimum=1.0, maximum=MAX_OBSTRUCTION_STRENGTH)
     usable = [rec for rec in receivers if rec.get("outdoor_policy") != "ignore"]
     # Live floor extraction already excludes ignored receivers so they cannot
     # consume candidate-floor slots. Also accept unfiltered inputs for callers
@@ -266,6 +270,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
             environment, pt[:2], fix, policy=rec.get("outdoor_policy", "auto"),
             age_s=reading.get("reading_age_s"), max_age_s=max_age_s,
             base_weight=pt[3],
+            scale_px_per_m=scale, obstruction_strength=obstruction_strength,
         )
         if compilation_error:
             diagnostic.update(environment_error=compilation_error, classification="unknown")
@@ -290,7 +295,8 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
         for pt, diagnostic in zip(base, diagnostics):
             neutral = measurement_reliability(CompiledEnvironment(()), pt[:2], fix,
                 policy=diagnostic["policy"], age_s=diagnostic["reading_age_s"],
-                max_age_s=max_age_s, base_weight=pt[3])
+                max_age_s=max_age_s, base_weight=pt[3], scale_px_per_m=scale,
+                obstruction_strength=obstruction_strength)
             diagnostic.update(neutral, environment_error=type(error).__name__,
                               classification="unknown", indoor_support_strength=0.0,
                               indoor_range_weight=1.0, indoor_range_disagreement_m=0.0,
@@ -326,6 +332,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
     )
     quality["receiver_diagnostics"] = diagnostics
     quality["range_trust_enabled"] = bool(nearby_trust)
+    quality["obstruction_strength"] = obstruction_strength
     quality["fence_paths"] = sum(d.get("fence_paths", 0) > 0 for d in diagnostics)
     quality["fence_crossings"] = sum(d.get("fence_crossings", 0) for d in diagnostics)
     quality.update(indoor)

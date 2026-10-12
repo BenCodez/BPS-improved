@@ -8,7 +8,7 @@ import json
 import math
 
 from .outdoor_tracking import solve_outdoor
-from .environment import reading_max_age
+from .environment import reading_max_age, outdoor_settings
 from .uncertainty import estimate_uncertainty
 
 MAX_REPLAYS = 128
@@ -115,7 +115,8 @@ def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_
     bounds = (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
     if layout.get("outdoor_tracking", {}).get("enabled") is True:
         result = solve_outdoor(candidate, weighted, bounds, scale, .5 * scale,
-            max_age_s, None, solver, nearby_trust=True)
+            max_age_s, None, solver, nearby_trust=True,
+            obstruction_strength=outdoor_settings(layout)["obstruction_strength"])
         if result is None:
             return None
         fix, quality = result["fix"], result["outdoor"]

@@ -9,6 +9,12 @@ maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hog
 
 Quick list of changes in this fork:
 
+- A known-position snapshot captures all current BLE diagnostics while marking
+  where a dog actually is. Group markers compare both member beacons and the
+  group, rank current range disagreements, and report stale/missing readings,
+  map crossings and prior solver evidence separately from current observations.
+- Adjustable tree/building influence adds stronger obstruction trust penalties
+  and tree-depth weighting while leaving raw distances and calibration intact.
 - Home Assistant device links and registry iteration support the 2026.8/2026.9
   API changes while retaining compatibility with older cores.
 - Receiver matching uses Bermuda names and proven hardware identities. Old and
@@ -826,6 +832,37 @@ displayed tracker positions and smoothed circle sizes, plus editor placements
 that may contain unsaved changes. These are separate from the saved layout used
 by the backend; a map image or Lovelace card configuration is not embedded.
 No recording or tracker selection is needed.
+
+To diagnose a dog whose icon is off, use **Where is the dog actually?** in the
+same card. Load dogs/floors, select the dog group, then **Pick actual location
+on map** (or enter X/Y metres from the map's top-left). Keep the dog stationary
+for 30–60 seconds and press **Capture and copy at this location**. Save map
+edits first. This freezes a new full report with an instant-only truth mark;
+it does not move the tracker, start a recording, or change calibration.
+
+The comparison ranks current receiver range discrepancies against saved 3D
+geometry and shows the group/member position errors. Stale, missing, ambiguous,
+duplicate and unit-unknown readings are explicitly unscored. Mapped paths are
+evaluated at the supplied point, while prior solver evidence retains its older
+clock and evaluated path. At most 256 highest-error paths are assessed per
+snapshot, subject to a shared 250,000-unit geometry budget that accounts for
+vertex complexity before compilation and each path assessment. Omitted path
+assessments are labelled. One snapshot is prepared at a time per BPS instance;
+concurrent requests are rejected, including while a disconnected caller's
+worker is still finishing. All original BLE data remains
+in the report. A geometric disagreement can reflect smoothing, obstruction,
+incorrect placements/heights or calibration; it does not prove hardware failure.
+
+For stronger mapped obstruction effects, set **Map & Setup → Outdoor tracking
+→ Tree / building influence → Stronger** and save. Standard preserves previous
+behavior. Stronger levels account for depth through tree areas and reduce trust
+in wall/fence crossings, with bounded minimum trust; raw distances and receiver
+factors remain unchanged. Compare known-position snapshots before increasing
+the setting further. Incorrectly placed obstructions can worsen tracking.
+
+Bermuda scanner identity evidence includes source/Bluetooth/Wi-Fi address field
+types and validation outcomes. Invalid address values are omitted rather than
+exporting unknown identifiers or guessing MAC relationships.
 If clipboard access is unavailable, use the selectable text box and
 **Select report for manual copy**. Paste the report into your support message.
 It contains property geometry and tracker locations, but excludes map images,

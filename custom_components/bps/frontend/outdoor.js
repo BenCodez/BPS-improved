@@ -20,6 +20,8 @@
     function settings(layout) {
         const s = layout && layout.outdoor_tracking || {};
         return {enabled: s.enabled === true, show_uncertainty: s.show_uncertainty !== false,
+            obstruction_strength: number(s.obstruction_strength) && s.obstruction_strength >= 1
+                && s.obstruction_strength <= 4 ? s.obstruction_strength : 1,
             hide_uncertainty_below_m: number(s.hide_uncertainty_below_m) && s.hide_uncertainty_below_m >= 0
                 && s.hide_uncertainty_below_m <= MAX_UNCERTAINTY_THRESHOLD_M
                 ? s.hide_uncertainty_below_m : 0};
@@ -303,6 +305,7 @@
         if (Number.isFinite(displayLimit(out))) lines.push(`Display radius limit: ${display(out.display_radius_limit_m, ' m')} · nearest reporting receivers${out.estimated_uncertainty_m > displayLimit(out) ? ' · capped for display' : ''}${number(out.display_uncertainty_m) ? ' · displayed ' + display(out.display_uncertainty_m, ' m') : ''}`);
         if (out.environment_fallback) lines.push('Environmental geometry unavailable: neutral obstruction weights used; confidence reduced.');
         if (out.range_trust_enabled) lines.push('Nearby receiver priority: fresh reliable ranges within 5 m have strongest trust; trust declines beyond 10 m. Distant receivers still contribute direction.');
+        if (number(out.obstruction_strength)) lines.push(`Mapped obstruction influence: ×${display(out.obstruction_strength)} (relative trust; distances unchanged).`);
         const radiusInputs = (details, prefix = '') => {
             if (!details || typeof details !== 'object') return;
             if (number(details.noise_floor_m)) lines.push(`${prefix}Radius inputs: weighted residual ${display(details.residual_m, ' m')} · noise floor ${display(details.noise_floor_m, ' m')} · geometry ×${display(details.geometry_factor)} · effective receivers ${display(details.effective_receivers)}`);
@@ -322,6 +325,7 @@
         (out.receiver_diagnostics || []).forEach(r => {
             if (number(r.range_trust_weight)) lines.push(`${r.receiver}: distance trust ×${display(r.range_trust_weight)} · corrected slant ${display(r.range_trust_distance_m, ' m')}${number(r.nearby_priority_reference_m) ? ' · reference receiver range ' + display(r.nearby_priority_reference_m, ' m') : ''}`);
             lines.push(`${r.receiver}: measured ${display(r.measured_distance_m, ' m')}, corrected ${display(r.corrected_distance_m, ' m')}, age ${display(r.reading_age_s, ' s')}, ${r.classification || 'unknown'}, building crossings ${r.building_crossings ?? '—'}${r.fence_crossings !== undefined ? ', fence crossings ' + r.fence_crossings : ''}${r.reflection_risk ? ', reflection / multipath risk' : ''}, environment weight ${display(r.environmental_weight)}, reliability ${display(r.reliability_weight)}, ${r.status || 'unknown'}`);
+            if (number(r.mapped_environmental_weight)) lines.push(`${r.receiver}: mapped trust ${display(r.mapped_environmental_weight)} → effective ${display(r.environmental_weight)} · tree depth ${display(r.vegetation_depth_m, ' m')}`);
             (r.intersections || []).filter(item => item.type === 'fence').forEach(item => lines.push(
                 `${r.receiver}: ${item.name || item.id || 'Fence'} · ${item.material || 'unknown'} · ${item.thickness || 'solid'} · crossings ${item.fence_crossings ?? '—'} · trust weight ${display(item.weight)}`));
         });
