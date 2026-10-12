@@ -100,7 +100,15 @@
                 }
             }
         }
-        let status = {active: false, available: false}, timer = null, busy = false;
+        let status = {active: false, available: false}, timer = null, busy = false, cancelPick = null;
+        function invalidateSnapshotLocation(clearCoordinates) {
+            if (cancelPick) {cancelPick(); cancelPick = null;}
+            if (clearCoordinates) {
+                el('SnapshotX').value = ''; el('SnapshotY').value = '';
+            }
+            locationTools.clearPoint?.();
+            el('ReportStatus').textContent = 'Location changed. Pick or enter the location again before capturing current BLE data.';
+        }
         function controls() {
             ['Start', 'Stop', 'Download', 'Clear', 'Mark', 'Release', 'Note', 'Refresh'].forEach(name => {
                 const enabled = name === 'Start' ? !status.active && !!el('Target').value
@@ -122,6 +130,8 @@
             if (items.some(item => item.key === selected)) node.value = selected;
         }
         function render(next) {
+            const previousSnapshotTarget = el('SnapshotTarget')?.value;
+            const previousSnapshotFloor = el('SnapshotFloor')?.value;
             status = next;
             if (Array.isArray(next.trackers)) {
                 const items = next.trackers.slice();
@@ -132,6 +142,8 @@
             if (Array.isArray(next.floors)) options(el('Floor'), next.floors.map(key => ({key, name: key})));
             if (el('SnapshotTarget') && Array.isArray(next.trackers)) options(el('SnapshotTarget'), next.trackers);
             if (el('SnapshotFloor') && Array.isArray(next.floors)) options(el('SnapshotFloor'), next.floors.map(key => ({key, name: key})));
+            if (el('SnapshotCapture') && (previousSnapshotTarget !== el('SnapshotTarget').value
+                    || previousSnapshotFloor !== el('SnapshotFloor').value)) invalidateSnapshotLocation(true);
             el('Status').textContent = `${next.reason}. ${next.frames || 0} frames, ${((next.bytes || 0) / 1048576).toFixed(1)} MiB, ${next.annotations || 0} markers${next.active ? `, ${next.seconds_left}s remaining` : ''}.`;
             if (next.active && timer === null) timer = setInterval(() => {if (!busy) run(refresh);}, 5000);
             if (!next.active && timer !== null) {clearInterval(timer); timer = null;}
@@ -155,15 +167,9 @@
         }
         el('Refresh').addEventListener('click', () => run(refresh));
         if (el('SnapshotCapture')) {
-            let cancelPick = null;
             for (const name of ['SnapshotTarget', 'SnapshotFloor', 'SnapshotX', 'SnapshotY']) {
                 el(name).addEventListener('change', () => {
-                    if (cancelPick) {cancelPick(); cancelPick = null;}
-                    if (name === 'SnapshotTarget' || name === 'SnapshotFloor') {
-                        el('SnapshotX').value = ''; el('SnapshotY').value = '';
-                    }
-                    locationTools.clearPoint?.();
-                    el('ReportStatus').textContent = 'Location changed. Capture again to compare it with current BLE data.';
+                    invalidateSnapshotLocation(name === 'SnapshotTarget' || name === 'SnapshotFloor');
                 });
             }
             const marker = () => {

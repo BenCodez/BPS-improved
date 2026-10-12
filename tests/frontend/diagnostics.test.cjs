@@ -236,5 +236,27 @@ test('map picking populates the reference, cancels cleanly and selection changes
     await p.el('SnapshotLoad').fire(); await p.el('SnapshotPick').fire(); callback({floor: 'Yard', x_m: 2.125, y_m: 4.25});
     assert.equal(p.el('SnapshotX').value, '2.125'); assert.equal(p.el('SnapshotY').value, '4.250');
     await p.el('SnapshotPick').fire(); await p.el('SnapshotPick').fire(); assert.equal(cancels, 1);
-    await p.el('SnapshotTarget').fire('change'); assert.equal(p.el('SnapshotX').value, ''); assert.equal(clears, 1);
+    const previousClears = clears;
+    await p.el('SnapshotTarget').fire('change'); assert.equal(p.el('SnapshotX').value, ''); assert.equal(clears, previousClears + 1);
+});
+
+test('inventory refresh invalidates truth only when the selected dog or floor changes', async () => {
+    for (const removed of ['target', 'floor', 'both']) {
+        let cancels = 0, clears = 0;
+        const p = panel(null, {pick: () => () => {cancels++;}, clearPoint() {clears++;}});
+        await p.el('SnapshotLoad').fire();
+        p.el('SnapshotX').value = '3'; p.el('SnapshotY').value = '4';
+        await p.el('SnapshotLoad').fire();
+        assert.equal(p.el('SnapshotX').value, '3'); assert.equal(p.el('SnapshotY').value, '4');
+        await p.el('SnapshotPick').fire();
+        if (removed !== 'floor') p.network.status.trackers = [{key: 'beacon_other', name: 'Other dog'}];
+        if (removed !== 'target') p.network.status.floors = ['OtherFloor'];
+        const before = clears;
+        await p.el('Refresh').fire();
+        assert.equal(p.el('SnapshotX').value, ''); assert.equal(p.el('SnapshotY').value, '');
+        assert.equal(cancels, 1); assert.equal(clears, before + 1);
+        await p.el('SnapshotCapture').fire();
+        assert.equal(p.requests.filter(r => r.options?.method === 'POST').length, 0);
+        assert.match(p.el('ReportStatus').textContent, /actual location/);
+    }
 });
