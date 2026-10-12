@@ -10,7 +10,7 @@ import time
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
-from . import recent_tracking
+from . import recent_tracking, snapshot_truth
 
 LOGGER = logging.getLogger(__name__)
 INTERVAL_S = 2
@@ -100,6 +100,18 @@ def format_report(snapshot):
     if len(text.encode("utf-8")) > MAX_REPORT_BYTES:
         raise ValueError("Full diagnostic report exceeds 4 MiB; reduce tracker/receiver scope before retrying")
     return text
+
+
+def format_known_position_report(snapshot, markers):
+    """Analyze and render one detached full report in the executor."""
+    comparison = snapshot_truth.analyse(snapshot, markers)
+    report = {**snapshot, "known_positions": [
+        {key: marker[key] for key in ("target", "floor", "x_m", "y_m", "accuracy_m", "label")}
+        for marker in comparison["markers"]], "known_position_comparison": comparison}
+    text = format_report(report)
+    if len(text.encode("utf-8")) + snapshot.get("_panel_bytes", 0) > MAX_REPORT_BYTES:
+        raise ValueError("Full diagnostic report and panel context exceed 4 MiB")
+    return {"text": text, "comparison": comparison, "read_only": True, "time": snapshot["time"]}
 
 
 class Recording:
@@ -339,12 +351,22 @@ class BPSDiagnosticsAPI(HomeAssistantView):
 
     async def post(self, request):
         hass = request.app["hass"]
-        recording = get_recording(hass, self.snapshot)
         try:
             body = await request.json()
             if not isinstance(body, dict):
                 raise ValueError("Body must be a JSON object")
             action = body.get("action")
+            if action == "snapshot":
+                if self.report is None:
+                    raise ValueError("Live diagnostic report is unavailable")
+                panel = body.get("panel_bytes", 0)
+                if isinstance(panel, bool) or not isinstance(panel, int) or not 0 <= panel <= MAX_REPORT_BYTES:
+                    raise ValueError("Invalid diagnostic panel byte reservation")
+                snapshot = self.report(hass, time.time())
+                snapshot["_panel_bytes"] = panel
+                result = await hass.async_add_executor_job(format_known_position_report, snapshot, body.get("known_positions"))
+                return web.Response(body=encode(result), content_type="application/json", headers={"Cache-Control": "no-store"})
+            recording = get_recording(hass, self.snapshot)
             if action == "start":
                 updater = hass.data.get("bps_update_task")
                 if not hass.data.get("bps_initialized") or updater is None or updater.done():

@@ -261,6 +261,19 @@ test('uncertainty settings honor backend threshold bounds without rewriting stor
     assert.equal(JSON.stringify(layout), before);
 });
 
+test('obstruction strength settings match backend bounds and preserve old layouts', () => {
+    assert.equal(out.settings({}).obstruction_strength, 1);
+    for (const value of [1, 1.5, 2, 4]) {
+        assert.equal(out.settings({outdoor_tracking: {obstruction_strength: value}}).obstruction_strength, value);
+    }
+    for (const value of [0, 4.01, true, '2', null, NaN, Infinity]) {
+        const layout = {outdoor_tracking: {obstruction_strength: value}};
+        const before = JSON.stringify(layout);
+        assert.equal(out.settings(layout).obstruction_strength, 1);
+        assert.equal(JSON.stringify(layout), before);
+    }
+});
+
 test('uncertainty is radius in floor pixels, respects toggle/threshold, and rejects invalid numbers', () => {
     const config = out.settings({outdoor_tracking: {enabled: true, hide_uncertainty_below_m: 5}});
     assert.equal(out.uncertaintyRadius({estimated_uncertainty_m: 7.4}, 20, config), 148);

@@ -8,7 +8,8 @@ import re
 
 from .environment import (BUILDING_BOUNDARY_WEIGHTS, ENVIRONMENT_TYPES,
                           MAX_ENVIRONMENT_POLYGONS, MAX_ENVIRONMENT_VERTICES,
-                          RECEIVER_POLICIES, finite_number, normalize_environment)
+                          RECEIVER_POLICIES, finite_number, normalize_environment,
+                          MAX_OBSTRUCTION_STRENGTH)
 from .tracker_groups import MAX_GROUPS, MAX_BEACONS_PER_GROUP
 
 SLUG = re.compile(r"[a-z0-9_]{1,64}\Z", re.ASCII)
@@ -34,6 +35,10 @@ def validate_outdoor_layout(layout, known_trackers=None):
         if "hide_uncertainty_below_m" in settings and finite_number(
                 settings["hide_uncertainty_below_m"], minimum=0, maximum=10000) is None:
             return "Uncertainty hide threshold must be a finite number from 0 to 10000 metres"
+        if "obstruction_strength" in settings and finite_number(
+                settings["obstruction_strength"], minimum=1,
+                maximum=MAX_OBSTRUCTION_STRENGTH) is None:
+            return "Obstruction strength must be a finite number from 1 to 4"
     floors = layout.get("floor", [])
     receiver_count = 0
     for floor in floors if isinstance(floors, list) else []:

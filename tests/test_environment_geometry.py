@@ -126,8 +126,13 @@ def shapely_reference(records, start, end):
     Boundary-only intervals do not contribute attenuation. Crossings require a
     strict inside/outside transition within the path; endpoints have no implied
     extension. A corner selects the strongest attenuation of its incident walls.
+    The default strength-one call has no physical scale: depth metadata remains
+    unknown and each mapped contribution keeps its independently computed weight.
     """
     output = {"environmental_weight": 1.0, "classification": "clear",
+              "mapped_environmental_weight": 1.0, "obstruction_strength": 1.0,
+              "path_scale_px_per_m": None, "vegetation_depth_m": None,
+              "path_start_px": list(start), "path_end_px": list(end),
               "building_crossings": 0, "building_paths": 0,
               "fence_crossings": 0, "fence_paths": 0,
               "vegetation_paths": 0, "custom_paths": 0,
@@ -166,7 +171,8 @@ def shapely_reference(records, start, end):
         material = record["material"]
         details = {"id": record["id"], "type": kind, "material": material,
                    "boundary_crossings": len(crossings),
-                   "path_length_px": interior_length}
+                   "path_length_px": interior_length, "path_length_m": None,
+                   "obstruction_strength": 1.0, "depth_multiplier": 1.0}
         if kind == "building":
             walls = []
             for crossing in crossings:
@@ -190,9 +196,11 @@ def shapely_reference(records, start, end):
             weight = TREE_WEIGHTS[kind]
             output["custom_paths" if kind == "custom" else "vegetation_paths"] += 1
         details["weight"] = weight
+        details["base_weight"] = weight
         output["intersections"].append(details)
         output["environmental_weight"] *= weight
     output["environmental_weight"] = max(0.15, output["environmental_weight"])
+    output["mapped_environmental_weight"] = output["environmental_weight"]
     output["classification"] = next((kind for kind in
         ("building", "dense_trees", "light_vegetation", "custom") if kind in kinds), "clear")
     return output

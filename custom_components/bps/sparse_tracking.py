@@ -7,12 +7,13 @@ this anchor without position smoothing, zone snapping or assigning a zone.
 import math
 
 from .environment import (MAX_COORDINATE_PX, CompiledEnvironment, finite_number,
-                          measurement_reliability)
+                          measurement_reliability, MAX_OBSTRUCTION_STRENGTH)
 from .outdoor_tracking import nearby_range_trust, receiver_accuracy
 
 
 def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
-                           now, position_timeout_s=300.0, nearby_trust=False):
+                           now, position_timeout_s=300.0, nearby_trust=False,
+                           obstruction_strength=1.0):
     """Return a solver-shaped detection candidate for 1–2 distinct receivers.
 
     Inputs have the same ordering/units as ``solve_outdoor``: each weighted
@@ -32,6 +33,8 @@ def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
     now = finite_number(now, minimum=0.0)
     if scale is None or floor_scale != scale or now is None:
         return None
+    obstruction_strength = finite_number(obstruction_strength, 1.0,
+        minimum=1.0, maximum=MAX_OBSTRUCTION_STRENGTH)
     placements = floor.get("receivers")
     if not isinstance(placements, list) or not isinstance(weighted, (list, tuple)):
         return None
@@ -94,7 +97,8 @@ def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
         accuracy = receiver_accuracy(rec, pt[4] / scale)
         reliability = measurement_reliability(
             CompiledEnvironment(()), pt[:2], pt[:2], policy=rec.get("outdoor_policy", "auto"),
-            age_s=age, max_age_s=limit, base_weight=pt[3] * accuracy["accuracy_weight"])
+            age_s=age, max_age_s=limit, base_weight=pt[3] * accuracy["accuracy_weight"],
+            scale_px_per_m=scale, obstruction_strength=obstruction_strength)
         diag.update(reliability, **accuracy, classification="direction_unknown", path_assessed=False,
                     base_jump_weight=pt[3], range_trust_distance_m=pt[4] / scale,
                     horizontal_distance_m=pt[2] / scale, radius_px=pt[2])
@@ -164,6 +168,7 @@ def solve_sparse_detection(floor, weighted, scale, max_age_s, previous=None, *,
                "uncertainty_method": "sparse_receiver_detection",
                "receivers_used": len(selected), "observations_used": len(selected),
                "range_trust_enabled": bool(nearby_trust), "clear_paths": 0,
+               "obstruction_strength": obstruction_strength,
                "building_crossings": 0, "receiver_diagnostics": diagnostics,
                "observed": diag["observed"], "newest_reading_age_s": min(d["reading_age_s"] for _, d in selected.values()),
                "position_age_s": diag["reading_age_s"], "stale_after_s": limit,

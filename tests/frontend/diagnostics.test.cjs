@@ -4,7 +4,7 @@ const {readFileSync} = require('node:fs');
 const {join} = require('node:path');
 const vm = require('node:vm');
 
-function panel(panelSnapshot) {
+function panel(panelSnapshot, locationTools = {}) {
     const elements = new Map(), requests = [], timers = new Map(), downloads = [];
     let nextTimer = 1;
     function element(tag = 'div') {
@@ -17,10 +17,12 @@ function panel(panelSnapshot) {
             addEventListener(type, cb) {this.events[type] = cb;},
             fire(type = 'click') {return this.events[type]();}, click() {downloads.push({href: this.href, name: this.download});}};
     }
-    for (const name of ['CopyAll', 'ReportText', 'ReportStatus', 'ReportPanel', 'SelectReport', 'Start', 'Stop', 'Download', 'Clear', 'Mark', 'Release', 'Note', 'Refresh', 'Target', 'Duration', 'Floor', 'Status', 'X', 'Y', 'Label']) {
-        elements.set('diagnostic' + name, element(['Target', 'Duration', 'Floor'].includes(name) ? 'select' : 'input'));
+    for (const name of ['CopyAll', 'ReportText', 'ReportStatus', 'ReportPanel', 'SelectReport', 'Start', 'Stop', 'Download', 'Clear', 'Mark', 'Release', 'Note', 'Refresh', 'Target', 'Duration', 'Floor', 'Status', 'X', 'Y', 'Label',
+        'SnapshotLoad', 'SnapshotPick', 'SnapshotTarget', 'SnapshotFloor', 'SnapshotX', 'SnapshotY', 'SnapshotAccuracy', 'SnapshotLabel', 'SnapshotCapture', 'SnapshotComparison']) {
+        elements.set('diagnostic' + name, element(['Target', 'Duration', 'Floor', 'SnapshotTarget', 'SnapshotFloor'].includes(name) ? 'select' : 'input'));
     }
     elements.get('diagnosticDuration').value = '600';
+    elements.get('diagnosticSnapshotAccuracy').value = '1';
     const copied = [];
     const network = {error: null, pending: null, clipboardError: false, report: 'BPS full diagnostics\n{"trackers": ["tag", "tag2"]}',
         status: {active: false, available: false, targets: [], reason: 'Not started', frames: 0, annotations: 0, bytes: 0,
@@ -40,13 +42,20 @@ function panel(panelSnapshot) {
         if (url.includes('?report=1')) return {ok: true, status: 200, json: async () => ({text: network.report})};
         if (options) {
             const body = JSON.parse(options.body);
+            if (body.action === 'snapshot') return {ok: true, status: 200,
+                json: async () => ({text: network.report, read_only: true, time: 100,
+                    comparison: {time: 100, markers: body.known_positions.map(marker => ({...marker,
+                        summary: {disagreeing_readings: 1, unscored_readings: 0}, position_errors: [],
+                        ranked_readings: [{tracker: '<tag>', receiver: '<receiver>', status: 'current', expected_distance_m: 2,
+                            corrected_distance_m: 5, signed_error_m: 3, age_s: 1, environment: {intersections: [{type: 'building', material: 'metal'}]}}],
+                        unscored_readings: []}))}})};
             if (body.action === 'start') Object.assign(network.status, {active: true, available: true, targets: body.targets, frames: 1, reason: 'Recording', seconds_left: 600});
             if (body.action === 'stop') Object.assign(network.status, {active: false, reason: 'Stopped'});
             if (body.action === 'clear') Object.assign(network.status, {active: false, available: false, reason: 'Cleared'});
             if (body.action === 'annotate') network.status.annotations++;
         }
         return {ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(network.status)), blob: async () => 'diagnostic-blob'};
-    }, panelSnapshot);
+    }, panelSnapshot, locationTools);
     return {el, network, timers, requests, downloads, copied};
 }
 
@@ -169,4 +178,45 @@ test('failed requests preserve capture controls and concurrent clicks do not sen
     await p.el('Note').fire();
     assert.equal(p.el('Status').textContent, 'Marker limit reached');
     assert.equal(p.el('Stop').disabled, false); assert.equal(p.timers.size, 1);
+});
+
+test('known-position capture freezes truth, includes all BLE data and creates no recording or timers', async () => {
+    const p = panel(); await p.el('SnapshotLoad').fire();
+    p.el('SnapshotX').value = '0'; p.el('SnapshotY').value = '4.2'; p.el('SnapshotLabel').value = '<stationary>';
+    let release; p.network.pending = new Promise(resolve => {release = resolve;});
+    const pending = p.el('SnapshotCapture').fire();
+    await p.el('SnapshotCapture').fire();
+    p.el('SnapshotX').value = '9'; release(); p.network.pending = null; await pending;
+    const sent = p.requests.filter(r => r.options?.method === 'POST');
+    assert.equal(sent.length, 1);
+    assert.deepEqual(JSON.parse(sent[0].options.body), {action: 'snapshot', known_positions: [{target: 'bps_group_dog', floor: 'Yard',
+        x_m: 0, y_m: 4.2, accuracy_m: 1, label: '<stationary>'}], panel_bytes: 0});
+    assert.deepEqual(JSON.parse(p.copied[0].slice(p.copied[0].indexOf('{'))).trackers, ['tag', 'tag2']);
+    assert.equal(p.timers.size, 0); assert.equal(p.network.status.active, false);
+    const text = node => [node.textContent, ...node.children.map(text)].join(' ');
+    assert.match(text(p.el('SnapshotComparison')), /actual \(0.00, 4.20\).*<receiver>.*metal/);
+    assert.equal(p.el('SnapshotCapture').disabled, false);
+});
+
+test('snapshot location validation and unsaved-map guard preserve previous reports', async () => {
+    let unsaved = false;
+    const p = panel(null, {validate() {if (unsaved) throw new Error('Save Floor Plan first');}});
+    await p.el('CopyAll').fire(); const previous = p.el('ReportText').value;
+    await p.el('SnapshotCapture').fire(); assert.match(p.el('ReportStatus').textContent, /Load dogs/);
+    await p.el('SnapshotLoad').fire();
+    p.el('SnapshotX').value = ''; p.el('SnapshotY').value = '2';
+    await p.el('SnapshotCapture').fire(); assert.match(p.el('ReportStatus').textContent, /actual location/);
+    p.el('SnapshotX').value = 'Infinity'; await p.el('SnapshotCapture').fire(); assert.match(p.el('ReportStatus').textContent, /finite/);
+    p.el('SnapshotX').value = '1'; unsaved = true; await p.el('SnapshotCapture').fire();
+    assert.match(p.el('ReportStatus').textContent, /Save Floor Plan/); assert.equal(p.el('ReportText').value, previous);
+    assert.equal(p.requests.filter(r => r.options?.method === 'POST').length, 0);
+});
+
+test('map picking populates the reference, cancels cleanly and selection changes require a new position', async () => {
+    let callback, cancels = 0, clears = 0;
+    const p = panel(null, {pick(done, cancel) {callback = done; return () => {cancels++; cancel();};}, clearPoint() {clears++;}});
+    await p.el('SnapshotLoad').fire(); await p.el('SnapshotPick').fire(); callback({floor: 'Yard', x_m: 2.125, y_m: 4.25});
+    assert.equal(p.el('SnapshotX').value, '2.125'); assert.equal(p.el('SnapshotY').value, '4.250');
+    await p.el('SnapshotPick').fire(); await p.el('SnapshotPick').fire(); assert.equal(cancels, 1);
+    await p.el('SnapshotTarget').fire('change'); assert.equal(p.el('SnapshotX').value, ''); assert.equal(clears, 1);
 });

@@ -1582,6 +1582,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 _reading_max_age(entity_layout), prior, trilaterate,
                 position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS),
                 nearby_trust=True,
+                obstruction_strength=outdoor_settings(entity_layout)["obstruction_strength"],
             ))
             # Map saves replace the cached layout. Do not feed an obsolete
             # snapshot into election, smoothing, history or sensor state.
@@ -1627,7 +1628,8 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                         for x, y, radius, slant in cand["cords"]]
             detection = solve_sparse_detection(floor, weighted, scale, _reading_max_age(entity_layout),
                 previous_payload, now=time.time(), position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS),
-                nearby_trust=True)
+                nearby_trust=True,
+                obstruction_strength=outdoor_settings(entity_layout)["obstruction_strength"])
             if detection is not None:
                 quality = detection["outdoor"]
                 # Election compares reception floors only; this is not a

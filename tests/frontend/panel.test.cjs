@@ -835,6 +835,35 @@ test('calibration summarizes material factor changes and collapses the complete 
     assert.doesNotMatch(html, /<changed>/); assert.match(html, /&lt;changed&gt;/);
 });
 
+test('obstruction strength is an explicit saved setting and rejects invalid values atomically', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const p = await panel(source); p.hooks.select('Property');
+    assert.equal(Number(p.el('outdoorObstructionStrength').value), 1);
+    p.el('outdoorObstructionStrength').value = '2'; await p.el('outdoorObstructionStrength').fire('change');
+    assert.equal(p.hooks.layout().outdoor_tracking.obstruction_strength, 2);
+    p.el('outdoorObstructionStrength').value = '5'; await p.el('outdoorObstructionStrength').fire('change');
+    assert.equal(p.hooks.layout().outdoor_tracking.obstruction_strength, 2);
+    assert.equal(Number(p.el('outdoorObstructionStrength').value), 2);
+    await p.hooks.savedata(true);
+    const sent = p.requests.find(r => r.url === '/api/bps/save_text');
+    assert.equal(JSON.parse(sent.options.body.get('coordinates')).outdoor_tracking.obstruction_strength, 2);
+});
+
+test('known-position map picking converts world pixels without moving receivers or dirtying the layout', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 100}}];
+    const p = await panel(source); p.hooks.select('Property'); const before = plain(p.hooks.layout());
+    p.el('diagnosticSnapshotFloor').value = 'Property';
+    await p.el('diagnosticSnapshotPick').fire('click');
+    await p.el('canvas').fire('mousedown', {clientX: 200, clientY: 400, button: 0});
+    await p.el('canvas').fire('click', {clientX: 200, clientY: 400, button: 0});
+    assert.equal(p.el('diagnosticSnapshotX').value, '10.000'); assert.equal(p.el('diagnosticSnapshotY').value, '20.000');
+    assert.deepEqual(plain(p.hooks.layout()), before);
+    assert.equal(p.requests.some(r => r.url === '/api/bps/save_text'), false);
+    await p.el('diagnosticSnapshotPick').fire('click'); p.listeners.get('keydown')({key: 'Escape'});
+    await p.el('canvas').fire('click', {clientX: 400, clientY: 200, button: 0});
+    assert.equal(p.el('diagnosticSnapshotX').value, '10.000');
+});
+
 test('auto preview distinguishes existing weak receivers from newly placed receivers', async () => {
     const source = layout();
     source.floor[0].receivers = ['r0', 'r1', 'r2', 'r3', 'extra'].map(entity_id => ({entity_id, cords: {x: 0, y: 0}}));
