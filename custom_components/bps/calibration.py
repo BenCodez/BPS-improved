@@ -239,9 +239,9 @@ def get_calibration_state(hass) -> dict:
     )
 
 
-def _build_receiver_map(coords, floor_name=None, *, hass=None) -> dict:
+def _build_receiver_map(coords, floor_name=None, *, hass=None, receiver_sources=None) -> dict:
     """Map receiver slug -> position/scale/floor, for one floor or all floors."""
-    sources = ReceiverSources(hass) if hass is not None else None
+    sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass) if hass is not None else None
     if sources is not None:
         coords = sources.calibration_layout(coords)
     receivers = {}
@@ -281,7 +281,8 @@ def _build_receiver_map(coords, floor_name=None, *, hass=None) -> dict:
 
 def _set_auto_receivers(hass, cal, coords):
     """Separate floor geometry from the shared physical observation keys."""
-    floors = {floor.get("name"): _build_receiver_map({"floor": [floor]}, hass=hass)
+    sources = ReceiverSources(hass)
+    floors = {floor.get("name"): _build_receiver_map({"floor": [floor]}, receiver_sources=sources)
               for floor in coords.get("floor", [])}
     claims = {}
     for receivers in floors.values():
