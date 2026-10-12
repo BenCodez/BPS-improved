@@ -6352,7 +6352,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('outdoorControls').hidden = !settings.enabled;
         document.getElementById('outdoorUncertainty').checked = settings.show_uncertainty;
         document.getElementById('outdoorThreshold').value = settings.hide_uncertainty_below_m;
-        document.getElementById('outdoorObstructionStrength').value = settings.obstruction_strength;
+        const strengthSelect = document.getElementById('outdoorObstructionStrength');
+        for (const option of Array.from(strengthSelect.options)) {
+            if (option.dataset.bpsCustomStrength === 'true') option.remove();
+        }
+        const strengthValue = String(settings.obstruction_strength);
+        if (!['1', '2', '3', '4'].includes(strengthValue)) {
+            const option = document.createElement('option');
+            option.value = strengthValue;
+            option.textContent = `Custom (${strengthValue})`;
+            option.dataset.bpsCustomStrength = 'true';
+            strengthSelect.appendChild(option);
+        }
+        strengthSelect.value = strengthValue;
     }
     function markOutdoorChanged() {
         savebuttondiv.appendChild(saveButton);
