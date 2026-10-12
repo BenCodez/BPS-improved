@@ -845,7 +845,11 @@ geometry and shows the group/member position errors. Stale, missing, ambiguous,
 duplicate and unit-unknown readings are explicitly unscored. Mapped paths are
 evaluated at the supplied point, while prior solver evidence retains its older
 clock and evaluated path. At most 256 highest-error paths are assessed per
-snapshot; omitted path assessments are labelled. All original BLE data remains
+snapshot, subject to a shared 250,000-unit geometry budget that accounts for
+vertex complexity before compilation and each path assessment. Omitted path
+assessments are labelled. One snapshot is prepared at a time per BPS instance;
+concurrent requests are rejected, including while a disconnected caller's
+worker is still finishing. All original BLE data remains
 in the report. A geometric disagreement can reflect smoothing, obstruction,
 incorrect placements/heights or calibration; it does not prove hardware failure.
 

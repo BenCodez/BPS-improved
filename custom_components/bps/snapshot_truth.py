@@ -7,6 +7,7 @@ from .environment import compile_environment, outdoor_settings, path_reliability
 MAX_MARKERS = 32
 MAX_READINGS = 32768
 MAX_PATH_EVALUATIONS = 256
+MAX_GEOMETRY_WORK = 250000
 MAX_COMPARISON_BYTES = 2 * 1024 * 1024
 GUIDE = (
     "Known positions apply only at this snapshot instant, never to past or future history. "
@@ -15,7 +16,7 @@ GUIDE = (
     "not RF loss. Disagreement does not prove a receiver fault or justify calibration changes. "
     "Published positions retain their own observation clocks; current readings do not refresh old fixes."
     " Filtered Bermuda distances can carry smoothing history; keep the target stationary for 30–60 seconds before capture."
-    " Mapped paths are assessed for at most 256 of the largest ranked range discrepancies; omitted paths are not assessed."
+    " Mapped paths are assessed for at most 256 of the largest ranked range discrepancies within a shared geometric complexity budget; omitted paths are not assessed."
 )
 
 
@@ -42,6 +43,26 @@ def _check_comparison_bytes(size):
 def _unevaluated_path(reason):
     return {"classification": "not_evaluated", "environmental_weight": None,
             "mapped_environmental_weight": None, "reason": reason}
+
+
+def _geometry_work(floor):
+    """Conservative edge-work estimate before compilation or path traversal.
+
+    Compilation and per-wall lookup can be quadratic in vertex count. Charge
+    that upper-bound shape cost even on cache hits; malformed input is not free.
+    Stop counting as soon as the entire snapshot allowance is exceeded.
+    """
+    records = floor.get("environment", [])
+    if not isinstance(records, list):
+        return MAX_GEOMETRY_WORK + 1
+    work = 1
+    for record in records:
+        points = record.get("points", []) if isinstance(record, dict) else []
+        count = len(points) if isinstance(points, list) else 0
+        work += count * count + 4 * count + 1
+        if work > MAX_GEOMETRY_WORK:
+            break
+    return work
 
 
 def validate_markers(snapshot, markers):
@@ -311,11 +332,20 @@ def analyse(snapshot, markers):
         output.append(item)
     # Globally prioritize the largest valid discrepancies, including across markers.
     path_candidates.sort(key=lambda item: (-item[0]["abs_error_m"], str(item[0]["tracker"]), str(item[0]["receiver"])))
-    compiled_by_floor, evaluated_by_marker = {}, {}
+    compiled_by_floor, evaluated_by_marker, work_by_floor = {}, {}, {}
+    geometry_work = 0
     strength = outdoor_settings(context["layout"])["obstruction_strength"]
     for row, marker_index, receiver_xy in path_candidates[:MAX_PATH_EVALUATIONS]:
         marker = markers[marker_index]
         floor = floors[marker["floor"]]
+        if marker["floor"] not in work_by_floor:
+            work_by_floor[marker["floor"]] = _geometry_work(floor)
+        work = work_by_floor[marker["floor"]]
+        required_work = work * (2 if marker["floor"] not in compiled_by_floor else 1)
+        if geometry_work + required_work > MAX_GEOMETRY_WORK:
+            row["environment"] = _unevaluated_path("geometry_work_budget")
+            continue
+        geometry_work += required_work
         if marker["floor"] not in compiled_by_floor:
             try:
                 compiled_by_floor[marker["floor"]] = (compile_environment(floor), None)
@@ -340,6 +370,7 @@ def analyse(snapshot, markers):
     evaluated = sum(evaluated_by_marker.values())
     comparison = {"format": "bps-known-position-comparison-v1", "time": now, "guide": GUIDE,
                   "markers": output, "path_evaluation": {"limit": MAX_PATH_EVALUATIONS,
+                  "geometry_work_limit": MAX_GEOMETRY_WORK, "geometry_work_used": geometry_work,
                   "evaluated": evaluated, "omitted": len(path_candidates) - evaluated,
                   "truncated": len(path_candidates) > evaluated}}
     _check_comparison_bytes(_json_size(comparison))

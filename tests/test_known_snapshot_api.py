@@ -126,3 +126,50 @@ def test_original_get_live_report_stays_unchanged(hass, monkeypatch, responses):
         assert "known_positions" not in parse_report(data["text"])
         assert not hass.data
     asyncio.run(scenario())
+
+
+def test_concurrent_snapshot_is_rejected_before_capture_and_cancellation_keeps_slot(hass, responses):
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        captures, jobs = [], []
+        def capture(*_):
+            captures.append(True)
+            return snapshot()
+        async def executor(fn, *args):
+            jobs.append(fn)
+            entered.set()
+            await release.wait()
+            return fn(*args)
+        hass.async_add_executor_job = executor
+        api = diag.BPSDiagnosticsAPI(None, None, capture)
+        body = {"action": "snapshot", "known_positions": [marker()]}
+        first = asyncio.create_task(api.post(request(hass, body)))
+        await entered.wait()
+        busy = await api.post(request(hass, body))
+        assert busy.status == 429 and len(captures) == len(jobs) == 1
+        worker = api._snapshot_job
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not worker.done() and api._snapshot_job is worker
+        busy = await api.post(request(hass, body))
+        assert busy.status == 429 and len(captures) == len(jobs) == 1
+        release.set()
+        await worker
+        await asyncio.sleep(0)
+        assert api._snapshot_job is None
+        response = await api.post(request(hass, body))
+        assert response.status == 200 and len(captures) == len(jobs) == 2
+        assert hass.data == {} and not hass._store_saves
+    asyncio.run(scenario())
+
+
+def test_failed_snapshot_releases_slot_for_retry(hass, responses):
+    async def scenario():
+        api = diag.BPSDiagnosticsAPI(None, None, lambda *_: snapshot())
+        response = await api.post(request(hass, {"action": "snapshot", "known_positions": []}))
+        assert response.status == 400 and api._snapshot_job is None
+        response = await api.post(request(hass, {"action": "snapshot", "known_positions": [marker()]}))
+        assert response.status == 200 and api._snapshot_job is None
+        assert hass.data == {}
+    asyncio.run(scenario())

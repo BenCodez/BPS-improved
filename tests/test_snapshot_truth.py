@@ -220,7 +220,8 @@ def test_global_path_budget_prioritizes_largest_ranked_discrepancies_across_mark
     result = truth.analyse(data, [marker(x_m=0, y_m=0), marker(target="beacon_b", x_m=0, y_m=0)])
     assert len(calls) == truth.MAX_PATH_EVALUATIONS == 256
     assert calls == [(i, 0) for i in range(319, 63, -1)]
-    assert result["path_evaluation"] == {"limit": 256, "evaluated": 256, "omitted": 384, "truncated": True}
+    assert result["path_evaluation"] == {"limit": 256, "evaluated": 256, "omitted": 384, "truncated": True,
+        "geometry_work_limit": truth.MAX_GEOMETRY_WORK, "geometry_work_used": 257}
     first, second = result["markers"]
     assert len(first["ranked_readings"]) == len(second["ranked_readings"]) == count
     assert first["summary"]["path_evaluated_readings"] == 0
@@ -234,6 +235,48 @@ def test_global_path_budget_prioritizes_largest_ranked_discrepancies_across_mark
     assert stale["environment"]["classification"] == "not_evaluated"
     assert stale["environment"]["reason"] == "reading_unscored"
     assert data == before
+
+
+def test_complex_map_is_not_compiled_or_traversed_when_work_exceeds_budget(monkeypatch):
+    data = snapshot()
+    data["context"]["layout"]["floor"][0]["environment"] = [
+        {"id": f"trees_{i}", "type": "dense_trees", "points": [{"x": j, "y": j} for j in range(256)]}
+        for i in range(128)]
+    monkeypatch.setattr(truth, "compile_environment", lambda *_: pytest.fail("must budget before compiling"))
+    monkeypatch.setattr(truth, "path_reliability", lambda *_: pytest.fail("must budget before traversing"))
+    result = truth.analyse(data, [marker()])
+    row = result["markers"][0]["ranked_readings"][0]
+    assert row["status"] == "current" and row["abs_error_m"] is not None
+    assert row["environment"] == truth._unevaluated_path("geometry_work_budget")
+    assert result["path_evaluation"]["evaluated"] == 0
+    assert result["path_evaluation"]["geometry_work_used"] == 0
+
+
+def test_geometry_work_budget_counts_compile_and_every_path_globally(monkeypatch):
+    data = snapshot()
+    floor = data["context"]["layout"]["floor"][0]
+    floor["environment"] = [{"id": "trees", "type": "dense_trees",
+                             "points": [{"x": 0, "y": 0}, {"x": 10, "y": 0}, {"x": 0, "y": 10}]}]
+    floor["receivers"] = [{"entity_id": f"receiver_{i}", "cords": {"x": i, "y": 0}, "height": 1} for i in range(4)]
+    data["readings"] = [reading(receiver=f"receiver_{i}", entity_id=f"sensor.range_{i}",
+        measured_distance_m=100 + i, corrected_distance_m=100 + i) for i in range(4)]
+    cost = truth._geometry_work(floor)
+    monkeypatch.setattr(truth, "MAX_GEOMETRY_WORK", cost * 3)
+    compile_calls, path_calls = [], []
+    def compile_floor(f):
+        compile_calls.append(f)
+        return None
+    def path(*args, **kwargs):
+        path_calls.append(args)
+        return {"classification": "clear", "environmental_weight": 1}
+    monkeypatch.setattr(truth, "compile_environment", compile_floor)
+    monkeypatch.setattr(truth, "path_reliability", path)
+    result = truth.analyse(data, [marker()])
+    assert len(compile_calls) == 1 and len(path_calls) == 2
+    assert result["path_evaluation"]["geometry_work_used"] == cost * 3
+    rows = result["markers"][0]["ranked_readings"]
+    assert [r["receiver"] for r in rows[:2]] == ["receiver_3", "receiver_2"]
+    assert all(r["environment"]["reason"] == "geometry_work_budget" for r in rows[2:])
 
 
 def test_large_derived_comparison_rejects_before_path_work(monkeypatch):

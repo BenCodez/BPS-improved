@@ -320,6 +320,15 @@ class BPSDiagnosticsAPI(HomeAssistantView):
     def __init__(self, snapshot, inventory, report=None):
         self.snapshot, self.inventory = snapshot, inventory
         self.report = report
+        # This view is registered once per HA instance and survives BPS reloads.
+        self._snapshot_job = None
+
+    def _snapshot_finished(self, job):
+        if self._snapshot_job is job:
+            self._snapshot_job = None
+        # A disconnected/cancelled HTTP caller may no longer retrieve failures.
+        if not job.cancelled():
+            job.exception()
 
     async def get(self, request):
         hass = request.app["hass"]
@@ -362,9 +371,16 @@ class BPSDiagnosticsAPI(HomeAssistantView):
                 panel = body.get("panel_bytes", 0)
                 if isinstance(panel, bool) or not isinstance(panel, int) or not 0 <= panel <= MAX_REPORT_BYTES:
                     raise ValueError("Invalid diagnostic panel byte reservation")
+                if self._snapshot_job is not None and not self._snapshot_job.done():
+                    return web.json_response({"error": "A known-position snapshot is already being prepared; try again after it completes"}, status=429)
                 snapshot = self.report(hass, time.time())
                 snapshot["_panel_bytes"] = panel
-                result = await hass.async_add_executor_job(format_known_position_report, snapshot, body.get("known_positions"))
+                job = asyncio.ensure_future(hass.async_add_executor_job(format_known_position_report, snapshot, body.get("known_positions")))
+                self._snapshot_job = job
+                job.add_done_callback(self._snapshot_finished)
+                # Cancelling an HTTP request cannot stop its executor thread;
+                # keep the slot until actual completion, rather than queue more.
+                result = await asyncio.shield(job)
                 return web.Response(body=encode(result), content_type="application/json", headers={"Cache-Control": "no-store"})
             recording = get_recording(hass, self.snapshot)
             if action == "start":
