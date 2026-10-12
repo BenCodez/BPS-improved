@@ -107,3 +107,26 @@ def test_unique_alias_does_not_reintroduce_shared_connectivity_evidence(hass, mo
     asyncio.run(bps.update_receiver_liveness(hass))
     assert "shared" not in hass.data["bps"]["rl_unknown"]
     assert ("shared" in hass.data["bps"]["rl_offline"]) is (status == "off")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_different_saved_hardware_sharing_a_slug_has_no_floor_order_liveness(hass, monkeypatch, reverse):
+    entries, states, rec, layout, first, second = shared(hass, monkeypatch, same_owner=True)
+    other_floor = copy.deepcopy(layout["floor"][0])
+    other_floor["name"] = "Upstairs"
+    other_floor["receivers"][0]["scanner_mac"] = OTHER
+    layout["floor"].append(other_floor)
+    if reverse:
+        layout["floor"].reverse()
+    states[first].state = states[second].state = "unavailable"
+    async def dump(*args, **kwargs):
+        return {mac: {"_is_scanner": True, "address": mac, "name": "Shared", "last_seen": stamp}
+                for mac, stamp in ((MAC, 100), (OTHER, 1))}
+    hass.services.async_call = dump
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert hass.data["bps"]["rl_mac_ages"] == {MAC: 0, OTHER: 99}
+    assert "shared" in hass.data["bps"]["rl_unknown"]
+    assert "shared" not in hass.data["bps"]["rl_offline"]
+    rows = bps._scanner_linking(hass, json.dumps(layout))["placed"]
+    assert all(row["binding_status"] == "matched" and row["status"] != "offline" for row in rows)
+    assert {row["scanner_mac"] for row in rows} == {MAC, OTHER}

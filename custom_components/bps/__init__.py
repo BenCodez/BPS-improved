@@ -1190,6 +1190,7 @@ async def update_receiver_liveness(hass):
     receivers.update(matching)
     sources = ReceiverSources(hass)
     identity_conflicts = set()
+    placed_identities = {}
     bindings = {slug: sources.binding({"entity_id": slug}) for slug in matching}
     layout = get_bps_data(hass) or {}
     for floor in layout.get("floor", []):
@@ -1199,6 +1200,7 @@ async def update_receiver_liveness(hass):
             if not isinstance(rec, dict) or not isinstance(rec.get("entity_id"), str) or not rec["entity_id"]:
                 continue
             bindings[rec["entity_id"]] = binding
+            placed_identities.setdefault(rec["entity_id"], set()).add(binding["identity"])
             if binding["status"] in ("scanner_identity_conflict", "scanner_identity_unavailable", "ambiguous_scanner_identity", "invalid_scanner_identity"):
                 identity_conflicts.add(rec["entity_id"])
                 receivers.add(rec["entity_id"])
@@ -1208,6 +1210,10 @@ async def update_receiver_liveness(hass):
                 if alias:
                     matching[rec["entity_id"]] = alias
                     receivers.add(rec["entity_id"])
+    # Legacy liveness APIs are keyed by slug, not floor/placement. Different
+    # saved hardware under one slug has no single authoritative status; never
+    # let the last floor mark another scanner online or offline.
+    identity_conflicts.update(slug for slug, identities in placed_identities.items() if len(identities) > 1)
     slug_to_device, device_entities = _build_device_availability(hass)
 
     def device_online(slug):
