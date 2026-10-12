@@ -23,7 +23,6 @@ import os
 import json
 import re
 import copy
-import difflib
 from functools import partial
 from contextvars import ContextVar
 from shapely.geometry import Point, Polygon
@@ -61,6 +60,8 @@ from .solver_settings import MIN_WEIGHT_RADIUS_M, SOLVER_ROBUST_F_SCALE
 from .tracker_groups import fuse_groups, normalize_groups
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
+from .receiver_matching import inventory as receiver_inventory
+from .receiver_sources import ReceiverSources
 from . import bermuda_diagnostics
 from . import recent_tracking
 
@@ -671,13 +672,13 @@ async def update_tracked_entities(hass):
 
         # Runs on the first tick too, so a fresh deploy shows a value quickly.
         # The scipy solves run in the executor so the loop is never blocked; the
-        # calibration sample deques are snapshotted here on the loop thread first
-        # to avoid a "mutated during iteration" race with calibration's ingest.
+        # bindings, geometry and calibration deques are snapshotted here on the
+        # loop thread first, before calibration ingest or layout edits can run.
         if now_ts - getattr(update_tracked_entities, "last_selftest", 0.0) >= SELFTEST_SENSOR_INTERVAL:
             update_tracked_entities.last_selftest = now_ts
             try:
-                samples = {k: list(v) for k, v in get_calibration_state(hass).get("samples", {}).items()}
-                result = await hass.async_add_executor_job(run_selftest, hass, samples)
+                snapshot = _selftest_snapshot(hass)
+                result = await hass.async_add_executor_job(run_selftest, None, None, snapshot)
                 state, attrs = _selftest_summary(result)
                 update_bps_sensor_state(hass, ACCURACY_ENTITY_ID, state, attrs)
             except Exception as e:  # never let the diagnostic sensor stall tracking
@@ -771,7 +772,7 @@ def _bermuda_distance_sensor_ids(hass):
         if "_distance_to_" not in eid:
             continue
         entry = ent_reg.async_get(eid)
-        if entry is None or entry.platform != "bermuda":
+        if entry is None or entry.platform != "bermuda" or str(getattr(entry, "unique_id", "") or "").endswith("_range_raw"):
             continue
         ids.append(eid)
     return ids
@@ -813,24 +814,19 @@ def _scanner_token(slug):
 def _suggest_scanner(placement_slug, stored_uid, candidates):
     """Best live scanner slug to re-link a stale placement to. Prefer a shared
     hardware token (an explicitly-stored uid, else the placement's own trailing
-    token — the same physical scanner after a rename); otherwise fall back to
-    plain string similarity. Returns a candidate slug or None.
+    token — the same physical scanner after a rename); otherwise require manual selection. Never suggest by
+    string similarity alone. Returns a candidate slug or None.
     """
     token = stored_uid or _scanner_token(placement_slug)
     if token:
         tok_matches = [c for c in candidates if _scanner_token(c) == token]
         if len(tok_matches) == 1:
             return tok_matches[0]
-    best, best_score = None, 0.0
-    for c in candidates:
-        score = difflib.SequenceMatcher(None, str(placement_slug), c).ratio()
-        if score > best_score:
-            best, best_score = c, score
-    return best if best_score >= 0.55 else None
+    return None
 
 
 def _placed_receivers(coordinates_json):
-    """Placed receivers as (floor_name, entity_id slug, stored scanner_uid).
+    """Placed receivers as (floor_name, slug, stored scanner_uid, scanner_mac).
 
     Parsed defensively: a malformed or hand-edited bpsdata.txt yields [] rather
     than raising into a caller (diagnostics must never break read_text). Each
@@ -847,7 +843,7 @@ def _placed_receivers(coordinates_json):
             receivers_ = fl.get("receivers")
             for rec in receivers_ if isinstance(receivers_, list) else []:
                 if isinstance(rec, dict) and isinstance(rec.get("entity_id"), str) and rec["entity_id"]:
-                    placed.append((fl.get("name"), rec["entity_id"], rec.get("scanner_uid")))
+                    placed.append((fl.get("name"), rec["entity_id"], rec.get("scanner_uid"), rec.get("scanner_mac")))
     except Exception:
         return []
     return placed
@@ -856,6 +852,33 @@ def _placed_receivers(coordinates_json):
 # Distance-sensor states that mean "no distance right now" (as opposed to a
 # real numeric reading). Shared by the diagnostics and the linking debug view.
 _NO_DISTANCE_STATES = (None, "", "unknown", "unavailable")
+
+
+def _receiver_floors(coordinates_json):
+    try:
+        parsed = json.loads(coordinates_json)
+        floors = parsed.get("floor", []) if isinstance(parsed, dict) else []
+        return [{**floor, "receivers": [rec if isinstance(rec, dict) else {} for rec in floor.get("receivers", [])]
+                 if isinstance(floor.get("receivers"), list) else []}
+                for floor in floors if isinstance(floor, dict)] if isinstance(floors, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def _alias_diagnostics(hass, coordinates_json):
+    sources = ReceiverSources(hass)
+    aliases, issues = [], []
+    for floor in _receiver_floors(coordinates_json):
+        for index, (rec, binding) in enumerate(zip(floor.get("receivers", []), sources.floor_bindings(floor))):
+            row = {"floor": floor.get("name"), "placement_index": index, "entity_id": rec.get("entity_id"),
+                   "aliases": binding["aliases"], "status": binding["status"]}
+            if sources.blocked(binding):
+                row["action"] = "Match this placement to the correct Bermuda scanner. Keep one placement per physical scanner on this floor; reconcile differing positions and properties."
+                issues.append(row)
+            elif binding["identity"]:
+                row.update(scanner_mac=binding["identity"][1], config_entry_id=binding["identity"][0])
+                aliases.append(row)
+    return aliases, issues
 
 
 def _scanner_diagnostics(hass, coordinates_json):
@@ -867,21 +890,60 @@ def _scanner_diagnostics(hass, coordinates_json):
         aren't placed on any floor.
     """
     slugs, with_reading = _scanner_slugs_and_readings(hass)
+    matching = receiver_inventory(hass)
+    slugs.update(row["entity_id"] for row in matching["options"])
+    aliases, issues = _alias_diagnostics(hass, coordinates_json)
+    slugs.update(row["entity_id"] for row in aliases)
     placed = _placed_receivers(coordinates_json)
     placed_slugs = {p[1] for p in placed}
+    placed_by_floor = {}
+    for fname, slug, _uid, _mac in placed:
+        key = fname if isinstance(fname, str) else None
+        placed_by_floor.setdefault(key, set()).add(slug)
+    # A saved hardware binding also places its proven current/previous aliases.
+    # Keep them out of unplaced reports and same-floor relink suggestions.
+    # Proven duplicate/conflicting placements still occupy that scanner; their
+    # separate issue rows explain why it cannot currently supply tracking data.
+    for row in aliases + issues:
+        placed_slugs.update(row["aliases"])
+        key = row["floor"] if isinstance(row["floor"], str) else None
+        placed_by_floor.setdefault(key, set()).update(row["aliases"])
     # Candidates for a re-link: live scanner slugs not already correctly placed.
-    free = [s for s in slugs if s not in placed_slugs]
+    candidates = {row["entity_id"]: row for row in matching["options"] if row["selectable"]}
+    free_by_floor, identities_by_token = {}, {}
+    for row in matching["options"]:
+        token = row["token"] or _scanner_token(row["entity_id"])
+        identities_by_token.setdefault(token, set()).add((tuple(row["config_entry_ids"]), row["scanner_mac"] or row["entity_id"]))
     unmatched = []
-    for fname, slug, uid in placed:
+    for fname, slug, uid, mac in placed:
         if slug in slugs:
             continue  # a real sensor exists (offline is a separate concern)
+        key = fname if isinstance(fname, str) else None
+        if key not in free_by_floor:
+            free_by_floor[key] = [option for candidate, option in candidates.items()
+                                 if candidate not in placed_by_floor[key]]
+        free = free_by_floor[key]
+        token = uid or _scanner_token(slug)
+        proof = []
+        identities = identities_by_token.get(token, set()) if isinstance(token, str) else set()
+        for option in free:
+            option_mac = option["scanner_mac"]
+            if mac and option_mac:
+                matched = str(mac).lower() == option_mac
+            else:
+                candidate_token = option["token"] or _scanner_token(option["entity_id"])
+                matched = token and token == candidate_token and len(identities) == 1
+            if matched:
+                proof.append(option["entity_id"])
+        proof.sort(key=lambda candidate: (not candidates[candidate]["distance_sensors"], candidate))
+        proof_ids = {(tuple(candidates[candidate]["config_entry_ids"]), candidates[candidate]["scanner_mac"] or candidate) for candidate in proof}
         unmatched.append({
             "entity_id": slug,
             "floor": fname,
-            "suggested": _suggest_scanner(slug, uid, free),
+            "suggested": proof[0] if len(proof_ids) == 1 else None,
         })
     unplaced = sorted(with_reading - placed_slugs)
-    return {"unmatched_receivers": unmatched, "unplaced_scanners": unplaced}
+    return {"unmatched_receivers": unmatched, "unplaced_scanners": unplaced, "matching": matching, "alias_receivers": aliases, "placement_issues": issues}
 
 
 def _scanner_linking(hass, coordinates_json):
@@ -914,28 +976,56 @@ def _scanner_linking(hass, coordinates_json):
     def _reporting(sensors):
         return [s for s in sensors if s["state"] not in _NO_DISTANCE_STATES]
 
-    placed = _placed_receivers(coordinates_json)
-    placed_slugs = {p[1] for p in placed}
-    rows = []
-    for fname, slug, uid in placed:
-        sensors = sorted(by_slug.get(slug, []), key=lambda s: s["device"])
-        reporting = _reporting(sensors)
-        if not sensors:
-            status = "unmatched"
-        elif reporting:
-            status = "live"
-        else:
-            status = "silent"
-        rows.append({
-            "entity_id": slug,
-            "floor": fname,
-            "scanner_uid": uid,
-            "token": _scanner_token(slug),
-            "status": status,
-            "sensor_count": len(sensors),
-            "reporting_count": len(reporting),
-            "sensors": sensors,
-        })
+    matching = receiver_inventory(hass)
+    options = {row["entity_id"]: row for row in matching["options"]}
+    sources = ReceiverSources(hass)
+    owned_by_identity = {}
+    if sources.registry is not None:
+        # Group the snapshot once; scanning every tracker/scanner reading for
+        # each placement would block the event loop with quadratic work.
+        for (_tracker, identity), eids in sources.readings.items():
+            owned_by_identity.setdefault(identity, set()).update(eids)
+    rows, placed_slugs = [], set()
+    for floor in _receiver_floors(coordinates_json):
+        for index, (rec, binding) in enumerate(zip(floor.get("receivers", []), sources.floor_bindings(floor))):
+            slug = rec.get("entity_id", "")
+            placed_slugs.update(binding["aliases"])
+            sensors = sorted((sensor for alias in binding["aliases"] for sensor in by_slug.get(alias, [])), key=lambda row: row["entity_id"])
+            if sources.registry is not None:
+                key = binding["identity"] or slug
+                # Malformed legacy slugs may be lists/dicts. Copy the group so
+                # exact legacy fallbacks remain local to this placement.
+                owned = set(owned_by_identity.get(key, ())) if isinstance(key, (str, tuple)) else set()
+                for tracker in {sensor["device"] for sensor in sensors}:
+                    source, state = sources.source(tracker, rec, binding)
+                    if state is not None:
+                        owned.add(source)
+                sensors = [sensor for sensor in sensors if sensor["entity_id"] in owned]
+            reporting = _reporting(sensors)
+            matched = next((option for alias in binding["aliases"]
+                            if (option := sources.resolved_option(alias, binding)) is not None),
+                           options.get(slug) if isinstance(slug, str) else None)
+            if sources.blocked(binding):
+                status = "conflict"
+            elif slug in hass.data.get(DOMAIN, {}).get("rl_offline", []):
+                status = "offline"
+            elif reporting:
+                status = "live"
+            elif sensors:
+                status = "silent"
+            else:
+                status = "unknown" if matched else "unmatched"
+            selected = {}
+            for tracker in {sensor["device"] for sensor in sensors}:
+                source, state = sources.source(tracker, rec, binding)
+                if state is not None:
+                    selected[tracker] = source
+            rows.append({"entity_id": slug, "floor": floor.get("name"), "placement_index": index,
+                "scanner_uid": rec.get("scanner_uid"), "scanner_mac": rec.get("scanner_mac"),
+                "token": (matched or {}).get("token") or _scanner_token(slug), "status": status,
+                "binding_status": binding["status"], "aliases": binding["aliases"], "selected_sources": selected,
+                "sensor_count": len(sensors), "reporting_count": len(reporting), "sensors": sensors,
+                "matching": matched})
     unplaced = []
     for slug, sensors in by_slug.items():
         if slug in placed_slugs:
@@ -947,7 +1037,7 @@ def _scanner_linking(hass, coordinates_json):
             "reporting_count": len(_reporting(sensors)),
         })
     unplaced.sort(key=lambda u: u["entity_id"])
-    return {"placed": rows, "unplaced": unplaced}
+    return {"placed": rows, "unplaced": unplaced, "matching": matching}
 
 
 def _beacon_links(hass):
@@ -959,6 +1049,7 @@ def _beacon_links(hass):
     reading still appears (empty list) so a device that's gone dark is visible.
     """
     beacons = {}  # device -> [{scanner, distance, unit}]
+    sources, seen = ReceiverSources(hass), set()
     allowed = set(_bermuda_distance_sensor_ids(hass))
     for st in hass.states.async_all("sensor"):
         eid = st.entity_id
@@ -967,6 +1058,12 @@ def _beacon_links(hass):
         device_part, slug = eid.split("_distance_to_", 1)
         device = device_part[len("sensor."):] if device_part.startswith("sensor.") else device_part
         beacons.setdefault(device, [])
+        binding = sources.binding({"entity_id": slug})
+        selected, chosen = sources.source(device, {"entity_id": slug}, binding)
+        identity = (device, binding["identity"] or slug, sources.tracker_ids.get(eid))
+        if sources.registry is not None and (selected != eid or chosen is None or identity in seen):
+            continue
+        seen.add(identity)
         if st.state in _NO_DISTANCE_STATES:
             continue
         try:
@@ -1008,18 +1105,31 @@ def _refresh_dump_ages(hass, dom, devices):
     prev_newest = dom.get("rl_newest")
     now = time.time()
     if not (prev_newest is not None and prev_newest - 60 < newest <= prev_newest):
-        ages = {}
-        for dev in devices.values():
+        ages, mac_ages, repeated_names, seen_names = {}, {}, set(), set()
+        for address, dev in devices.items():
             if not isinstance(dev, dict) or dev.get("_is_scanner") is not True:
                 continue
             slug = slugify(str(dev.get("name") or ""))
             if not slug:
                 continue
+            if slug in seen_names:
+                repeated_names.add(slug)
+            seen_names.add(slug)
             ls = dev.get("last_seen")
-            ages[slug] = (newest - ls) if isinstance(ls, (int, float)) else float("inf")
+            if isinstance(ls, (int, float)) and not isinstance(ls, bool) and math.isfinite(ls):
+                age = max(0.0, newest - ls)
+                ages[slug] = age
+                # Bermuda retains the Wi-Fi MAC in range entity IDs while
+                # dump observations can use a different Bluetooth address.
+                mac = dev.get("address_wifi_mac") or dev.get("address", address)
+                if isinstance(mac, str) and bermuda_diagnostics.MAC.fullmatch(mac):
+                    mac_ages[mac.lower()] = age
+        for slug in repeated_names:
+            ages.pop(slug, None)
         dom["rl_newest"] = newest
         dom["rl_anchor_wall"] = now
         dom["rl_ages"] = ages
+        dom["rl_mac_ages"] = mac_ages
 
 
 def _build_device_availability(hass):
@@ -1053,25 +1163,11 @@ def _build_device_availability(hass):
 
 
 async def update_receiver_liveness(hass):
-    """Recompute the set of offline receivers, mirroring the Lovelace card's
-    tiered status so the panel and the card agree.
+    """Offline requires Bermuda scanner-age or device/connectivity evidence.
 
-    For each receiver slug Bermuda exposes, the first tier that resolves wins:
-      1. Bermuda scanner liveness — last advert heard within RECEIVER_OFFLINE_SECS.
-         Proximity-independent: the probes advertise iBeacons the scanners hear
-         from each other, so a live scanner ages fresh even with no tracked
-         device home. But Bermuda drops a downed proxy from the scanner list, so
-         this tier can't see it at all — hence the fallbacks below.
-      2. A `binary_sensor.<slug>_status` connectivity sensor.
-      3. The receiver's HA device: online while any of its entities is not
-         `unavailable`; a connectivity entity on the device is authoritative.
-      4. Distance heuristic (last resort): working if some tracker got a reading
-         through it recently. Only reached for a scanner with no liveness and no
-         mapped device (6 of this install's receivers, whose device name doesn't
-         slugify to the receiver id). An *up* scanner is caught by tier 1, so
-         this can't misfire when every tracked device leaves home — it only
-         decides a scanner that is both absent from the dump and deviceless.
-    A receiver no tier can resolve at all is left ONLINE (never flagged).
+    Scanner identity survives a name change when its public MAC is proven by
+    Bermuda-owned range entities. Distance readings prove a scanner is working;
+    their absence leaves liveness unknown. Never infer offline from silence.
     """
     dom = hass.data.setdefault(DOMAIN, {})
     try:
@@ -1097,7 +1193,35 @@ async def update_receiver_liveness(hass):
     ages = dom.get("rl_ages", {})
     elapsed = max(0.0, time.time() - dom["rl_anchor_wall"]) if dom.get("rl_anchor_wall") else 0.0
 
-    receivers, with_reading = _scanner_slugs_and_readings(hass)
+    receivers, _ = _scanner_slugs_and_readings(hass)
+    matching = {row["entity_id"]: row for row in receiver_inventory(hass)["options"]}
+    receivers.update(matching)
+    sources = ReceiverSources(hass)
+    identity_conflicts = set()
+    placed_identities = {}
+    bindings = {slug: sources.binding({"entity_id": slug}) for slug in matching}
+    layout = get_bps_data(hass) or {}
+    for floor in layout.get("floor", []):
+        if not isinstance(floor, dict):
+            continue
+        for rec, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
+            if not isinstance(rec, dict) or not isinstance(rec.get("entity_id"), str) or not rec["entity_id"]:
+                continue
+            bindings[rec["entity_id"]] = binding
+            placed_identities.setdefault(rec["entity_id"], set()).add(binding["identity"])
+            if binding["status"] in ("scanner_identity_conflict", "scanner_identity_unavailable", "ambiguous_scanner_identity", "invalid_scanner_identity"):
+                identity_conflicts.add(rec["entity_id"])
+                receivers.add(rec["entity_id"])
+            if not sources.blocked(binding) and binding["identity"]:
+                alias = next((option for name in binding["aliases"]
+                              if (option := sources.resolved_option(name, binding)) is not None), None)
+                if alias:
+                    matching[rec["entity_id"]] = alias
+                    receivers.add(rec["entity_id"])
+    # Legacy liveness APIs are keyed by slug, not floor/placement. Different
+    # saved hardware under one slug has no single authoritative status; never
+    # let the last floor mark another scanner online or offline.
+    identity_conflicts.update(slug for slug, identities in placed_identities.items() if len(identities) > 1)
     slug_to_device, device_entities = _build_device_availability(hass)
 
     def device_online(slug):
@@ -1112,8 +1236,8 @@ async def update_receiver_liveness(hass):
         # proxy disconnects, so "any entity not unavailable" would miss it.
         for eid in eids:
             st = hass.states.get(eid)
-            if st and st.attributes.get("device_class") == "connectivity" and st.state is not None:
-                return _state_looks_online(st.state)
+            if st and st.attributes.get("device_class") == "connectivity":
+                return None if st.state in (None, "", "unknown", "unavailable") else _state_looks_online(st.state)
         saw_state = False
         for eid in eids:
             st = hass.states.get(eid)
@@ -1124,24 +1248,78 @@ async def update_receiver_liveness(hass):
                 return True
         return False if saw_state else None
 
+    def evidence_slugs(slug):
+        # Connectivity/device names carry no owner identity themselves. Expand
+        # only a proven owner/MAC whose runtime name and MAC owner are unique.
+        binding = bindings.get(slug, {})
+        option = matching.get(slug, {})
+        key = binding.get("identity")
+        names = [] if sources.options.get(slug, {}).get("identity_ambiguous") else [slug]
+        if key and option.get("liveness_name_unique", True) and len(sources.owners_by_mac.get(key[1], ())) == 1:
+            names.extend(alias for alias in binding.get("aliases", [])
+                         if not sources.options.get(alias, {}).get("identity_ambiguous"))
+            if option.get("name"):
+                names.append(slugify(option["name"]))
+        return list(dict.fromkeys(names))
+
+    def live_distance(slug):
+        binding = bindings.get(slug, {})
+        key = binding.get("identity")
+        options = [option for name in binding.get("aliases", [])
+                   if (option := sources.resolved_option(name, binding)) is not None] if key else [sources.options.get(slug, {})]
+        candidates = {eid for option in options for eid in option.get("distance_sensors", [])
+                      if eid not in option.get("disabled_sensors", [])}
+        now, max_age = time.time(), _reading_max_age(layout)
+        for eid in candidates:
+            entry = sources.registry.entities.get(eid) if sources.registry is not None else None
+            if entry is None or entry.platform != "bermuda" or getattr(entry, "disabled_by", None) is not None:
+                continue
+            if key and getattr(entry, "config_entry_id", None) != key[0]:
+                continue
+            state = hass.states.get(eid)
+            if state is None:
+                continue
+            try:
+                value = float(state.state)
+                stamp = getattr(state, "last_updated", None) or getattr(state, "last_changed", None)
+                observed = stamp.timestamp()
+                if math.isfinite(value) and value >= 0 and math.isfinite(observed) and observed <= now \
+                        and (max_age == 0 or now - observed <= max_age):
+                    return True
+            except (TypeError, ValueError, AttributeError, OSError, OverflowError):
+                continue
+        return False
+
     def is_online(slug):
-        age = ages.get(slug)
+        if slug in identity_conflicts or sources.blocked(bindings.get(slug, {"status": "unmatched"})):
+            return None
+        name = matching.get(slug, {}).get("name")
+        mac = matching.get(slug, {}).get("scanner_mac")
+        age = dom.get("rl_mac_ages", {}).get(mac) if len(sources.owners_by_mac.get(mac, ())) <= 1 else None
+        if age is None and not mac and matching.get(slug, {}).get("liveness_name_unique", True):
+            # Name-only ages have no hardware proof. A proven MAC must use its
+            # own age or current connectivity/readings, even after dump failure.
+            age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS
-        st = hass.states.get(f"binary_sensor.{slug}_status")
-        if st and st.attributes.get("device_class") == "connectivity":
-            return _state_looks_online(st.state)
-        resolved = device_online(slug)
-        if resolved is not None:
-            return resolved
-        # tier 4: distance heuristic (last resort). Matches the card: a receiver
-        # here is online only while some tracker reads a distance through it.
-        return slug in with_reading
+        aliases = evidence_slugs(slug)
+        for alias in aliases:
+            st = hass.states.get(f"binary_sensor.{alias}_status")
+            if st and st.attributes.get("device_class") == "connectivity" and st.state not in (None, "", "unknown", "unavailable"):
+                return _state_looks_online(st.state)
+        for alias in aliases:
+            resolved = device_online(alias)
+            if resolved is not None:
+                return resolved
+        # Fresh filtered distances prove online; absence of contact proves nothing.
+        return True if live_distance(slug) else None
 
-    dom["rl_offline"] = sorted(s for s in receivers if not is_online(s))
+    resolved = {s: is_online(s) for s in receivers}
+    dom["rl_offline"] = sorted(s for s, status in resolved.items() if status is False)
+    dom["rl_unknown"] = sorted(s for s, status in resolved.items() if status is None)
 
 
-async def update_receiver_radii(hass, eids):
+async def update_receiver_radii(hass, eids, receiver_sources=None):
     """Update receiver 'r' values (pixels) and raw 'distance' (meters) for an entity"""
     tracker_h = _tracker_height(eids["data"], eids["entity"])
     tracker_factor = _tracker_distance_factor(eids["data"], eids["entity"])
@@ -1151,15 +1329,17 @@ async def update_receiver_radii(hass, eids):
     capture = bool(recording and recording.active and eids["entity"] in recording.sources)
     if outdoor:
         max_age = finite_number(max_age, READING_MAX_AGE_SECS, minimum=0.0, maximum=1e6)
+    sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass)
     for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
-        for receiver in floor["receivers"]:
+        for receiver, binding in zip(floor["receivers"], sources.floor_bindings(floor)):
+            receiver.pop("distance", None)
+            receiver.get("cords", {}).pop("r", None)
             receiver.pop("_diagnostic_reading", None)
             if outdoor:
                 # A saved or previous-cycle radius is never a current reading.
                 receiver.pop("distance", None)
                 receiver.pop("_outdoor_reading", None)
-            entity_id = "sensor." + eids["entity"] + "_distance_to_" + receiver["entity_id"]
-            rec_value = hass.states.get(entity_id)
+            entity_id, rec_value = sources.source(eids["entity"], receiver, binding)
             if rec_value is not None:
                 # Drop a STUCK reading: when a scanner stops hearing the
                 # tracker its distance sensor keeps the last value instead of
@@ -1187,12 +1367,14 @@ async def update_receiver_radii(hass, eids):
                     unit = rec_value.attributes.get("unit_of_measurement")
                     if unit in DistanceConverter.VALID_UNITS and unit != UnitOfLength.METERS:
                         distance = DistanceConverter.convert(distance, unit, UnitOfLength.METERS)
+                    if not math.isfinite(distance) or distance < 0:
+                        continue
                     if outdoor:
-                        if not math.isfinite(distance) or distance < 0:
-                            continue
+                        alias_without_clock = age is None and entity_id != f'sensor.{eids["entity"]}_distance_to_{receiver["entity_id"]}'
                         receiver["_outdoor_reading"] = {
                             "measured_distance_m": distance, "reading_age_s": age,
-                            "observed": reading_time - (age if age is not None else 0.0),
+                            "observed": None if alias_without_clock else reading_time - (age if age is not None else 0.0),
+                            "entity_id": entity_id,
                         }
                     # Per-receiver correction factor learned by the
                     # calibration (calibration.py); equivalent to a
@@ -1209,7 +1391,7 @@ async def update_receiver_radii(hass, eids):
                     # below (a per-tracker constant, so cross-floor ordering
                     # for this tracker is unchanged).
                     distance = distance * tracker_factor
-                    if outdoor and (not math.isfinite(distance) or distance < 0):
+                    if not math.isfinite(distance) or distance < 0:
                         continue
                     # Known mount height: the estimate is a slant range, so
                     # remove the vertical leg (mount height vs the assumed
@@ -1241,7 +1423,7 @@ async def update_receiver_radii(hass, eids):
                                        MIN_WEIGHT_RADIUS_M * MIN_WEIGHT_RADIUS_M)
                         horizontal = math.sqrt(max(distance * distance - dz * dz, floor_sq))
                     radius = floor["scale"] * horizontal
-                    if outdoor and (not math.isfinite(radius) or radius < 0):
+                    if not math.isfinite(radius) or radius < 0:
                         continue
                     receiver["cords"]["r"] = radius
                     # Raw SLANT distance for the floor election: radii are in
@@ -1261,7 +1443,7 @@ async def update_receiver_radii(hass, eids):
                         except (AttributeError, ValueError, TypeError, OSError, OverflowError):
                             observed = None
                         receiver["_diagnostic_reading"] = {
-                            "observed": observed, "corrected_distance_m": distance,
+                            "observed": observed, "entity_id": entity_id, "corrected_distance_m": distance,
                             "horizontal_distance_m": horizontal,
                         }
                 except ValueError:
@@ -1541,6 +1723,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 and not (outdoor and r.get("outdoor_policy") == "ignore")]
             extra["diagnostic_inputs"] = [{"receiver": r.get("entity_id"),
                 "observed": r.get("_diagnostic_reading", {}).get("observed"),
+                "entity_id": r.get("_diagnostic_reading", {}).get("entity_id"),
                 "corrected_distance_m": r.get("_diagnostic_reading", {}).get("corrected_distance_m"),
                 "horizontal_distance_m": r.get("_diagnostic_reading", {}).get("horizontal_distance_m"),
                 "radius_px": pt[2], "jump_environment_weight": pt[3]}
@@ -1840,9 +2023,9 @@ def update_bps_sensor_state(hass, entity_id, state, attributes=None, *, only_cha
         return
     sensor.async_write_ha_state()
 
-async def process_single_entity(hass, new_global_data, eids):
+async def process_single_entity(hass, new_global_data, eids, receiver_sources=None):
     """Process a single entity: first receivers, then trilateration"""
-    await update_receiver_radii(hass, eids)  # Wait for the receivers to update
+    await update_receiver_radii(hass, eids, receiver_sources)  # Wait for the receivers to update
     await update_trilateration_and_zone(hass, new_global_data, eids["entity"])  # When it is complete → perform trilateration
 
 async def process_entities(hass, new_global_data):
@@ -1853,13 +2036,14 @@ async def process_entities(hass, new_global_data):
     async with lock:
         if not _tracking_context_current(context):
             return
+        receiver_sources = ReceiverSources(hass)
         token = _tracking_context.set(context)
         slots = asyncio.Semaphore(MAX_CONCURRENT_TRACKERS)
 
         async def process(eids):
             async with slots:
                 if _tracking_context_current(context):
-                    await process_single_entity(hass, new_global_data, eids)
+                    await process_single_entity(hass, new_global_data, eids, receiver_sources)
 
         try:
             # gather's default raises before surviving siblings finish, letting
@@ -2725,15 +2909,19 @@ class BPSReadAPIText(HomeAssistantView):
             # in that case so it never JSON.parses an empty layout.
             layout = get_bps_data(hass)
             content = json.dumps(layout) if layout else ""
+            diagnostics = _scanner_diagnostics(hass, content)
+            matching = diagnostics["matching"]
             return web.json_response({
                 "coordinates": content,
                 "entities": entities,
-                "receivers": receivers,
+                "receivers": [row["entity_id"] for row in matching["options"]],
+                "receiver_matching": matching,
                 "offline_receivers": offline_receivers,
+                "unknown_receivers": list(hass.data.get(DOMAIN, {}).get("rl_unknown", [])),
                 # Naming-mismatch diagnostics (issue #64): placed receivers whose
                 # slug has no Bermuda distance sensor, and reporting scanners not
                 # placed anywhere.
-                "scanner_diagnostics": _scanner_diagnostics(hass, content),
+                "scanner_diagnostics": diagnostics,
             })
 
         except Exception as e:
@@ -2756,6 +2944,7 @@ def _diagnostic_inventory(hass):
 async def _calibration_tracking_check(hass, floor_name):
     """Compare detached diagnostic samples without touching live calibration."""
     from .calibration_validation import compare_tracking_export
+    from .calibration import _build_receiver_map, _equivalent_updates
     dom = hass.data.setdefault(DOMAIN, {})
     if dom.get("calibration_validation_busy"):
         raise ValueError("A tracking comparison is already running")
@@ -2771,8 +2960,11 @@ async def _calibration_tracking_check(hass, floor_name):
     if floor is None:
         raise ValueError("Solve calibration for the selected floor first")
     # Freeze candidate and geometry before awaiting export/executor work.
-    corrections, floor = copy.deepcopy(result["receivers"]), copy.deepcopy(floor)
+    floor = copy.deepcopy(floor)
+    corrections = _equivalent_updates(hass, floor, copy.deepcopy(result["receivers"]),
+                                     identities=result.get("receiver_identities"))
     current_layout = copy.deepcopy(layout)
+    eligible_receivers = set(_build_receiver_map(current_layout, floor["name"], hass=hass))
     baseline_corrections = {receiver.get("entity_id"): receiver.get("correction", 1)
                             for receiver in floor.get("receivers", [])}
     solved_at = result.get("solved_at")
@@ -2781,7 +2973,8 @@ async def _calibration_tracking_check(hass, floor_name):
         payload = await recording.export()
         report = await hass.async_add_executor_job(partial(compare_tracking_export, payload,
             floor["name"], corrections, floor, trilaterate,
-            baseline_corrections=baseline_corrections, current_layout=current_layout))
+            baseline_corrections=baseline_corrections, current_layout=current_layout,
+            eligible_receivers=eligible_receivers))
         report.update(candidate_solved_at=solved_at, candidate_corrections=corrections)
         return report
     finally:
@@ -2834,15 +3027,16 @@ def _diagnostic_snapshot(hass, targets, now):
         "mode", "floor", "results", "applied", "last_solved_at")}
     readings = []
     max_age = _reading_max_age(data)
+    sources = ReceiverSources(hass)
     for beacon in beacons:
         factor, tracker_height = _tracker_distance_factor(data, beacon), _tracker_height(data, beacon)
         for floor in floors:
-            for receiver in floor.get("receivers", []):
+            for receiver, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
                 slug = receiver.get("entity_id", "")
-                source = f"sensor.{beacon}_distance_to_{slug}"
-                state = hass.states.get(source)
+                source, state = sources.source(beacon, receiver, binding, now=now)
                 row = {"tracker": beacon, "receiver": slug, "floor": floor.get("name"),
-                       "entity_id": source, "status": "missing", "tracker_height_m": tracker_height,
+                       "entity_id": source, "status": binding["status"] if sources.blocked(binding) else "missing",
+                       "scanner_aliases": binding["aliases"], "tracker_height_m": tracker_height,
                        "tracker_distance_factor": factor, "ignored": receiver.get("outdoor_policy") == "ignore"}
                 if state is not None:
                     raw = state.state
@@ -2998,6 +3192,7 @@ def _diagnostic_report_snapshot(hass, now):
     snapshot["offline_receivers"] = list(dom.get("rl_offline", []))
     snapshot["inventory"] = _diagnostic_inventory(hass)
     snapshot["scanner_diagnostics"] = _scanner_diagnostics(hass, json.dumps(snapshot["context"]["layout"]))
+    snapshot["scanner_linking"] = _scanner_linking(hass, json.dumps(snapshot["context"]["layout"]))
     updater = hass.data.get("bps_update_task")
     recording = dom.get("_diagnostics")
     snapshot["runtime"] = {"initialized": bool(hass.data.get("bps_initialized")),
@@ -3038,7 +3233,7 @@ class BPSReceiverStatusAPI(HomeAssistantView):
     async def get(self, request):
         hass = request.app["hass"]
         offline = hass.data.get(DOMAIN, {}).get("rl_offline", [])
-        return web.json_response({"offline": list(offline)})
+        return web.json_response({"offline": list(offline), "unknown": list(hass.data.get(DOMAIN, {}).get("rl_unknown", []))})
 
 
 class BPSScannerLinkingAPI(HomeAssistantView):
@@ -3326,7 +3521,7 @@ SELFTEST_SENSOR_INTERVAL = 1800  # refresh the accuracy sensor every 30 min
 
 
 def _selftest_receivers(coords):
-    """slug -> {entity, x, y, scale, floor, height, correction} for every placement."""
+    """(floor, slug) -> geometry for each usable floor-local placement."""
     out = {}
     if not isinstance(coords, dict):
         return out
@@ -3341,7 +3536,7 @@ def _selftest_receivers(coords):
                 continue
             height = rec.get("height")
             corr = rec.get("correction")
-            out[str(eid)] = {
+            out[(floor.get("name"), str(eid))] = {
                 "entity": str(eid),
                 "x": float(cords["x"]),
                 "y": float(cords["y"]),
@@ -3349,8 +3544,71 @@ def _selftest_receivers(coords):
                 "floor": floor.get("name"),
                 "height": float(height) if isinstance(height, (int, float)) and 0 <= height <= 10 else None,
                 "correction": float(corr) if isinstance(corr, (int, float)) and corr > 0 else 1.0,
+                "identity": (rec.get("scanner_config_entry_id"), rec["scanner_mac"])
+                if rec.get("scanner_mac") else None,
             }
     return out
+
+
+def _selftest_snapshot(hass, samples=None):
+    """Detach registry bindings, current geometry and raw distances on the loop.
+
+    Calibration stores each physical scanner under one canonical sample slug;
+    placements on other floors retain their own geometry and displayed slug.
+    Captured hardware proof keeps an old window from following a replacement
+    scanner merely because it inherited the same label.
+    """
+    coords = get_bps_data(hass)
+    coords = ReceiverSources(hass).calibration_layout(coords if isinstance(coords, dict) else {})
+    receivers = _selftest_receivers(coords)
+    cal = get_calibration_state(hass)
+    captured = cal.get("receivers") or {}
+    routes = cal.get("_auto_routes") or {}
+    # Restore deliberately leaves live receiver maps empty until calibration
+    # starts. The persisted observation baseline still owns these raw samples.
+    # Its canonical routes and hardware proof also apply while auto is off.
+    baseline = cal.get("_auto_geometry")
+    require_proof = baseline is not None
+    if isinstance(baseline, dict):
+        if isinstance(baseline.get("floors"), dict) and isinstance(baseline.get("routes"), dict):
+            routes = baseline["routes"]
+            captured = {}
+            for floor, placements in baseline["floors"].items():
+                for slug, row in placements.items():
+                    canonical = routes.get(floor, {}).get(slug)
+                    if canonical is not None:
+                        captured.setdefault(canonical, row)
+        else:
+            captured, routes = baseline, {}
+    by_identity, claims = {}, {}
+    for slug, row in captured.items():
+        identity = (row.get("scanner_config_entry_id"), row["scanner_mac"]) if row.get("scanner_mac") else None
+        if identity:
+            by_identity.setdefault(identity, set()).add(slug)
+    for (_, slug), row in receivers.items():
+        claims.setdefault(slug, set()).add(row["identity"] or ("exact", slug))
+    ambiguous = {slug for slug, identities in claims.items() if len(identities) != 1}
+    ambiguous.update(cal.get("_auto_ambiguous_slugs") or ())
+    receivers = {key: row for key, row in receivers.items() if key[1] not in ambiguous}
+    for (floor, slug), row in receivers.items():
+        sample_slug = routes.get(floor, {}).get(slug, slug)
+        proven = by_identity.get(row["identity"], ())
+        if len(proven) == 1:
+            sample_slug = next(iter(proven))
+        previous = captured.get(sample_slug)
+        if previous is None and require_proof:
+            sample_slug = None
+        elif previous is not None:
+            identity = (previous.get("scanner_config_entry_id"), previous["scanner_mac"]) if previous.get("scanner_mac") else None
+            if identity != row["identity"]:
+                sample_slug = None
+        row["sample_slug"] = sample_slug
+    return {
+        "receivers": receivers,
+        "bounds": _selftest_floor_bounds(coords, receivers),
+        "samples": {key: list(values) for key, values in
+                    (samples if samples is not None else cal.get("samples", {})).items()},
+    }
 
 
 def _selftest_floor_bounds(coords, receivers):
@@ -3381,24 +3639,22 @@ def _selftest_floor_bounds(coords, receivers):
     return out
 
 
-def run_selftest(hass, samples=None):
+def run_selftest(hass, samples=None, snapshot=None):
     """Leave-one-out receiver self-localization accuracy against known positions.
 
     Solves on the RAW inter-receiver distances BPS collects for calibration
     (median per link), not the Bermuda-filtered distance sensor the live tracker
     reads — so the numbers also exclude Bermuda's own smoothing.
 
-    ``samples`` may be a pre-snapshotted ``{"tx|rx": [floats]}`` taken on the
-    event loop; callers running this in the executor MUST pass one, since the
-    live calibration deques are appended to on the loop and iterating them off
-    thread would race ("deque mutated during iteration"). Defaults to the live
-    samples for direct/synchronous callers.
+    Direct/synchronous callers may pass ``samples={"tx|rx": [floats]}`` or use
+    the live window. Executor callers MUST pass ``_selftest_snapshot(hass)``
+    taken on the event loop as ``snapshot``: registry/model access and copying
+    the sample deques must finish before calibration or the layout can change.
     """
-    coords = get_bps_data(hass)
-    receivers = _selftest_receivers(coords)
-    floor_bounds = _selftest_floor_bounds(coords, receivers)
-    if samples is None:
-        samples = get_calibration_state(hass).get("samples", {})
+    snapshot = snapshot if snapshot is not None else _selftest_snapshot(hass, samples)
+    receivers = snapshot["receivers"]
+    floor_bounds = snapshot["bounds"]
+    samples = snapshot["samples"]
 
     def _measured_m(target, rx):
         # The live tracker sees the beacon (target) transmit and a receiver hear
@@ -3410,12 +3666,15 @@ def run_selftest(hass, samples=None):
         return float(np.median(vals))
 
     solved, unsolved = [], []
-    for slug, tgt in receivers.items():
+    for key, tgt in receivers.items():
+        slug = tgt["entity"]
         pts = []
-        for oslug, o in receivers.items():
-            if oslug == slug or o["floor"] != tgt["floor"]:
+        for other_key, o in receivers.items():
+            if other_key == key or o["floor"] != tgt["floor"]:
                 continue
-            raw = _measured_m(slug, oslug)
+            if tgt["sample_slug"] is None or o["sample_slug"] is None:
+                continue
+            raw = _measured_m(tgt["sample_slug"], o["sample_slug"])
             if raw is None:
                 continue
             d = raw * o["correction"]  # receiving scanner's correction (live path)
@@ -3693,9 +3952,7 @@ class BPSSelfTestAPI(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request):
-        # One scipy solve per receiver; run off the event loop. Snapshot the
-        # calibration sample deques HERE (on the loop) before handing to the
-        # executor, so iterating them off-thread can't race calibration's ingest.
-        samples = {k: list(v) for k, v in get_calibration_state(self.hass).get("samples", {}).items()}
-        data = await self.hass.async_add_executor_job(run_selftest, self.hass, samples)
+        # Bind aliases and detach geometry/samples before leaving the loop.
+        snapshot = _selftest_snapshot(self.hass)
+        data = await self.hass.async_add_executor_job(run_selftest, None, None, snapshot)
         return web.json_response(data)

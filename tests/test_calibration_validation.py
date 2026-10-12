@@ -92,6 +92,48 @@ def test_auto_replay_baseline_uses_live_corrections_and_scanner_relink_invalidat
     assert result['eligible_samples'] == 0
 
 
+@pytest.mark.parametrize('replacement', [
+    {'scanner_mac': 'dd:ee:ff:11:22:33'},
+    {'scanner_config_entry_id': 'replacement-owner'},
+])
+def test_full_scanner_binding_change_invalidates_recording_and_tracking_check(hass, monkeypatch, replacement):
+    from test_receiver_matching import configure
+    entries, states, devices, add = configure(hass, monkeypatch)
+    data, floor = recording()
+    floor['receivers'][0].update(scanner_uid='112233', scanner_mac='aa:bb:cc:11:22:33',
+                                 scanner_config_entry_id='entry')
+    current = copy.deepcopy(data['contexts']['c']['layout'])
+    current['floor'][0]['receivers'][0].update(replacement)
+    for index, receiver in enumerate(current['floor'][0]['receivers']):
+        mac = receiver.get('scanner_mac', f'aa:bb:cc:44:55:{index:02x}')
+        eid = f"sensor.tag_distance_to_{receiver['entity_id']}"
+        add(eid, '4', uid='synthetic-tag_' + mac + '_range')
+        entries[eid].config_entry_id = receiver.get('scanner_config_entry_id', 'entry')
+    # Both full MACs have the same hardware suffix and the receiver name remains
+    # unchanged. The current scanner is valid, but old measurements are not its data.
+    async def export():
+        return json.dumps(data).encode()
+    hass.data['bps'] = {'layout': current,
+        '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
+        'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS}}}}
+    result = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
+    assert result['verdict'] == 'inconclusive'
+    assert result['eligible_samples'] == result['baseline']['samples'] == 0
+    # Automatic calibration uses the same replay entry point and geometry guard.
+    result = compare_tracking(data, 'Yard', FACTORS, current['floor'][0], bps.trilaterate,
+                              {s: 1. for s in FACTORS}, current, set(FACTORS))
+    assert result['eligible_samples'] == result['baseline']['samples'] == 0
+
+
+def test_recording_with_unchanged_full_scanner_binding_remains_eligible():
+    data, floor = recording()
+    floor['receivers'][0].update(scanner_uid='112233', scanner_mac='aa:bb:cc:11:22:33',
+                                 scanner_config_entry_id='entry')
+    result = compare(data, copy.deepcopy(floor))
+    assert result['verdict'] == 'improves'
+    assert result['baseline']['samples'] == 20
+
+
 def test_cached_readings_do_not_inflate_samples_and_geometry_changes_excluded():
     data, floor = recording()
     data['frames'].extend(copy.deepcopy(data['frames'][-1:]) * 20)
@@ -139,6 +181,36 @@ def test_authenticated_calibration_test_uses_detached_recording(hass, monkeypatc
     hass.data['bps']['calibration_validation_busy'] = True
     with pytest.raises(ValueError, match='already running'):
         asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
+
+
+def test_tracking_comparison_uses_corrections_apply_saves_after_proven_rematch(hass, monkeypatch):
+    from test_receiver_matching import configure
+    from bps import calibration as calibration
+    entries, states, devices, add = configure(hass, monkeypatch)
+    data, floor = recording()
+    floor['receivers'][0]['entity_id'] = 'r0_current'
+    for frame in data['frames']:
+        for row in frame['readings']:
+            if row['receiver'] == 'r0':
+                row['receiver'] = 'r0_current'
+    for index, slug in enumerate(['r0', 'r0_current', 'r1', 'r2', 'r3']):
+        mac = 'aa:bb:cc:11:22:33' if index < 2 else f'aa:bb:cc:44:55:{index:02x}'
+        add(f'sensor.tag_distance_to_{slug}', '4', uid='synthetic-tag_' + mac + '_range')
+    current = copy.deepcopy(data['contexts']['c']['layout'])
+    async def export():
+        return json.dumps(data).encode()
+    hass.data['bps'] = {'layout': current,
+        '_diagnostics': types.SimpleNamespace(frames=[1], export=export),
+        'calibration': {'results': {'Yard': {'floor': 'Yard', 'receivers': FACTORS, 'solved_at': 'solve-date',
+            'receiver_identities': {'r0': {'scanner_mac': 'aa:bb:cc:11:22:33', 'scanner_config_entry_id': 'entry'}}}}}}
+    result = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
+    proof = hass.data['bps']['calibration']['results']['Yard']['receiver_identities']
+    applied = calibration._equivalent_updates(hass, current['floor'][0], FACTORS, identities=proof)
+    assert result['candidate_corrections'] == applied == {'r0_current': .5, 'r1': 2., 'r2': 1., 'r3': 1.}
+    assert result['candidate_solved_at'] == 'solve-date'
+    assert result['verdict'] == 'improves'
+    assert result['candidate']['p95_m'] < .01
+    assert result['baseline']['samples'] == 20
 
 
 def test_tracking_test_compares_candidate_to_current_installed_corrections(hass):

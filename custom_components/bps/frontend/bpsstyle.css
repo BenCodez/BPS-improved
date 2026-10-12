@@ -3194,8 +3194,8 @@ select.bps-input { cursor: pointer; }
     white-space: nowrap;
 }
 .bps-chip-live { background: hsl(142 71% 45% / 0.18); color: hsl(142 61% 38%); }
-.bps-chip-silent { background: hsl(38 92% 50% / 0.18); color: hsl(38 92% 42%); }
-.bps-chip-unmatched { background: hsl(0 84% 60% / 0.18); color: hsl(0 74% 52%); }
+.bps-chip-unknown, .bps-chip-silent { background: hsl(38 92% 50% / 0.18); color: hsl(38 92% 42%); }
+.bps-chip-offline, .bps-chip-unmatched { background: hsl(0 84% 60% / 0.18); color: hsl(0 74% 52%); }
 
 /* Map sidebar: compact "not reporting right now" heads-up (names only). */
 .bps-linking { margin: 8px 0; font-size: 12px; }

@@ -141,7 +141,7 @@ def test_bps_registry_states_link_groups_without_exporting_unrelated_attributes(
 
 
 def test_full_bps_report_includes_bermuda_and_ages_old_fixes_without_mutating_them(hass, monkeypatch):
-    fixture(hass, monkeypatch)
+    *_, secret = fixture(hass, monkeypatch)
     quality = {"observed": 50, "stale_after_s": 30, "position_age_s": 0, "stale": False}
     hass.data["bps"] = {"layout": {"floor": [], "history_min_move_m": 1},
         "apitricords": [{"ent": "tag", "updated": 100, "outdoor": quality}]}
@@ -152,4 +152,7 @@ def test_full_bps_report_includes_bermuda_and_ages_old_fixes_without_mutating_th
     assert report["positions"][0]["outdoor"]["stale"] is True
     assert quality["position_age_s"] == 0 and quality["stale"] is False
     assert report["runtime"]["effective_history_settings"]["min_move_m"] == 1
+    assert report["scanner_linking"]["matching"]["read_only"]
+    assert report["scanner_linking"]["matching"]["options"][0]["scanner_mac"] == "aa:bb:cc:dd:ee:ff"
+    assert secret not in json.dumps(report["scanner_linking"])
     assert not hass._store_saves

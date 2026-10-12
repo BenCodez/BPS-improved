@@ -54,6 +54,52 @@ def test_absolute_replacement_and_current_transfer_use_actual_attenuation_and_ex
     json.dumps(export, allow_nan=False)
 
 
+def test_real_tracking_validation_with_equivalent_alias_preserves_canonical_preview(hass, monkeypatch):
+    import bps
+    from test_receiver_matching import configure
+    from test_calibration_validation import recording, FACTORS
+    entries, states, scanners, add = configure(hass, monkeypatch)
+    data, floor = recording()
+    _, devices, _, _, _ = fixture()
+    alias = copy.deepcopy(floor['receivers'][0]); alias['entity_id'] = 'r0_alias'
+    floor['receivers'].append(alias)
+    for index, slug in enumerate(['r0', 'r1', 'r2', 'r3', 'r0_alias']):
+        mac = f'aa:bb:cc:dd:ee:{index if index < 4 else 0:02x}'
+        add(f'sensor.tag_distance_to_{slug}', '4', uid='synthetic-tag_' + mac + '_range')
+    current = copy.deepcopy(data['contexts']['c']['layout'])
+    receivers = C._build_receiver_map(current, hass=hass)
+    mapping = C._match_scanners({'receivers': receivers}, devices)
+    source = B.source_snapshot(receivers, devices, mapping)
+    solved = {'floor': 'Yard', 'solved_at': 'solve-date', 'receivers': FACTORS,
+        'error_factor_before': 2., 'error_factor_after': 1., 'bermuda_source': source}
+    async def export():
+        return json.dumps(data).encode()
+    hass.data['bps'] = {'layout': current,
+        '_diagnostics': NS(frames=[1], export=export),
+        'calibration': {'results': {'Yard': solved}}}
+    tracking = asyncio.run(bps._calibration_tracking_check(hass, 'Yard'))
+    assert tracking['verdict'] == 'improves'
+    assert tracking['candidate_corrections'] == {**FACTORS, 'r0_alias': FACTORS['r0']}
+    preview = B.build_preview(current, 'Yard', solved, source, tracking)
+    canonical = [row for row in preview['rows'] if row['receiver'] in FACTORS]
+    assert len(canonical) == 4
+    assert all(row['candidate_eligible'] for row in canonical)
+    assert 'measured_tracking_revalidation_required' not in preview['warnings']
+
+
+@pytest.mark.parametrize('change', ['missing', 'different'])
+def test_preview_rejects_expanded_report_that_did_not_test_all_solved_factors(change):
+    layout, _, source, result, tracking = fixture()
+    tracking['candidate_corrections']['r0_alias'] = result['receivers']['r0']
+    if change == 'missing':
+        del tracking['candidate_corrections']['r0']
+    else:
+        tracking['candidate_corrections']['r0'] = 1.5
+    preview = B.build_preview(layout, 'Yard', result, source, tracking)
+    assert 'measured_tracking_revalidation_required' in preview['warnings']
+    assert all(not row['candidate_eligible'] for row in preview['rows'])
+
+
 @pytest.mark.parametrize("issue,reason", [
     ("legacy", "sample_source_unverified"), ("offset", "sample_source_changed"),
     ("geometry", "sample_source_changed"), ("attenuation", "sample_source_changed"),

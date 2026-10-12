@@ -158,7 +158,7 @@ def test_recent_history_samples_completed_batch_and_group_once(hass, monkeypatch
     async def scenario():
         configure(hass, monkeypatch)
         calls = []
-        async def tracker(_hass, _data, eids):
+        async def tracker(_hass, _data, eids, receiver_sources=None):
             await asyncio.sleep(0)
             calls.append(eids["entity"])
         async def group(_hass):

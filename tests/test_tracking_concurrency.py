@@ -50,7 +50,7 @@ def test_failed_tracker_is_drained_before_groups_and_next_batch(hass, monkeypatc
         started, release = asyncio.Event(), asyncio.Event()
         events = []
 
-        async def tracker(_hass, _data, entry):
+        async def tracker(_hass, _data, entry, receiver_sources=None):
             if entry["entity"] == "failed":
                 await started.wait()
                 raise ValueError("bad receiver")
@@ -87,7 +87,7 @@ def test_overlapping_batches_bound_parallel_work_and_preserve_order(hass, monkey
         active = maximum = 0
         events = []
 
-        async def tracker(_hass, _data, entry):
+        async def tracker(_hass, _data, entry, receiver_sources=None):
             nonlocal active, maximum
             active += 1
             maximum = max(maximum, active)
@@ -144,7 +144,7 @@ def test_queued_batch_from_replaced_layout_is_discarded(hass, monkeypatch):
         started, release = asyncio.Event(), asyncio.Event()
         calls = []
 
-        async def tracker(_hass, _data, entry):
+        async def tracker(_hass, _data, entry, receiver_sources=None):
             calls.append(entry["entity"])
             started.set()
             await release.wait()
@@ -332,7 +332,7 @@ def test_repeated_reload_retains_physical_worker_limit(hass, monkeypatch, fail_a
         async def executor(func, *args):
             return await asyncio.to_thread(func, *args)
 
-        async def tracker(_hass, _data, entry):
+        async def tracker(_hass, _data, entry, receiver_sources=None):
             await bps._tracking_executor_job(hass, worker)
 
         async def groups(_hass):
@@ -412,7 +412,7 @@ def test_unload_drains_tracking_before_platform_and_history_teardown(hass, monke
         monkeypatch.setattr(bps.er, "async_get", lambda _hass: SimpleNamespace(entities={}), raising=False)
         monkeypatch.setattr(bps, "async_remove_panel", lambda *a, **k: None)
         hass.states = SimpleNamespace(async_all=lambda: [])
-        hass.config_entries = SimpleNamespace(async_unload_platforms=unload_platforms)
+        hass.config_entries = SimpleNamespace(async_unload_platforms=unload_platforms, async_entries=lambda _domain: [])
         hass.data["bps_initialized"] = True
         task = asyncio.create_task(bps.process_entities(hass, [{"entity": "a"}]))
         hass.data["bps_update_task"] = task

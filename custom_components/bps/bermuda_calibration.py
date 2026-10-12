@@ -10,6 +10,7 @@ import math
 from collections.abc import Mapping
 
 from .bermuda_diagnostics import MAC, _coordinator
+from .scanner_addresses import retained_mac
 
 
 def number(value):
@@ -76,7 +77,7 @@ def source_snapshot(receivers, devices, scanner_map):
 def runtime_context(hass, coords, floor_name):
     """Detach public scanner fields from installed Bermuda coordinators."""
     from .calibration import _all_placed_slugs, _build_receiver_map, _match_scanners
-    receivers = _build_receiver_map(coords, floor_name)
+    receivers = _build_receiver_map(coords, floor_name, hass=hass)
     manager = getattr(hass, "config_entries", None)
     entries = manager.async_entries("bermuda") if manager is not None else []
     devices, owners, options_by_mac, offset_keys = {}, {}, {}, {}
@@ -89,11 +90,13 @@ def runtime_context(hass, coords, floor_name):
             if getattr(dev, "_is_scanner", False) is not True:
                 continue
             address = getattr(dev, "address", None)
-            if not isinstance(address, str) or not MAC.fullmatch(address):
+            identity = retained_mac(dev)
+            if not isinstance(address, str) or not MAC.fullmatch(address) or identity is None:
                 continue
             original_address = address
             address = address.lower()
-            row = {"_is_scanner": True, "address": address, "name": getattr(dev, "name", ""), "adverts": {}}
+            row = {"_is_scanner": True, "address": address, "address_wifi_mac": identity,
+                   "name": getattr(dev, "name", ""), "_bps_config_entry_id": entry.entry_id, "adverts": {}}
             ads = getattr(dev, "adverts", {})
             if isinstance(ads, Mapping):
                 for index, advert in enumerate(ads.values()):
@@ -142,7 +145,57 @@ def source_for_floor(source, floor_name):
     return source
 
 
-def build_preview(coords, floor_name, result, current_source, tracking=None):
+def _rematched_inputs(hass, floor, result, current_source):
+    """Route a captured solve exactly as Apply, including its source evidence.
+
+    Names alone cannot move old calibration evidence. The Apply helper only
+    migrates absent keys with the solve's captured owner/full scanner identity,
+    and excludes contradictory placements or solved values.
+    """
+    from .calibration import _equivalent_updates
+    identities = result.get("receiver_identities")
+    candidates = _equivalent_updates(hass, floor, result.get("receivers", {}), identities=identities)
+    historical = source_for_floor(result.get("bermuda_source"), floor["name"])
+    current = source_for_floor(current_source, floor["name"])
+    weak = set(result.get("low_confidence", []))
+    if historical is None:
+        return candidates, historical, current, weak
+    routes = _equivalent_updates(hass, floor,
+        {slug: slug for slug in historical["receivers"]}, identities=identities)
+    targets_by_source = {}
+    for slug, source_slug in routes.items():
+        if slug in current["receivers"]:
+            targets_by_source.setdefault(source_slug, []).append(slug)
+    rows = {}
+    mapped_weak = set()
+    for old_slug, row in historical["receivers"].items():
+        targets = targets_by_source.get(old_slug, [])
+        if not targets:
+            # Keep unsupported evidence so removal/replacement fails the full
+            # source comparison rather than silently dropping an old scanner.
+            rows[old_slug] = row
+        for slug in targets:
+            old_row = copy.deepcopy(row)
+            new_row = current["receivers"][slug]
+            old_geometry, new_geometry = old_row.get("geometry", {}), new_row.get("geometry", {})
+            proof = (identities or {}).get(old_slug, {})
+            mac, owner = proof.get("scanner_mac"), proof.get("scanner_config_entry_id")
+            if (isinstance(mac, str) and MAC.fullmatch(mac) and isinstance(owner, str) and owner
+                    and all(g.get("scanner_mac") == mac and g.get("scanner_config_entry_id") == owner
+                            for g in (old_geometry, new_geometry))):
+                # Relinking can add the legacy suffix hint. Full owner/MAC
+                # proof supersedes that hint; physical geometry/model fields
+                # still participate in the unchanged source comparison.
+                old_geometry.pop("uid", None)
+                new_geometry.pop("uid", None)
+            rows[slug] = old_row
+            if old_slug in weak:
+                mapped_weak.add(slug)
+    historical["receivers"] = rows
+    return candidates, historical, current, weak | mapped_weak
+
+
+def build_preview(coords, floor_name, result, current_source, tracking=None, *, hass=None):
     """Pure export. No HA service, persistence, or calibration mutation."""
     floor = next((f for f in coords.get("floor", []) if str(f.get("name", "")).strip().lower() ==
                   str(floor_name or "").strip().lower()), None)
@@ -151,21 +204,29 @@ def build_preview(coords, floor_name, result, current_source, tracking=None):
     result = result or {}
     source_rows = current_source.get("receivers", {})
     candidates = result.get("receivers", {})
+    historical = source_for_floor(result.get("bermuda_source"), floor_name)
+    comparable_current = source_for_floor(current_source, floor_name)
+    weak = set(result.get("low_confidence", []))
+    if hass is not None:
+        candidates, historical, comparable_current, weak = _rematched_inputs(hass, floor, result, current_source)
     warnings = []
     if coords.get("auto_calibration"):
         warnings.append("automatic_bps_calibration_enabled")
-    historical = result.get("bermuda_source")
     if not historical:
         warnings.append("sample_source_unverified")
-    elif source_for_floor(historical, floor_name) != source_for_floor(current_source, floor_name):
+    elif historical != comparable_current:
         warnings.append("sample_source_changed")
     before, after = result.get("error_factor_before"), result.get("error_factor_after")
     if not number(before) or not number(after):
         warnings.append("solve_error_unavailable")
     elif after > before:
         warnings.append("solve_worsens_reference_error")
-    validated = (tracking is not None and tracking.get("candidate_solved_at") == result.get("solved_at")
-                 and tracking.get("candidate_corrections") == candidates)
+    tested = tracking.get("candidate_corrections") if tracking is not None else None
+    # Tracking replay expands equivalent aliases exactly as Apply does. Extra
+    # alias keys are harmless, but every solved factor still needs validation.
+    validated = (bool(candidates) and tracking is not None and tracking.get("candidate_solved_at") == result.get("solved_at")
+                 and isinstance(tested, Mapping) and all(slug in tested and tested[slug] == factor
+                     for slug, factor in candidates.items()))
     if not validated:
         warnings.append("measured_tracking_revalidation_required")
     elif tracking.get("verdict") != "improves":
@@ -188,7 +249,7 @@ def build_preview(coords, floor_name, result, current_source, tracking=None):
             row_warnings.append("receiver_unsupported_by_solve")
         elif delta_db(proposed, n) is None:
             row_warnings.append("proposed_bps_factor_invalid")
-        if slug in result.get("low_confidence", []):
+        if slug in weak:
             row_warnings.append("weak_receiver_confidence")
         delta = delta_db(proposed, n)
         transfer = delta_db(current, n)

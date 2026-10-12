@@ -6,9 +6,9 @@ const vm = require('node:vm');
 const directory = join(__dirname, '../../custom_components/bps/frontend');
 const plain = x => JSON.parse(JSON.stringify(x));
 
-async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false) {
+async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false, matching = null) {
     const ids = new Map(), listeners = new Map(), requests = [], intervals = [], canvasCalls = [];
-    const network = {cords: [], cordsStatus: 200, failCords: false, calibration: {}};
+    const network = {cords: [], cordsStatus: 200, failCords: false, calibration: {}, matching, matchingRequest: null};
     let clock = Date.now();
     class ClockDate extends Date {static now() {return clock;}}
     const context = new Proxy({}, {get: (obj, key) => key === 'setLineDash' ? dash => canvasCalls.push(['dash', ...dash])
@@ -51,7 +51,10 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         fetch: async (url, options) => {
             requests.push({url, options});
             if (url === '/api/bps/cords' && network.failCords) throw new Error('connection lost');
-            const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: []}
+            if (url === '/api/bps/scanner_linking' && network.matchingRequest) return await network.matchingRequest();
+            if (url === '/api/bps/scanner_linking' && network.matching) return {ok: true, status: 200,
+                json: async () => ({placed: [], unplaced: [], beacons: [], matching: network.matching})};
+            const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: (matching?.options || []).map(o => o.entity_id), receiver_matching: matching, scanner_diagnostics: matching?.scanner_diagnostics}
                 : url === '/api/bps/cords' ? network.cords
                 : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration
                 : url.startsWith('/api/bps/diagnostics?report=1') ? {text: 'BPS full diagnostics\n{"context":{"layout":{"floor":[]}}}'} : [];
@@ -62,15 +65,16 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     vm.runInContext(readFileSync(join(directory, 'diagnostics.js'), 'utf8'), sandbox);
     // Expose closures only in the VM so production keeps its private state.
     const code = readFileSync(join(directory, 'script.js'), 'utf8').replace('    // With a single configured floor', `
-        globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons,
+        globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons, redrawAll,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
-            tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt};
+            tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt, addDeviceButton, saveReceiver};
     // With a single configured floor`);
     vm.runInContext(code, sandbox);
     const ready = listeners.get('DOMContentLoaded')();
     listeners.get('window:message')({origin: window.location.origin, data: {type: 'bps-auth', token: 'test-token'}});
     await ready;
+    await new Promise(resolve => setImmediate(resolve));
     return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests, intervals, canvasCalls, network, document, listeners,
         setClock: now => {clock = now;}};
 }
@@ -830,4 +834,449 @@ test('auto preview distinguishes existing weak receivers from newly placed recei
     await p.el('calibAuto').fire('change');
     assert.match(p.el('calibResults').innerHTML, /No matching Bermuda scanner:/);
     assert.doesNotMatch(p.el('calibResults').innerHTML, /Placed since this report/);
+});
+
+const matchingFixture = () => ({read_only: true, revision: 'inventory-1', options: [
+    {entity_id: 'workshop_112233', name: 'Workshop', scanner_mac: 'aa:bb:cc:11:22:33', token: '112233', label: 'Workshop · workshop_112233 · aa:bb:cc:11:22:33', selectable: true},
+    {entity_id: 'atrium_445566', name: 'Atrium', scanner_mac: 'aa:bb:cc:44:55:66', token: '445566', label: 'Atrium · atrium_445566 · aa:bb:cc:44:55:66', selectable: true},
+    {entity_id: 'ambiguous', name: 'Ambiguous', selectable: false, label: 'Ambiguous'},
+]});
+const flushMatching = () => new Promise(resolve => setImmediate(resolve));
+async function receiverMatch(p, index = 0) {
+    const rec = p.hooks.layout().floor.find(f => f.name === 'Property').receivers[index];
+    const button = {getAttribute: key => key === 'data-index' ? String(index) : rec.entity_id};
+    p.listeners.get('click')({target: {closest: selector => selector === '[data-type="matchrec"]' ? button : null}});
+    await flushMatching();
+    const found = p.document.body.children.findLast(e => e.className === 'bps-modal-overlay');
+    assert.ok(found, JSON.stringify({requests: p.requests.map(r => r.url), children: p.document.body.children.map(e => ({className: e.className, children: e.children.map(c => c.textContent)}))}));
+    const dialog = found.children[0];
+    return {select: dialog.children[2], hint: dialog.children[3], error: dialog.children[4], cancel: dialog.children[5].children[0], apply: dialog.children[5].children[1]};
+}
+
+test('receiver match chooser uses Bermuda labels and authenticated reads; cancel is atomic and Apply preserves placement metadata and other floors', async () => {
+    const source = layout();
+    source.floor[0].receivers = [{entity_id: 'old_112233', cords: {x: 10, y: 20}, height: 2.5, height_unit: 'ft', correction: 1.3,
+        hardware_model: 'Synthetic station', antenna_notes: 'Synthetic antenna', distance_accuracy_m: 2, outdoor_policy: 'auto', custom_metadata: {keep: true}}];
+    source.floor.push({...source.floor[0], name: 'Upstairs', receivers: JSON.parse(JSON.stringify(source.floor[0].receivers))});
+    const p = await panel(source, [], false, matchingFixture()); p.hooks.select('Property');
+    const before = plain(p.hooks.layout());
+    let dialog = await receiverMatch(p);
+    assert.equal(dialog.select.value, '', 'hardware suggestion never auto-selects');
+    assert.match(dialog.select.children[1].textContent, /Workshop.*112233.*aa:bb/);
+    assert.match(dialog.hint.textContent, /Hardware match/);
+    dialog.select.value = 'workshop_112233'; await dialog.cancel.fire('click');
+    assert.deepEqual(plain(p.hooks.layout()), before);
+    dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    const after = plain(p.hooks.layout());
+    assert.equal(after.floor[0].receivers[0].entity_id, 'workshop_112233');
+    assert.equal(after.floor[0].receivers[0].scanner_uid, '112233');
+    assert.equal(after.floor[0].receivers[0].scanner_mac, 'aa:bb:cc:11:22:33');
+    const metadata = {...after.floor[0].receivers[0]}; delete metadata.scanner_uid; delete metadata.scanner_mac; metadata.entity_id = 'old_112233';
+    assert.deepEqual(metadata, before.floor[0].receivers[0]);
+    assert.deepEqual(after.floor[1], before.floor[1]);
+    assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    for (const request of p.requests.filter(r => r.url === '/api/bps/scanner_linking')) {
+        assert.equal(request.options.headers.Authorization, 'Bearer test-token');
+    }
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].receivers[0], after.floor[0].receivers[0]);
+});
+
+test('receiver matcher rejects forged, ambiguous, duplicate and stale choices, and permits distinct co-located scanners and same scanner on other floors', async () => {
+    const source = layout();
+    source.floor[0].receivers = [{entity_id: 'old_112233', cords: {x: 10, y: 20}}, {entity_id: 'workshop_112233', cords: {x: 10, y: 20}}];
+    source.floor.push({name: 'Upstairs', scale: 10, zones: [], receivers: [{entity_id: 'atrium_445566', cords: {x: 2, y: 3}}]});
+    const p = await panel(source, [], false, matchingFixture()); p.hooks.select('Property');
+    const before = plain(p.hooks.layout());
+    let dialog = await receiverMatch(p);
+    for (const invalid of ['forged', 'ambiguous']) {
+        dialog.select.value = invalid; await dialog.apply.fire('click'); assert.match(dialog.error.textContent, /known Bermuda/);
+        assert.deepEqual(plain(p.hooks.layout()), before);
+    }
+    dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    assert.match(dialog.error.textContent, /already bound/); assert.deepEqual(plain(p.hooks.layout()), before);
+    p.network.matching = {...p.network.matching, revision: 'inventory-2'};
+    dialog.select.value = 'atrium_445566'; await dialog.apply.fire('click');
+    assert.match(dialog.error.textContent, /inventory changed/); assert.deepEqual(plain(p.hooks.layout()), before);
+    await dialog.cancel.fire('click');
+    dialog = await receiverMatch(p); dialog.select.value = 'atrium_445566'; await dialog.apply.fire('click');
+    assert.equal(p.hooks.layout().floor[0].receivers[0].entity_id, 'atrium_445566');
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 2, 'co-located distinct scanners retained');
+    assert.deepEqual(plain(p.hooks.layout().floor[1]), before.floor[1]);
+});
+
+test('receiver match rejects changed floors/placements and cancellation while freshness request is pending cannot mutate', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'old_112233', cords: {x: 1, y: 2}, correction: 1.4}];
+    const p = await panel(source, [], false, matchingFixture()); p.hooks.select('Property');
+    let dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233';
+    p.hooks.layout().floor[0].receivers[0].height = 3;
+    await dialog.apply.fire('click'); assert.match(dialog.error.textContent, /placement changed/);
+    await dialog.cancel.fire('click');
+    dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233';
+    p.hooks.select('Upstairs'); await dialog.apply.fire('click'); assert.match(dialog.error.textContent, /floor or placement changed/);
+    await dialog.cancel.fire('click'); p.hooks.select('Property');
+    dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233';
+    let resolveRequest;
+    p.network.matchingRequest = () => new Promise(resolve => {resolveRequest = resolve;});
+    const before = plain(p.hooks.layout()); const pending = dialog.apply.fire('click'); await flushMatching();
+    await dialog.cancel.fire('click'); resolveRequest({ok: true, status: 200, json: async () => ({matching: p.network.matching})});
+    await pending; assert.deepEqual(plain(p.hooks.layout()), before);
+});
+
+test('distinct full scanner MACs sharing a token can be co-located and contradictory MACs never produce a hardware hint', async () => {
+    const matching = matchingFixture();
+    matching.options.push({entity_id: 'courtyard_112233', name: 'Courtyard', scanner_mac: 'dd:ee:ff:11:22:33', token: '112233', selectable: true, label: 'Courtyard · courtyard_112233 · dd:ee:ff:11:22:33'});
+    const source = layout(); source.floor[0].receivers = [
+        {entity_id: 'old_112233', scanner_mac: '00:00:00:11:22:33', scanner_uid: '112233', cords: {x: 10, y: 20}},
+        {entity_id: 'workshop_112233', scanner_mac: 'aa:bb:cc:11:22:33', scanner_uid: '112233', cords: {x: 10, y: 20}},
+    ];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    const dialog = await receiverMatch(p); assert.match(dialog.hint.textContent, /No unique hardware match/);
+    dialog.select.value = 'courtyard_112233'; await dialog.apply.fire('click');
+    assert.equal(p.hooks.layout().floor[0].receivers[0].entity_id, 'courtyard_112233');
+    assert.equal(p.hooks.layout().floor[0].receivers[0].scanner_mac, 'dd:ee:ff:11:22:33');
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 2);
+});
+
+test('same-floor scanner aliases with proven identical MAC cannot be bound twice', async () => {
+    const matching = matchingFixture(); matching.options.push({...matching.options[0], entity_id: 'renamed_workshop', label: 'Workshop renamed'});
+    const source = layout(); source.floor[0].receivers = [
+        {entity_id: 'old', cords: {x: 10, y: 20}}, {entity_id: 'workshop_112233', cords: {x: 20, y: 30}},
+    ];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    const before = plain(p.hooks.layout()); const dialog = await receiverMatch(p);
+    dialog.select.value = 'renamed_workshop'; await dialog.apply.fire('click');
+    assert.match(dialog.error.textContent, /already bound/); assert.deepEqual(plain(p.hooks.layout()), before);
+    await dialog.cancel.fire('click');
+});
+
+test('applying an existing scanner slug repairs stored hardware identity without changing placement properties', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'workshop_112233', scanner_uid: 'obsolete',
+        scanner_mac: 'dd:ee:ff:11:22:33', cords: {x: 10, y: 20}, height: 2, correction: 1.2, hardware_model: 'Synthetic'}];
+    const p = await panel(source, [], false, matchingFixture()); p.hooks.select('Property');
+    const before = plain(p.hooks.layout().floor[0].receivers[0]);
+    const dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    const after = plain(p.hooks.layout().floor[0].receivers[0]);
+    assert.deepEqual(after, {...before, scanner_uid: '112233', scanner_mac: 'aa:bb:cc:11:22:33'});
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].receivers[0], after);
+});
+
+test('real receiver chooser persists full MAC and config owner only on explicit Save', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['synthetic-owner'];
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'old_station', cords: {x: 10, y: 20},
+        height: 2, correction: 1.2, hardware_model: 'Synthetic', custom_metadata: {keep: true}}];
+    const before = plain(source.floor[0].receivers[0]);
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    const dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    const matched = plain(p.hooks.layout().floor[0].receivers[0]);
+    assert.deepEqual(matched, {...before, entity_id: 'workshop_112233', scanner_uid: '112233',
+        scanner_mac: 'aa:bb:cc:11:22:33', scanner_config_entry_id: 'synthetic-owner'});
+    assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    await p.hooks.savedata(true);
+    const save = p.requests.find(r => r.url === '/api/bps/save_text');
+    assert.equal(save.options.headers.Authorization, 'Bearer test-token');
+    const saved = JSON.parse(save.options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].receivers[0], matched);
+    const reopened = await panel(saved, [], false, matching);
+    assert.equal(reopened.hooks.layout().floor[0].receivers[0].scanner_config_entry_id, 'synthetic-owner');
+    assert.equal(reopened.hooks.layout().floor[0].receivers[0].scanner_mac, 'aa:bb:cc:11:22:33');
+});
+
+test('proven saved aliases render as known and conflicting placements show actionable diagnostics', async () => {
+    const matching = matchingFixture();
+    matching.scanner_diagnostics = {alias_receivers: [{entity_id: 'old_station', scanner_mac: 'aa:bb:cc:11:22:33',
+        config_entry_ids: ['synthetic-owner'], aliases: ['workshop_112233']}], placement_issues: [{floor: 'Property',
+        placement_index: 1, entity_id: 'workshop_112233', status: 'conflicting_scanner_placements',
+        action: 'Keep one placement for this physical scanner on this floor, or match the other placement to a different scanner.'}]};
+    const source = layout(); source.floor[0].receivers = [
+        {entity_id: 'old_station', scanner_mac: 'aa:bb:cc:11:22:33', scanner_config_entry_id: 'synthetic-owner', cords: {x: 10, y: 20}},
+        {entity_id: 'workshop_112233', cords: {x: 30, y: 40}},
+    ];
+    const before = plain(source); const p = await panel(source, [], false, matching);
+    p.hooks.select('Property'); p.hooks.redrawAll();
+    assert.match(p.el('scannerissues').innerHTML, /Receiver matching issues/);
+    assert.match(p.el('scannerissues').innerHTML, /Keep one placement/);
+    assert.doesNotMatch(p.el('scannerissues').innerHTML, /No known Bermuda identity/);
+    assert.deepEqual(plain(p.hooks.layout().floor), before.floor);
+    assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+});
+
+test('Place Receiver hides physical aliases on this floor and Save rejects a custom alias duplicate', async () => {
+    for (const storedIdentity of [false, true]) {
+        const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+        matching.options.push({...matching.options[0], entity_id: 'old_station'});
+        const source = layout(); source.floor[0].receivers = [{entity_id: 'old_station', cords: {x: 100, y: 100}}];
+        if (storedIdentity) {
+            source.floor[0].receivers[0].scanner_mac = matching.options[0].scanner_mac;
+            source.floor[0].receivers[0].scanner_config_entry_id = 'owner-a';
+            matching.options.pop(); // old registry alias was removed
+        }
+        const p = await panel(source, [], false, matching); p.hooks.select('Property');
+        await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+        assert.ok(!p.el('receiverName').options.some(o => o.value === 'workshop_112233'));
+        assert.ok(p.el('receiverName').options.some(o => o.value === 'atrium_445566'), 'distinct scanner remains available');
+        p.el('receiverName').value = '__custom__'; p.el('receiverCustomName').value = 'workshop_112233';
+        const before = plain(p.hooks.layout()); await p.hooks.saveReceiver();
+        assert.deepEqual(plain(p.hooks.layout()), before, 'custom entry cannot bypass physical duplicate guard');
+        assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    }
+});
+
+test('Place Receiver allows another floor and preserves proven identity for a new placement', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'workshop_112233', cords: {x: 100, y: 100}}];
+    source.floor.push({name: 'Upstairs', scale: 20, zones: [], receivers: []});
+    const p = await panel(source, [], false, matching); p.hooks.select('Upstairs');
+    await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+    assert.ok(p.el('receiverName').options.some(o => o.value === 'workshop_112233'));
+    p.el('receiverName').value = 'workshop_112233'; await p.hooks.saveReceiver();
+    const rec = p.hooks.layout().floor[1].receivers[0];
+    assert.equal(rec.scanner_mac, matching.options[0].scanner_mac);
+    assert.equal(rec.scanner_config_entry_id, 'owner-a');
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[1].receivers[0].scanner_config_entry_id, 'owner-a');
+});
+
+test('Place Receiver normalizes a proven saved BLE binding when hiding and rejecting physical duplicates', async () => {
+    for (const owned of [false, true]) {
+        const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+        const ble = 'dd:ee:ff:90:80:00';
+        matching.runtime_address_map = [{config_entry_id: 'owner-a', scanner_mac: matching.options[0].scanner_mac, scanner_ble_mac: ble}];
+        const source = layout(); source.floor[0].receivers = [{entity_id: 'removed_old_station', scanner_mac: ble,
+            cords: {x: 100, y: 100}, height: 2, correction: 1.3}];
+        if (owned) source.floor[0].receivers[0].scanner_config_entry_id = 'owner-a';
+        const p = await panel(source, [], false, matching); p.hooks.select('Property');
+        await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+        assert.ok(!p.el('receiverName').options.some(o => o.value === 'workshop_112233'));
+        p.el('receiverName').value = '__custom__'; p.el('receiverCustomName').value = 'workshop_112233';
+        const before = plain(p.hooks.layout()); await p.hooks.saveReceiver();
+        assert.deepEqual(plain(p.hooks.layout()), before);
+        assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    }
+});
+
+test('receiver matching blocks a canonical alias already placed using its proven Bluetooth binding', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+    const ble = 'dd:ee:ff:90:80:00';
+    matching.runtime_address_map = [{config_entry_id: 'owner-a', scanner_mac: matching.options[0].scanner_mac, scanner_ble_mac: ble}];
+    const source = layout(); source.floor[0].receivers = [
+        {entity_id: 'unmatched', cords: {x: 10, y: 20}},
+        {entity_id: 'removed_old_station', scanner_mac: ble, scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}},
+    ];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    const before = plain(p.hooks.layout()), dialog = await receiverMatch(p);
+    dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    assert.match(dialog.error.textContent, /already bound/);
+    assert.deepEqual(plain(p.hooks.layout()), before);
+    await dialog.cancel.fire('click');
+});
+
+function sharedSavedMatching() {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+    const mac = matching.options[0].scanner_mac;
+    matching.options.push({entity_id: 'shared', name: 'Shared', identity_ambiguous: true, selectable: false,
+        scanner_mac: null, config_entry_ids: ['owner-a', 'owner-b'], scanner_identities: [
+            {config_entry_id: 'owner-a', scanner_mac: mac},
+            {config_entry_id: 'owner-b', scanner_mac: 'dd:ee:ff:44:55:66'}]});
+    return matching;
+}
+
+test('Place Receiver hides and rejects a unique alias of saved hardware under an ambiguous slug', async () => {
+    for (const bluetooth of [false, true]) {
+        const matching = sharedSavedMatching(), mac = matching.options[0].scanner_mac, ble = 'dd:ee:ff:90:80:00';
+        if (bluetooth) matching.runtime_address_map = [{config_entry_id: 'owner-a', scanner_mac: mac, scanner_ble_mac: ble}];
+        const source = layout(); source.floor[0].receivers = [{entity_id: 'shared', scanner_mac: bluetooth ? ble : mac,
+            scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}}];
+        const p = await panel(source, [], false, matching); p.hooks.select('Property');
+        await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+        assert.ok(!p.el('receiverName').options.some(o => o.value === 'workshop_112233'));
+        p.el('receiverName').value = '__custom__'; p.el('receiverCustomName').value = 'workshop_112233';
+        const before = plain(p.hooks.layout()); await p.hooks.saveReceiver();
+        assert.deepEqual(plain(p.hooks.layout()), before);
+        assert.match(placementToasts(p), /already placed/);
+    }
+});
+
+test('Match rejects a unique alias already bound by saved hardware under an ambiguous slug', async () => {
+    const matching = sharedSavedMatching(), mac = matching.options[0].scanner_mac;
+    const source = layout(); source.floor[0].receivers = [
+        {entity_id: 'unmatched', cords: {x: 10, y: 20}},
+        {entity_id: 'shared', scanner_mac: mac, scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}}];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    const before = plain(p.hooks.layout()), dialog = await receiverMatch(p);
+    dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    assert.match(dialog.error.textContent, /already bound/);
+    assert.deepEqual(plain(p.hooks.layout()), before);
+    await dialog.cancel.fire('click');
+});
+
+test('ambiguous saved slug does not block the same MAC proven to a distinct Bermuda owner', async () => {
+    const matching = sharedSavedMatching(), mac = matching.options[0].scanner_mac;
+    matching.options.find(o => o.entity_id === 'shared').scanner_identities[1].scanner_mac = mac;
+    matching.options.push({...matching.options[0], entity_id: 'owner_b_alias', config_entry_ids: ['owner-b']});
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'shared', scanner_mac: mac,
+        scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}}];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+    assert.ok(p.el('receiverName').options.some(o => o.value === 'owner_b_alias'));
+    p.el('receiverName').value = 'owner_b_alias'; await p.hooks.saveReceiver();
+    assert.equal(p.hooks.layout().floor[0].receivers[1].scanner_config_entry_id, 'owner-b');
+});
+
+test('proven distinct Bermuda owners with the same MAC can be placed and matched independently', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+    matching.options.push({...matching.options[0], entity_id: 'second_owner_station', config_entry_ids: ['owner-b']});
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'workshop_112233', cords: {x: 100, y: 100}}];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+    assert.ok(p.el('receiverName').options.some(o => o.value === 'second_owner_station'));
+    p.el('receiverName').value = 'second_owner_station'; await p.hooks.saveReceiver();
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 2);
+    const dialog = await receiverMatch(p); dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    assert.equal(dialog.error.textContent || '', '');
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 2);
+});
+
+async function beginPlacement(p, choice = 'workshop_112233') {
+    p.hooks.select('Property');
+    await p.hooks.addDeviceButton.fire('click');
+    await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+    p.el('receiverName').value = choice;
+}
+const placementToasts = p => p.el('bpsToastHost').children.map(item => item.textContent || '').join('\n');
+
+test('Place Receiver rejects replaced same-slug inventory and explicit retry saves the fresh MAC and owner', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-before'];
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'legacy_station', cords: {x: 1, y: 2},
+        height: 2, correction: 1.2, custom_metadata: {keep: true}}];
+    const p = await panel(source, [], false, matching);
+    await beginPlacement(p);
+    p.el('receiverSearch').value = 'workshop';
+    p.el('receiverCustomName').value = 'draft custom name';
+    p.el('receiverHeight').value = '2.5';
+    const before = plain(p.hooks.layout());
+    const fresh = plain(matching); fresh.revision = 'inventory-2';
+    Object.assign(fresh.options[0], {scanner_mac: 'dd:ee:ff:11:22:33', config_entry_ids: ['owner-after'],
+        label: 'Workshop replacement · workshop_112233 · dd:ee:ff:11:22:33'});
+    p.network.matching = fresh;
+    await p.el('saveToolBtn').fire('click');
+    assert.deepEqual(plain(p.hooks.layout()), before);
+    assert.match(placementToasts(p), /inventory changed/);
+    assert.equal(p.hooks.addDeviceButton.dataset.active, 'true');
+    assert.equal(p.el('receiverName').value, 'workshop_112233');
+    assert.equal(p.el('receiverSearch').value, 'workshop');
+    assert.equal(p.el('receiverCustomName').value, 'draft custom name');
+    assert.equal(p.el('receiverHeight').value, '2.5');
+    assert.match(p.el('receiverName').options.find(o => o.value === 'workshop_112233').textContent, /replacement.*dd:ee/);
+    await p.el('saveToolBtn').fire('click');
+    const rec = plain(p.hooks.layout().floor[0].receivers[1]);
+    assert.deepEqual(rec, {entity_id: 'workshop_112233', cords: {x: 400, y: 400}, height: 2.5,
+        scanner_mac: 'dd:ee:ff:11:22:33', scanner_config_entry_id: 'owner-after'});
+    assert.deepEqual(plain(p.hooks.layout().floor[0].receivers[0]), before.floor[0].receivers[0]);
+    assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    for (const request of p.requests.filter(r => r.url === '/api/bps/scanner_linking')) {
+        assert.equal(request.options.headers.Authorization, 'Bearer test-token');
+    }
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].receivers[1], rec);
+});
+
+test('Place Receiver uses updated physical alias evidence to block a duplicate after inventory refresh', async () => {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'legacy_station', cords: {x: 1, y: 2}, correction: 1.4}];
+    const p = await panel(source, [], false, matching); await beginPlacement(p);
+    const before = plain(p.hooks.layout());
+    p.network.matching = {...plain(matching), revision: 'inventory-2',
+        options: [...plain(matching.options), {...plain(matching.options[0]), entity_id: 'legacy_station'}]};
+    await p.el('saveToolBtn').fire('click');
+    assert.deepEqual(plain(p.hooks.layout()), before);
+    assert.equal(p.el('receiverName').value, 'workshop_112233');
+    assert.equal(p.el('receiverName').options.find(o => o.value === 'workshop_112233').disabled, true);
+    await p.el('saveToolBtn').fire('click');
+    assert.deepEqual(plain(p.hooks.layout()), before);
+    assert.match(placementToasts(p), /already placed/);
+    p.el('receiverName').value = '__custom__'; p.el('receiverCustomName').value = 'workshop_112233';
+    await p.el('saveToolBtn').fire('click');
+    assert.deepEqual(plain(p.hooks.layout()), before, 'custom aliases also use the fresh physical identity');
+});
+
+test('Place Receiver never treats a formerly-known unavailable scanner as an unknown custom name', async () => {
+    for (const change of ['ambiguous', 'disabled', 'removed']) {
+        const matching = matchingFixture();
+        const p = await panel(layout(), [], false, matching); await beginPlacement(p, '__custom__');
+        p.el('receiverCustomName').value = 'workshop_112233';
+        p.network.matching = plain(matching); p.network.matching.revision = 'inventory-2';
+        if (change === 'removed') p.network.matching.options.shift();
+        else if (change === 'disabled') p.network.matching.options[0].selectable = false;
+        else p.network.matching.options[0].identity_ambiguous = true;
+        await p.el('saveToolBtn').fire('click');
+        assert.equal(p.el('receiverCustomName').value, 'workshop_112233');
+        await p.el('saveToolBtn').fire('click');
+        assert.deepEqual(plain(p.hooks.layout().floor[0].receivers), [], change);
+        assert.match(placementToasts(p), /available Bermuda receiver/);
+    }
+});
+
+test('Place Receiver preserves unknown custom exact names and mount-height validation', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'LegacyStation', cords: {x: 1, y: 2}}];
+    const p = await panel(source, [], false, matchingFixture()); await beginPlacement(p, '__custom__');
+    p.el('receiverCustomName').value = 'legacystation'; p.el('receiverHeight').value = '12';
+    await p.el('saveToolBtn').fire('click');
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 1);
+    p.el('receiverHeight').value = ''; p.el('receiverHeight').validity.badInput = true;
+    await p.el('saveToolBtn').fire('click');
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 1);
+    p.el('receiverHeight').validity.badInput = false;
+    await p.el('saveToolBtn').fire('click');
+    assert.deepEqual(plain(p.hooks.layout().floor[0].receivers[1]), {entity_id: 'legacystation', cords: {x: 400, y: 400}});
+    await beginPlacement(p, '__custom__'); p.el('receiverCustomName').value = 'legacystation';
+    await p.el('saveToolBtn').fire('click');
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 2, 'exact custom duplicate is blocked');
+});
+
+test('Place Receiver cancellation, replacement session and pending input changes cannot commit an obsolete draft', async () => {
+    for (const change of ['cancel', 'restart', 'floor', 'marker', 'name', 'height', 'floor-object']) {
+        const p = await panel(layout(), [], false, matchingFixture()); await beginPlacement(p);
+        let resolveRequest;
+        p.network.matchingRequest = () => new Promise(resolve => {resolveRequest = resolve;});
+        const before = plain(p.hooks.layout());
+        const pending = p.el('saveToolBtn').fire('click'); await flushMatching();
+        const requestCount = p.requests.filter(r => r.url === '/api/bps/scanner_linking').length;
+        await p.el('saveToolBtn').fire('click');
+        assert.equal(p.requests.filter(r => r.url === '/api/bps/scanner_linking').length, requestCount, 'double Save is single-flight');
+        if (change === 'cancel' || change === 'restart') await p.el('cancelToolBtn').fire('click');
+        if (change === 'restart') await beginPlacement(p);
+        if (change === 'floor') p.hooks.select('Upstairs');
+        if (change === 'marker') await p.el('canvas').fire('click', {clientX: 500, clientY: 500});
+        if (change === 'name') p.el('receiverName').value = 'atrium_445566';
+        if (change === 'height') p.el('receiverHeight').value = '3';
+        if (change === 'floor-object') p.hooks.layout().floor[0] = plain(p.hooks.layout().floor[0]);
+        resolveRequest({ok: true, status: 200, json: async () => ({matching: p.network.matching})});
+        await pending;
+        assert.deepEqual(plain(p.hooks.layout()), before, change);
+        assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+        if (change === 'name') assert.equal(p.el('receiverName').value, 'atrium_445566');
+        if (change === 'height') assert.equal(p.el('receiverHeight').value, '3');
+    }
+});
+
+test('Place Receiver inventory failures preserve the draft and a fresh retry can commit', async () => {
+    for (const response of [{ok: false, status: 503}, {ok: true, json: async () => ({matching: {options: []}})}]) {
+        const p = await panel(layout(), [], false, matchingFixture()); await beginPlacement(p);
+        p.el('receiverHeight').value = '2';
+        p.network.matchingRequest = async () => response;
+        await p.el('saveToolBtn').fire('click');
+        assert.deepEqual(plain(p.hooks.layout().floor[0].receivers), []);
+        assert.equal(p.hooks.addDeviceButton.dataset.active, 'true');
+        assert.equal(p.el('receiverName').value, 'workshop_112233');
+        assert.equal(p.el('receiverHeight').value, '2');
+        p.network.matchingRequest = null;
+        await p.el('saveToolBtn').fire('click');
+        assert.equal(p.hooks.layout().floor[0].receivers[0].height, 2);
+    }
 });

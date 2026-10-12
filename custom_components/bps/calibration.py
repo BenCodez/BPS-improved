@@ -33,6 +33,8 @@ import math
 import re
 import time
 from collections import deque
+from .receiver_sources import ReceiverSources
+from .bermuda_diagnostics import MAC
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,6 +47,7 @@ from scipy.optimize import least_squares
 
 from .calibration_auto import assess_update, WINDOW_S as AUTO_HISTORY_WINDOW
 from .bermuda_calibration import build_preview, runtime_context, source_snapshot, source_for_floor
+from .scanner_addresses import retained_mac, ble_mac
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -151,6 +154,9 @@ async def save_calibration_state(hass) -> None:
             key: list(values)[-STATE_SAMPLES_PER_PAIR:]
             for key, values in cal["samples"].items()
         },
+        # Raw pair keys alone cannot identify the hardware or geometry that
+        # produced them. Keep that observation baseline across restarts.
+        "sample_geometry": copy.deepcopy(cal.get("_auto_geometry", cal.get("receivers", {}))),
     }
     try:
         await save_calib_state(hass, payload)
@@ -181,6 +187,10 @@ async def async_restore_calibration_state(hass) -> None:
                     (float(v) for v in values if isinstance(v, (int, float))),
                     maxlen=SAMPLES_MAXLEN,
                 )
+        geometry = payload.get("sample_geometry")
+        # Legacy windows may remain visible until receivers are loaded, but
+        # cannot be rebound to today's scanner hardware by an explicit solve.
+        cal["_auto_geometry"] = copy.deepcopy(geometry) if isinstance(geometry, dict) else {}
     _LOGGER.info(
         "Restored calibration state (%d floor results, %d sample pairs%s)",
         len(cal["results"]),
@@ -229,8 +239,11 @@ def get_calibration_state(hass) -> dict:
     )
 
 
-def _build_receiver_map(coords, floor_name=None) -> dict:
+def _build_receiver_map(coords, floor_name=None, *, hass=None, receiver_sources=None) -> dict:
     """Map receiver slug -> position/scale/floor, for one floor or all floors."""
+    sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass) if hass is not None else None
+    if sources is not None:
+        coords = sources.calibration_layout(coords)
     receivers = {}
     for floor in coords.get("floor", []):
         if floor_name is not None and _normalize(floor.get("name")) != _normalize(floor_name):
@@ -251,6 +264,10 @@ def _build_receiver_map(coords, floor_name=None) -> dict:
                     # Hardware identity stored by a panel re-link (issue #64);
                     # lets calibration match the scanner after a rename.
                     "uid": uid if isinstance(uid, str) and uid else None,
+                    "scanner_mac": receiver.get("scanner_mac"),
+                    "scanner_config_entry_id": receiver.get("scanner_config_entry_id"),
+                    "scanner_owner_unique": receiver.get("scanner_owner_unique", False),
+                    "strict_identity": sources is not None and sources.registry is not None,
                     # Mount height (m) set in the panel; makes the pair's
                     # ground-truth distance 3D (see _true_distance_m). The
                     # range guard also drops NaN/Infinity from a hand-edited
@@ -260,6 +277,97 @@ def _build_receiver_map(coords, floor_name=None) -> dict:
                     if isinstance(height, (int, float)) and 0 <= height <= 10 else None,
                 }
     return receivers
+
+
+def _set_auto_receivers(hass, cal, coords):
+    """Separate floor geometry from the shared physical observation keys."""
+    sources = ReceiverSources(hass)
+    floors = {floor.get("name"): _build_receiver_map({"floor": [floor]}, receiver_sources=sources)
+              for floor in coords.get("floor", [])}
+    claims = {}
+    for receivers in floors.values():
+        for slug, row in receivers.items():
+            identity = ("physical", row["scanner_config_entry_id"], row["scanner_mac"]) if row.get("scanner_mac") else ("exact", slug)
+            claims.setdefault(slug, set()).add(identity)
+    # A reused label with contradictory hardware proof cannot route samples.
+    ambiguous = {slug for slug, identities in claims.items() if len(identities) != 1}
+    union, canonical, routes = {}, {}, {}
+    for name, receivers in floors.items():
+        for slug in ambiguous:
+            receivers.pop(slug, None)
+        routes[name] = {}
+        for slug, row in receivers.items():
+            identity = next(iter(claims[slug]))
+            sample_slug = canonical.setdefault(identity, slug)
+            union.setdefault(sample_slug, row)
+            routes[name][slug] = sample_slug
+    cal["receivers"] = union
+    if cal.get("_auto_floor_receivers") != floors or cal.get("_auto_routes") != routes:
+        cal.pop("_auto_sources", None)
+    cal["_auto_floor_receivers"] = floors
+    cal["_auto_routes"] = routes
+    cal["_auto_ambiguous_slugs"] = ambiguous
+
+
+def _floor_auto_snapshot(cal, floor_name, *, raw_samples=False):
+    floor_name = next((name for name in cal["_auto_floor_receivers"]
+                       if _normalize(name) == _normalize(floor_name)), floor_name)
+    receivers = copy.deepcopy(cal["_auto_floor_receivers"].get(floor_name, {}))
+    routes = cal["_auto_routes"].get(floor_name, {})
+    inverse = {canonical: slug for slug, canonical in routes.items()}
+    snapshot = {"receivers": receivers, "matched_placed": {
+        inverse[s]: stamp for s, stamp in (cal.get("matched_placed") or {}).items() if s in inverse}}
+    history = {}
+    for pair, rows in cal.get("samples" if raw_samples else "_auto_samples", {}).items():
+        tx, rx = pair.split("|", 1)
+        if tx in inverse and rx in inverse:
+            history[f"{inverse[tx]}|{inverse[rx]}"] = list(rows)
+    return snapshot, history
+
+
+def _equivalent_updates(hass, floor, updates, *, identities=None):
+    """Expand from a pre-mutation snapshot, never repair conflicting aliases."""
+    sources = ReceiverSources(hass)
+    bindings = sources.floor_bindings(floor)
+    proven = {}
+    direct = set()
+    placed = {str(rec.get("entity_id")) for rec in floor.get("receivers", [])}
+    def captured(slug):
+        row = (identities or {}).get(slug, {})
+        mac, owner = row.get("scanner_mac"), row.get("scanner_config_entry_id")
+        return (owner, mac.lower()) if isinstance(owner, str) and owner and isinstance(mac, str) and MAC.fullmatch(mac) else None
+    # A current alias cannot prove which hardware produced an old solve. Only
+    # the solve's captured owner/MAC may migrate a missing key to another slug.
+    for slug, correction in updates.items():
+        if slug in placed:
+            continue
+        identity = captured(slug)
+        if identity in sources.by_identity:
+            proven.setdefault(identity, set()).add(correction)
+    for rec, binding in zip(floor.get("receivers", []), bindings):
+        slug = str(rec.get("entity_id"))
+        if slug not in updates or binding["status"] not in ("matched", "unmatched", "duplicate_scanner_alias"):
+            continue
+        identity = captured(slug)
+        if identity is not None and identity != binding["identity"]:
+            continue
+        direct.add(slug)
+        if binding["identity"]:
+            proven.setdefault(binding["identity"], set()).add(updates[slug])
+    expanded = {}
+    for rec, binding in zip(floor.get("receivers", []), bindings):
+        if binding["status"] not in ("matched", "unmatched", "duplicate_scanner_alias"):
+            continue
+        slug = str(rec.get("entity_id"))
+        identity = captured(slug)
+        if identity is not None and identity != binding["identity"]:
+            continue
+        values = proven.get(binding["identity"], set())
+        if len(values) == 1:
+            expanded[slug] = next(iter(values))
+        elif not values and slug in direct:
+            expanded[slug] = updates[slug]
+    return expanded
 
 
 def _match_scanners(cal: dict, devices: dict) -> dict:
@@ -282,13 +390,31 @@ def _match_scanners(cal: dict, devices: dict) -> dict:
     for dev in devices.values():
         if not isinstance(dev, dict) or dev.get("_is_scanner") is not True:
             continue
-        address = str(dev.get("address") or "").lower()
+        address = ble_mac(dev)
+        if address is None or retained_mac(dev) is None:
+            continue
         scanners.append((address, slugify(str(dev.get("name") or ""))))
 
     scanner_slug_by_mac = {}
-    for address, name_slug in scanners:
-        if name_slug in cal["receivers"]:
-            scanner_slug_by_mac[address] = name_slug
+    claims = {}
+    for slug, receiver in cal["receivers"].items():
+        address = receiver.get("scanner_mac")
+        if address:
+            owner = receiver.get("scanner_config_entry_id")
+            candidates = {ble_mac(dev) for dev in devices.values() if isinstance(dev, dict)
+                and dev.get("_is_scanner") is True and retained_mac(dev) == address and ble_mac(dev)
+                and (dev.get("_bps_config_entry_id") == owner or receiver.get("scanner_owner_unique"))}
+            if len(candidates) == 1:
+                claims.setdefault(next(iter(candidates)), []).append(slug)
+        else:
+            exact = {address for address, name_slug in scanners if name_slug == slug}
+            # Exact current names remain compatible with older Bermuda entity
+            # formats. This cannot expand aliases or override a stored MAC.
+            if len(exact) == 1:
+                claims.setdefault(next(iter(exact)), []).append(slug)
+    for address, slugs in claims.items():
+        if len(set(slugs)) == 1:
+            scanner_slug_by_mac[address] = slugs[0]
 
     matched_slugs = set(scanner_slug_by_mac.values())
     # Tier-2 candidates: devices tier 1 didn't claim, excluding any whose
@@ -309,6 +435,9 @@ def _match_scanners(cal: dict, devices: dict) -> dict:
     while progress and pending:
         progress = False
         for slug in list(pending):
+            if cal["receivers"][slug].get("strict_identity") or cal["receivers"][slug].get("scanner_mac"):
+                pending.remove(slug)
+                continue
             token = cal["receivers"][slug].get("uid") or _scanner_token(slug)
             if not token:
                 pending.remove(slug)
@@ -372,9 +501,14 @@ def _ingest_dump(cal: dict, devices: dict) -> None:
             cal["_auto_samples"] = {}
             cal["_advert_stamps"] = {}
         cal["_bermuda_source"] = source
-    elif previous is not None:
+        if cal.get("_auto_floor_receivers"):
+            cal["_auto_sources"] = {name: source_snapshot(receivers, devices,
+                _match_scanners({"receivers": receivers}, devices))
+                for name, receivers in cal["_auto_floor_receivers"].items()}
+    else:
         # Incomplete evidence cannot certify new samples against the old model.
         cal.pop("_bermuda_source", None)
+        cal.pop("_auto_sources", None)
 
     # Monotonic "now": the freshest advert stamp in the payload.
     newest = 0.0
@@ -441,16 +575,26 @@ def _ingest_dump(cal: dict, devices: dict) -> None:
 def _refresh_auto_history(cal):
     """Receiver geometry/identity changes invalidate old reference samples."""
     receivers = cal.get("receivers", {})
+    floors = cal.get("_auto_floor_receivers", {})
+    geometry = {"floors": floors, "routes": cal.get("_auto_routes")} if len(floors) > 1 else receivers
     previous = cal.get("_auto_geometry")
-    if previous == receivers:
+    if previous == geometry:
         return
     if previous is not None:
-        unchanged = {s for s in receivers if receivers[s] == previous.get(s)}
+        unchanged = {s for s in receivers if receivers[s] == previous.get(s)} if geometry is receivers else set()
         cal["samples"] = {k: v for k, v in cal["samples"].items()
                           if all(s in unchanged for s in k.split("|", 1))}
-    cal["_auto_geometry"] = copy.deepcopy(receivers)
+        cal["matched_placed"] = {s: stamp for s, stamp in (cal.get("matched_placed") or {}).items()
+                                 if s in unchanged}
+        # A solve before the next successful dump must not certify retained
+        # observations with provenance for the old receiver map.
+        cal.pop("_bermuda_source", None)
+        if cal.get("mode") == "manual":
+            cal["_manual_solve_generation"] = object()
+    cal["_auto_geometry"] = copy.deepcopy(geometry)
     cal["_auto_samples"] = {}
     cal["_advert_stamps"] = {}
+    cal.pop("_auto_sources", None)
 
 
 def _true_distance_m(cal: dict, slug_a: str, slug_b: str):
@@ -491,7 +635,14 @@ def solve_snapshot(cal: dict) -> dict:
 
 async def async_solve(hass, cal: dict, floor_name: str):
     """solve() off the event loop, against a snapshot taken on it."""
-    snap = solve_snapshot(cal)
+    if cal.get("_auto_floor_receivers"):
+        snap, samples = _floor_auto_snapshot(cal, floor_name, raw_samples=True)
+        snap["samples"] = samples
+        name = next((name for name in cal["_auto_floor_receivers"]
+                     if _normalize(name) == _normalize(floor_name)), floor_name)
+        snap["_bermuda_source"] = copy.deepcopy(cal.get("_auto_sources", {}).get(name))
+    else:
+        snap = solve_snapshot(cal)
     return await hass.async_add_executor_job(solve, snap, floor_name)
 
 
@@ -663,6 +814,8 @@ def solve(cal: dict, floor_name: str):
         "bidirectional_pairs": len(diff_rows),
         "low_confidence": low_confidence,
         "receivers": corrections,
+        "receiver_identities": {slug: {key: cal["receivers"][slug].get(key)
+            for key in ("scanner_mac", "scanner_config_entry_id")} for slug in corrections},
         "rx_bias_db_equident": {
             # The equivalent Bermuda "Calibration 2" rssi_offset (attenuation 3).
             slug: round(-30.0 * math.log10(corrections[slug]), 1)
@@ -784,7 +937,7 @@ async def _auto_solve_and_apply(hass, cal: dict) -> None:
     coords = await _read_coords(hass)
     if not coords:
         return
-    cal["receivers"] = _build_receiver_map(coords)
+    _set_auto_receivers(hass, cal, coords)
     cal["all_placed_slugs"] = _all_placed_slugs(coords)
     try:
         _ingest_dump(cal, await _dump_devices(hass))
@@ -805,13 +958,14 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
     if not coords:
         return
     # Floors and receivers may have been edited since the last cycle.
-    cal["receivers"] = _build_receiver_map(coords)
+    _set_auto_receivers(hass, cal, coords)
     cal["all_placed_slugs"] = _all_placed_slugs(coords)
     _refresh_auto_history(cal)
 
     changed = False
     applied = {}
     accepted = {}
+    pending_identities = {}
     statuses = cal.setdefault("auto_status", {})
     current_floors = {f.get("name") for f in coords.get("floor", [])}
     for name in list(statuses):
@@ -819,19 +973,18 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
             del statuses[name]
     for floor in coords.get("floor", []):
         floor_name = floor.get("name")
-        on_floor = [s for s, r in cal["receivers"].items() if _normalize(r["floor"]) == _normalize(floor_name)]
+        snapshot, history = _floor_auto_snapshot(cal, floor_name)
+        on_floor = set(snapshot["receivers"])
         if len(on_floor) < 4:
-            statuses[floor_name] = {"state": "skipped", "reason": "Place at least four connected receivers for automatic updates"}
+            ambiguous = sorted(set(str(r.get("entity_id")) for r in floor.get("receivers", [])) & cal["_auto_ambiguous_slugs"])
+            reason = "Conflicting hardware identities share these scanner labels: " + ", ".join(ambiguous) + ". Match each placement to its correct scanner." if ambiguous else "Place at least four connected receivers for automatic updates"
+            statuses[floor_name] = {"state": "skipped", "reason": reason}
             continue
-        snapshot = {"receivers": {s: copy.deepcopy(cal["receivers"][s]) for s in on_floor},
-                    "matched_placed": dict(cal.get("matched_placed") or {})}
-        history = {k: list(v) for k, v in cal.get("_auto_samples", {}).items()
-                   if all(s in snapshot["receivers"] for s in k.split("|", 1))}
         # The live layout is authoritative, including manual applies/resets.
         # Persisted cal['applied'] is just historical metadata.
         current = {str(r.get("entity_id")): r.get("correction", 1.)
                    for r in floor.get("receivers", []) if str(r.get("entity_id")) in on_floor}
-        result_source = source_for_floor(cal.get("_bermuda_source"), floor_name)
+        result_source = source_for_floor(cal.get("_auto_sources", {}).get(floor_name), floor_name)
         result, updates, decision = await hass.async_add_executor_job(
             assess_update, snapshot, history, current, floor_name, time.time(), solve, _true_distance_m)
         if not updates:
@@ -842,6 +995,14 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
             cal["last_solved_at"] = result["solved_at"]
         if not updates:
             continue
+        solved_updates = copy.deepcopy(updates)
+        updates = _equivalent_updates(hass, floor, updates, identities=snapshot["receivers"])
+        current = _equivalent_updates(hass, floor, current, identities=snapshot["receivers"])
+        if not updates:
+            decision.update(state="skipped", updated_receivers=0,
+                            reason="Receiver identities or equivalent placements changed; match conflicting placements before applying")
+            statuses[floor_name] = decision
+            continue
         if tracking_recording is not None:
             # Deferred import: __init__ imports this module before defining its
             # live solver, so it cannot be imported at module initialization.
@@ -850,7 +1011,7 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
             try:
                 report = await hass.async_add_executor_job(compare_tracking_export,
                     tracking_recording, floor_name, {**current, **updates},
-                    copy.deepcopy(floor), trilaterate, current, copy.deepcopy(coords))
+                    copy.deepcopy(floor), trilaterate, current, copy.deepcopy(coords), set(on_floor))
             except ValueError as error:
                 decision.update(state="skipped", updated_receivers=0,
                                 reason=f"Tracking validation could not run: {error}")
@@ -877,9 +1038,22 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
         }
         applied[floor_name] = {**current, **updates}
         accepted[floor_name] = decision
+        pending_identities[floor_name] = (solved_updates, snapshot["receivers"], updates)
         changed = True
 
     if changed:
+        # Tracking replay and later floors await executors too. Recheck the
+        # original canonical solve keys for every accepted floor before saving
+        # the batch; expanded alias keys must not re-seed replacement hardware.
+        for floor in coords.get("floor", []):
+            name = floor.get("name")
+            if name not in pending_identities:
+                continue
+            solved_updates, identities, expected = pending_identities[name]
+            if _equivalent_updates(hass, floor, solved_updates, identities=identities) != expected:
+                for accepted_name in accepted:
+                    statuses[accepted_name] = {"state": "skipped", "reason": "Scanner identities changed while calibrating; current corrections retained"}
+                return
         try:
             await save_bps_data(hass, coords)
         except BaseException:
@@ -910,7 +1084,7 @@ async def start_calibration(hass, floor_name: str, duration: int) -> dict:
     if not floor.get("scale"):
         raise ValueError("The floor has no scale; set it before calibrating.")
 
-    receivers = _build_receiver_map(coords, floor_name=floor_name)
+    receivers = _build_receiver_map(coords, floor_name=floor_name, hass=hass)
     if len(receivers) < 3:
         raise ValueError("At least three placed receivers are needed to calibrate.")
 
@@ -932,6 +1106,9 @@ async def start_calibration(hass, floor_name: str, duration: int) -> dict:
             "error": None,
         }
     )
+    for key in ("_auto_floor_receivers", "_auto_routes", "_auto_sources", "_auto_ambiguous_slugs", "_auto_geometry"):
+        cal.pop(key, None)
+    _refresh_auto_history(cal)
     cal["task"] = hass.async_create_task(_sample_loop(hass, cal))
     return cal
 
@@ -966,6 +1143,8 @@ async def set_auto_calibration(hass, enabled: bool) -> None:
 
     await _stop_task(cal)
     if enabled:
+        if "_auto_geometry" not in cal:
+            cal["_auto_geometry"] = copy.deepcopy(cal.get("receivers", {}))
         # Keep raw samples/results for the existing matrix. Automatic updates
         # nevertheless require fresh independent evidence from this session.
         cal.update(
@@ -976,16 +1155,18 @@ async def set_auto_calibration(hass, enabled: bool) -> None:
                 "started_at": time.time(),
                 "ends_at": None,
                 "duration": None,
-                "receivers": _build_receiver_map(coords),
+                "receivers": _build_receiver_map(coords, hass=hass),
                 "matched_placed": {},  # fresh window: re-learn which placements match
                 "all_placed_slugs": _all_placed_slugs(coords),
                 "error": None,
             }
         )
+        _set_auto_receivers(hass, cal, coords)
+        cal.pop("_auto_sources", None)
         # Persisted raw windows keep the matrix warm, but independent evidence
         # must be observed afresh after restart or a new automatic session.
         cal["_auto_samples"] = {}
-        cal["_auto_geometry"] = copy.deepcopy(cal["receivers"])
+        _refresh_auto_history(cal)
         cal["_advert_stamps"] = {}
         cal["auto_status"] = {}
         cal["task"] = hass.async_create_task(_auto_loop(hass, cal))
@@ -1010,7 +1191,7 @@ def refresh_receivers_from_coords(hass, coordinates_json) -> None:
         if not isinstance(coords, dict):
             return
         floor = cal.get("floor") if cal.get("mode") == "manual" else None
-        new_map = _build_receiver_map(coords, floor_name=floor)
+        new_map = _build_receiver_map(coords, floor_name=floor, hass=hass)
         if floor is not None and not new_map:
             # The floor this manual window is calibrating vanished from the
             # save (deleted or de-scaled mid-run). Keep the start-of-run
@@ -1018,7 +1199,14 @@ def refresh_receivers_from_coords(hass, coordinates_json) -> None:
             # end the run with a misleading "0 usable pairs / check iBeacon"
             # error instead of a coherent (if now moot) report.
             return
-        cal["receivers"] = new_map
+        if cal.get("mode") == "auto":
+            _set_auto_receivers(hass, cal, coords)
+        else:
+            # Establish the old map as the baseline even for a window that
+            # predates geometry bookkeeping. The first edit must not baseline
+            # the replacement hardware against observations from the old map.
+            _refresh_auto_history(cal)
+            cal["receivers"] = new_map
         _refresh_auto_history(cal)
         cal["all_placed_slugs"] = _all_placed_slugs(coords)
     except Exception as e:
@@ -1070,8 +1258,11 @@ async def _apply_result_locked(hass, cal: dict, result: dict) -> int:
         raise ValueError(f'Floor "{result["floor"]}" no longer exists.')
 
     updated = 0
+    corrections = _equivalent_updates(hass, floor, result["receivers"], identities=result.get("receiver_identities"))
+    if not corrections:
+        raise ValueError("No eligible receiver placements remain; match conflicting placements before applying.")
     for receiver in floor.get("receivers", []):
-        correction = result["receivers"].get(str(receiver.get("entity_id")))
+        correction = corrections.get(str(receiver.get("entity_id")))
         if correction is not None:
             receiver["correction"] = correction
             updated += 1
@@ -1082,9 +1273,8 @@ async def _apply_result_locked(hass, cal: dict, result: dict) -> int:
         "error_factor_before": result["error_factor_before"],
         "error_factor_after": result["error_factor_after"],
     }
-    cal["applied"][floor.get("name")] = dict(result["receivers"])
-
     await save_bps_data(hass, coords)
+    cal["applied"][floor.get("name")] = corrections
     return updated
 
 
@@ -1256,7 +1446,7 @@ class BPSCalibrationAPI(HomeAssistantView):
                         tracking = None
                 if cal.get("mode") == "auto":
                     coords["auto_calibration"] = True
-                return web.json_response(build_preview(coords, name, result, source, tracking))
+                return web.json_response(build_preview(coords, name, result, source, tracking, hass=hass))
             elif action == "apply":
                 updated = await apply_corrections(hass, cal, data.get("floor") or cal.get("floor"))
                 await save_calibration_state(hass)

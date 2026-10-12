@@ -9,6 +9,9 @@ maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hog
 
 Quick list of changes in this fork:
 
+- Receiver matching uses Bermuda names and proven hardware identities. Old and
+  current aliases work across renames; missing readings show Unknown or Unmatched
+  status rather than falsely implying Offline.
 - Optional outdoor tracking with buildings, trees, and fences. Buildings support
   different materials per wall; open fence lines support solid or thin/wire
   styles, including metal. Crossings adjust measurement trust.
@@ -89,7 +92,8 @@ The setup panel
 - [Zone colours](#zone-colours) — each zone tinted a unique colour with a matching name pill; pick or remove one per zone, or toggle all colours off.
 - [Adjust zones](#adjust-zones) — one-click clean-up: square rooms, snap neighbours together, remove overlaps.
 - [Pre-populated receiver picker](#pre-populated-receiver-picker) — pick receivers from a searchable list instead of typing names.
-- [Offline receivers](#offline-receivers) — dead proxies are flagged red in the panel, updating live.
+- [Match an existing receiver](#match-an-existing-receiver) — select Bermuda names and proven hardware identities for one placement; retain its position and properties.
+- [Offline receivers](#offline-receivers) — confirmed offline proxies are red; missing identities and uncertain liveness are shown as Unmatched or Unknown.
 - [Debugging tab](#debugging-tab) — a live view of how every receiver and beacon links to Bermuda, to untangle naming mismatches and quiet nodes.
 - [Diagnostic recordings](#diagnostic-recordings) — export receiver readings and known-position tests for accuracy analysis.
 
@@ -557,7 +561,9 @@ device is near it: the panel uses the same automatic tiers as the
 [map card](#receivers-on-the-map-card) — Bermuda scanner liveness, then a
 `connectivity` status sensor, then the proxy's Home Assistant device
 availability — so a probe that drops off the map only because everyone left the
-house is *not* flagged.
+house is *not* flagged. Missing distance readings alone never mark a receiver
+offline. A placement with no known Bermuda identity is **Unmatched**; a known
+scanner without liveness evidence is **Unknown**.
 
 ### Light or dark theme
 
@@ -677,14 +683,78 @@ out.
 
 Placing a receiver no longer means typing its Bermuda scanner name from memory.
 You now pick it from a **searchable dropdown of every receiver Bermuda currently
-reports** (derived from the `sensor.*_distance_to_*` entities) — type to filter
+reports** (from owned Bermuda distance entities and scanner runtime identities) — type to filter
 the list — with a "Custom name…" option for receivers Bermuda hasn't seen yet.
 
-Receivers already placed on **any** floor are hidden from the list — a receiver
-belongs to exactly one floor, and placing the same one on several floors would
-make those floors compete for the tracker.
+Receivers already placed on the **selected floor** are hidden from the list.
+The same scanner can have a placement on another floor.
+Save checks a fresh Bermuda inventory. If scanner identities changed while the
+panel was open, review the refreshed choice and save again; the marker, height
+and other inputs are retained.
+Editor saves support up to 256 receiver placements per floor and 1,024 across
+the layout. Existing larger layouts remain readable.
 
 ![Placing a receiver: pick its name from the list of receivers Bermuda reports](img/screenshots/receiver-picker.png)
+
+### Match an existing receiver
+
+Use the **↔ Match Bermuda receiver** button beside a placement in **Zones &
+Receivers**, or **Match receiver…** in the selected floor's unmatched list.
+Choose from actual Bermuda scanner slugs with their friendly names and proven
+scanner MACs when available. A unique hardware match is shown as a hint; nothing
+is selected or applied automatically, and similar names are never proof.
+
+**Apply match** changes only that placement's scanner binding and stored hardware
+identity. Coordinates, height, correction, hardware notes and other properties
+stay in place. **Cancel**, Escape and closing the overlay leave it unchanged,
+including cancellation during the fresh inventory check. Use **Save Floor Plan**
+to persist an applied match.
+
+Old and current scanner names work as aliases when Bermuda-owned filtered range
+entities prove the same full scanner MAC and config entry. BPS uses the freshest
+valid reading for each beacon and physical scanner, retaining its source timestamp.
+Similar names or matching MAC suffixes alone do not establish an alias. Matching
+stores the scanner MAC and owner so a later rename can still resolve when the old
+entity name disappears.
+For scanners with different Wi-Fi and Bluetooth MACs, the binding uses Bermuda's
+retained entity identifier. Bermuda's explicit address relationship links that
+identifier to Bluetooth calibration observations and scanner ages; BPS does not
+guess MAC offsets. Previously saved Bluetooth bindings can resolve through this
+proven relationship without moving the receiver.
+
+Equivalent same-floor placements of that physical scanner count once. If their
+positions, heights, corrections or tracking policies conflict, BPS excludes that
+scanner and reports the conflict in **Debugging → Receivers** and full diagnostics.
+Resolve the conflicting placement before relying on it. Distinct physical scanners
+at the same location remain independent. Receiver calibration uses the same
+identity evidence and deduplicates physical scanner observations.
+Applying a correction keeps equivalent same-floor aliases synchronized. Automatic
+calibration uses each floor's own geometry when a scanner is shared between floors.
+Receiver discovery runs once per automatic calibration refresh across all floors.
+An existing saved full scanner MAC and Bermuda owner can disambiguate a shared
+receiver name. Tracking, calibration and automatic station status use only that
+hardware's sources; a shared name without hardware proof remains unresolved.
+The receiver self-test also uses each floor's placements and routes raw sample
+links through proven aliases, counting equivalent same-floor placements once.
+Manual results capture the scanner MAC and owner so their corrections follow the
+same hardware after a rename. Legacy results without that proof need a fresh
+solve before applying to a renamed placement.
+Changing a receiver's identity or geometry during a manual run discards the
+affected sample pairs and their old provenance before another solve.
+
+The chooser checks the inventory again before applying and rejects stale choices,
+a changed floor or placement, ambiguous identities and another binding to the
+same scanner on the selected floor. Separate scanners can share coordinates;
+matching never removes a co-located placement. A scanner can be bound on other
+floors. Renamed HA distance entities that BPS cannot address are shown with an
+instruction to restore their Bermuda distance entity IDs and cannot be chosen.
+Disabled distance entities remain known receivers; enable them in Home Assistant
+to restore distance readings.
+
+Scanner linking and **Copy full BPS + Bermuda report** include these read-only
+matching labels, aliases, selected source entities and identity diagnostics, including disabled and renamed distance
+entities. Only the public scanner MAC suffix is extracted from Bermuda range
+identities; tracker unique IDs, IRKs and arbitrary Bermuda options are not included.
 
 ## Debugging tab
 
@@ -694,7 +764,7 @@ seems ignored. It's a live snapshot; press **Refresh** to re-check. It has two
 sub-tabs, both laid out as tables.
 
 **Receivers** lists every placed receiver with its floor, a status chip
-(**Live** / **No reading** / **Unmatched**), its hardware token, and the per-device
+(**Live** / **No reading** / **Unmatched** / **Unknown** / **Offline**), its hardware token, and the per-device
 Bermuda distance sensors feeding it. Each sensor is a pill showing the device and
 its current reading, coloured by state:
 
@@ -918,12 +988,14 @@ and vetoes updates that worsen measured beacon tracking. An insufficient or
 outdated recording does not establish tracking improvement; fresh reference
 checks still apply. Manual Apply remains available.
 
-The toggle is stored in `bpsdata.txt` (alongside the corrections), while the
-latest solve and the rolling sample window are persisted separately in
-`bps_calibration_state.json`. So after a restart the toggle sticks, the matrix
-reappears immediately, and existing corrections stay active. Automatic updates
-wait for new independent observations after restart or re-enabling the toggle;
-restored samples alone cannot trigger a change.
+The toggle and corrections use Home Assistant's BPS layout storage, while the
+latest solve and rolling sample window use its separate calibration storage.
+Both survive restart, and existing corrections stay active. Saved raw samples
+retain the receiver identity and geometry that produced them. Changed receivers
+lose their affected samples; legacy windows without that evidence are discarded
+when auto mode resumes. Automatic updates wait for new independent observations
+after restart or re-enabling the toggle; restored samples alone cannot trigger
+an automatic change.
 
 ## Kalman position smoothing
 
@@ -1216,28 +1288,33 @@ it is offline/unavailable**. The decision is made per receiver, first match
 wins:
 
 1. **`receiver_status` mapping** (if given): the mapped entity decides — an
-   offline-like state (`off`, `unavailable`, `unknown`, `none`, `false`,
-   `not_home`, `offline`, `disconnected`, or empty) shows red, anything else
-   black. Any entity of the device works (e.g. an uptime sensor). Map a receiver
+   offline-like state (`off`, `none`, `false`, `not_home`, `offline`, or
+   `disconnected`) shows red; missing, `unknown`, `unavailable` or empty states
+   show Unknown. Other states show online. Any entity of the device works
+   (e.g. an uptime sensor). Map a receiver
    to `false` (or `heuristic`) to skip tiers 2–4 and force the distance
    heuristic.
 2. **Bermuda scanner liveness** (automatic): the card asks Bermuda
-   (`bermuda.dump_devices`) and matches scanners to receivers by name. A
+   (`bermuda.dump_devices`) and resolves proven scanner identities and aliases. A
    receiver is working while its scanner heard *any* advertisement within
    `receiver_timeout` seconds (default 30, min 10). This is the strongest tier —
    it catches a proxy whose BLE scanning died while its network stayed up.
 3. **`binary_sensor.<receiver>_status`** with device class `connectivity` — the
-   conventional ESPHome `status` sensor.
+   conventional ESPHome `status` sensor. Unknown or unavailable automatic status
+   falls through to the following tiers.
 4. **Device availability** (automatic): the HA device whose name matches the
    receiver is online while any of its entities isn't `unavailable`. A
    connectivity-class entity of that device is authoritative.
-5. **Bermuda distance sensors** (fallback): working while at least one
-   `sensor.*_distance_to_<receiver>` reports a distance (Bermuda holds the last
-   reading ~30 s), so a dead — or unreachable — proxy turns red after about half
-   a minute.
+5. **Bermuda distance sensors** (fallback): a fresh, enabled, filtered reading
+   proves the receiver is online. Missing or stale contact leaves it Unknown;
+   it does not prove that the scanner is offline.
 
 Tiers 2–4 need no configuration and match by the receiver name you used in the
-panel (normally the proxy's HA device name). If a receiver shows red while the
+panel (normally the proxy's HA device name), including uniquely proven aliases.
+Conflicting or unavailable saved scanner identities remain Unknown until matched.
+The card refreshes Bermuda identity evidence while open. If that authenticated
+inventory is unavailable, automatic status remains Unknown until it can be checked.
+If a receiver shows red while the
 device is online, map it explicitly in `receiver_status`.
 
 The full card guide (all options, per-floor behavior, labels/icons/zones,
