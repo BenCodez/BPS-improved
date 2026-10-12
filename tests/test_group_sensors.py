@@ -90,6 +90,9 @@ def platform(monkeypatch):
     monkeypatch.setattr(er, "async_get", lambda _hass: registry, raising=False)
     devices = Devices()
     monkeypatch.setattr(dr, "async_get", lambda _hass: devices, raising=False)
+    # Import against this fixture's HA platform, even when another suite has
+    # already imported sensor.py during collection.
+    monkeypatch.delitem(sys.modules, "bps.sensor", raising=False)
     module = importlib.import_module("bps.sensor")
     # Other suites must retain their minimal stubs after this fixture finishes.
     monkeypatch.delitem(sys.modules, "bps.sensor", raising=False)
