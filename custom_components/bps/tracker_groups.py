@@ -27,6 +27,11 @@ MAX_AGREEMENT_DISTANCE_M = 10.0
 GROUP_MAX_SPEED_MS = 10.0
 GROUP_MOTION_SLACK_M = 5.0
 GROUP_JUMP_CONFIRMATION_S = 3.0
+# Corroboration can preserve a pending challenge through noisy target/anchor
+# changes; it never raises the speed limit or widens spatial agreement.
+GROUP_MOTION_SUPPORT_MAX_AGE_S = 5.0
+GROUP_MOTION_SUPPORT_MAX_UNCERTAINTY_M = 50.0
+GROUP_MOTION_DIRECTION_COSINE = 0.8
 _SLUG = re.compile(r"[a-z0-9_]{1,64}\Z", re.ASCII)
 
 
@@ -221,11 +226,57 @@ def _motion_previous(previous, floor, scale, now, max_age_s):
     return {"cords": xy, "floor": floor, "scale": scale, "updated": updated}
 
 
-def _motion_point(x, y, fixes, previous, stability):
+def _same_motion_direction(first, second):
+    lengths = math.hypot(*first) * math.hypot(*second)
+    return lengths > 0 and sum(a * b for a, b in zip(first, second)) >= (
+        GROUP_MOTION_DIRECTION_COSINE * lengths)
+
+
+def _motion_support(candidates, previous, stability, now):
+    """Require a new observation from every directional member on this floor.
+
+    Sources need not be spatially agreeing to corroborate the direction away
+    from a held group. Their positions still use the normal anchor selection;
+    this evidence only prevents restarting the motion confirmation clock.
+    """
+    if not isinstance(stability, dict):
+        return []
+    epochs = stability.get("motion_support_epochs")
+    if epochs is None:
+        epochs = {p["ent"]: p.get("observed", p.get("updated"))
+                  for p in (previous or {}).get("beacon_positions", [])}
+    if previous is None or not epochs:
+        stability["motion_support_epochs"] = {p["ent"]: p["observed"] for p in candidates}
+        return []
+    # A newly reporting member establishes its baseline once, rather than
+    # comparing against its current observation forever. Keep unconsumed
+    # epochs for remaining members and drop absent members to bound state.
+    epochs = {p["ent"]: epochs.get(p["ent"], p["observed"]) for p in candidates}
+    stability["motion_support_epochs"] = epochs
+    if len(candidates) < 2 or any(p["observed"] <= epochs[p["ent"]]
+                                 for p in candidates):
+        return []
+    # Consume the joint observation even when its quality/direction fails.
+    # Alternating member updates can complete a pair, but re-solving/polling
+    # the same readings cannot provide another corroboration.
+    stability["motion_support_epochs"] = {p["ent"]: p["observed"] for p in candidates}
+    if any(p["detection_only"] or p["environment_fallback"] or p["receivers_used"] < 3
+           or p["estimated_uncertainty_m"] > GROUP_MOTION_SUPPORT_MAX_UNCERTAINTY_M
+           or not 0 <= now - p["observed"] <= GROUP_MOTION_SUPPORT_MAX_AGE_S
+           or _distance(p, previous) <= GROUP_MOTION_SLACK_M for p in candidates):
+        return []
+    vectors = [(p["cords"][0] - previous["cords"][0],
+                p["cords"][1] - previous["cords"][1]) for p in candidates]
+    if not all(_same_motion_direction(a, b) for i, a in enumerate(vectors) for b in vectors[i + 1:]):
+        return []
+    return candidates
+
+
+def _motion_point(x, y, fixes, previous, stability, support=()):
     """Hold a sudden excursion, then approach persistent evidence gradually."""
     if previous is None or not isinstance(stability, dict):
         return x, y, None
-    epoch = max(p["observed"] for p in fixes)
+    epoch = max(p["observed"] for p in (*fixes, *support))
     old_epoch = _number(stability.get("motion_epoch"))
     if old_epoch is None:
         old_epoch = previous["updated"]
@@ -238,8 +289,12 @@ def _motion_point(x, y, fixes, previous, stability):
         stability.pop("motion_challenge", None)
         return x, y, None
     challenge = stability.get("motion_challenge")
-    if challenge is None or math.hypot(x - challenge["x"], y - challenge["y"]) / scale > max(
-            GROUP_MOTION_SLACK_M, GROUP_MAX_SPEED_MS * max(0, epoch - challenge["epoch"])):
+    changed_target = challenge is not None and math.hypot(x - challenge["x"], y - challenge["y"]) / scale > max(
+        GROUP_MOTION_SLACK_M, GROUP_MAX_SPEED_MS * max(0, epoch - challenge["epoch"]))
+    corroborated = bool(support) and challenge is not None and _same_motion_direction(
+        (x - previous["cords"][0], y - previous["cords"][1]),
+        (challenge["x"] - previous["cords"][0], challenge["y"] - previous["cords"][1]))
+    if challenge is None or (changed_target and not corroborated):
         challenge = {"x": x, "y": y, "first": epoch, "epoch": epoch,
                      "count": int(epoch > old_epoch)}
     elif epoch > challenge["epoch"]:
@@ -254,6 +309,7 @@ def _motion_point(x, y, fixes, previous, stability):
                    "displacement_m": displacement, "allowed_step_m": allowed,
                    "confirmation_observations": challenge["count"],
                    "confirmation_span_s": max(0.0, epoch - challenge["first"]),
+                   **({"corroborating_beacons": [p["ent"] for p in support]} if corroborated else {}),
                    "max_speed_m_s": GROUP_MAX_SPEED_MS}
 
 
@@ -333,6 +389,7 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
             # Agreement, a stale/missing incumbent or a new floor needs no hold.
             stability.pop("challenge", None)
     prior = _motion_previous(previous, floor, anchor["scale"], now, max_age_s) if isinstance(stability, dict) and not detection_only else None
+    support = _motion_support(candidates, previous if prior is not None else None, stability, now)
     rejected_motion = []
     if prior is not None:
         nearby = [p for p in candidates if _distance(prior, p) <= min(
@@ -351,7 +408,7 @@ def fuse_group(group, positions, scales, now, max_age_s=DEFAULT_MAX_AGE_S, *,
     else:
         x = sum(p["weight"] * p["cords"][0] for p in accepted) / weight
         y = sum(p["weight"] * p["cords"][1] for p in accepted) / weight
-    x, y, motion = _motion_point(x, y, accepted, prior, stability)
+    x, y, motion = _motion_point(x, y, accepted, prior, stability, support)
     if motion is None and rejected_motion:
         motion = {"state": "beacon_jump_rejected", "rejected_beacons": rejected_motion,
                   "max_speed_m_s": GROUP_MAX_SPEED_MS}

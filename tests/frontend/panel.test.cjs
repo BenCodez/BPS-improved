@@ -818,6 +818,23 @@ test('auto calibration displays apply and skip reasons even before a first resul
     assert.match(p.el('calibStatus').textContent, /measured tracking check: inconclusive/);
 });
 
+test('calibration summarizes material factor changes and collapses the complete matrix', async () => {
+    const source = layout(); source.floor[0].receivers = [
+        {entity_id: 'unchanged', correction: 2}, {entity_id: 'minor', correction: 1},
+        {entity_id: '<changed>', correction: .5}];
+    const p = await panel(source); p.hooks.select('Property');
+    p.network.calibration = {mode: 'manual', results: {Property: {floor: 'Property',
+        receivers: {unchanged: 2, minor: 1.01, '<changed>': 1}, low_confidence: ['<changed>'], matrix: []}}};
+    p.el('calibAuto').checked = false; await p.el('calibAuto').fire('change');
+    const html = p.el('calibResults').innerHTML;
+    assert.match(html, /1 proposed receiver changes of at least 5%/);
+    assert.match(html, /×0.5 → ×1/); assert.match(html, /\+100.0%/);
+    assert.match(html, /Apply corrections applies the full solution/);
+    assert.match(html, /<details><summary>Show full probe matrix and all factors/);
+    assert.doesNotMatch(html, /<details open/);
+    assert.doesNotMatch(html, /<changed>/); assert.match(html, /&lt;changed&gt;/);
+});
+
 test('auto preview distinguishes existing weak receivers from newly placed receivers', async () => {
     const source = layout();
     source.floor[0].receivers = ['r0', 'r1', 'r2', 'r3', 'extra'].map(entity_id => ({entity_id, cords: {x: 0, y: 0}}));

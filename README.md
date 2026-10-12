@@ -43,6 +43,13 @@ Quick list of changes in this fork:
 - Read-only Bermuda RSSI correction previews use its actual attenuation and
   scanner mapping, with separate current-factor transfer and measured validation
   for new proposals to avoid applying the same correction twice.
+  The preview defaults to eligible changes of at least 0.5 dB; blocked and
+  unchanged rows remain available in receiver details and the full JSON export.
+  Calibration shows material factor changes first, with the complete probe
+  matrix collapsed below. This summary does not filter the manual Apply action.
+- Group motion confirmation survives noisy anchor changes when fresh member
+  beacons corroborate the direction of travel, reducing prolonged group lag
+  while retaining the initial confirmation and speed limit for large moves.
 - Outdoor obstruction geometry uses immutable pure Python data rather than
   shared GEOS objects, with bounded tracking batches and protection from late
   results after map edits or reloads. See [stability details](docs/outdoor-geometry-stability.md).
@@ -1348,9 +1355,13 @@ corrections and reports median and 95th-percentile position errors in metres.
 It ignores duplicate polls, stale/future observations, unknown distance units,
 and recordings whose floor geometry differs from the current floor. It samples
 at most 128 distinct beacon observations spread across the recording. At least
-five paired fixes at two locations are required before claiming improvement;
-both error metrics must improve by at least 0.25 m or 10%, whichever is larger,
-without additional candidate solve failures. Otherwise it reports worse or
+five paired fixes at each measured location and two locations per tested beacon
+are required before claiming improvement, including group members that supplied
+no usable readings at any stop. Missing readings or replay truncation
+at a marked stop leave an explicit coverage gap. Median and p95 must improve
+for every tested beacon by at least 0.25 m or 10%, whichever is larger,
+without a measured-location regression or additional candidate solve failures.
+Otherwise it reports worse or
 inconclusive. The result names the candidate solve time.
 
 This is a read-only raw-fix comparison using the live solver, height projection,
