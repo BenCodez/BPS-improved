@@ -1,5 +1,7 @@
 """Useful-change flags keep evidence and copying separate from no-op rows."""
 import copy
+import asyncio
+import json
 
 import pytest
 
@@ -69,3 +71,30 @@ def test_preview_verification_keeps_only_bound_tracking_evidence():
     preview = B.build_preview(layout, "Yard", result, source, tracking)
     assert preview["verification"]["tracking"] == {}
     assert preview["verification"]["tracking_verdict"] == "unavailable"
+
+
+def test_authenticated_preview_cannot_certify_a_group_with_an_entirely_missing_member(hass, monkeypatch):
+    from test_bermuda_rematched_preview import prepared
+
+    async def scenario():
+        post, current, solved, coordinator, _entries = await prepared(hass, monkeypatch)
+        recording = hass.data["bps"]["_diagnostics"]
+        data = json.loads(await recording.export())
+        for context in data["contexts"].values():
+            context["target_members"]["bps_group_dog"].append("missing_tag")
+        async def export():
+            return json.dumps(data).encode()
+        recording.export = export
+        before = copy.deepcopy((current, solved, coordinator.options, hass._store_saves))
+        response = await post("preview_bermuda")
+        assert response.status == 200
+        preview = response.json_body
+        assert preview["verification"]["candidate_matches_test"]
+        assert preview["verification"]["tracking_verdict"] == "inconclusive"
+        evidence = preview["verification"]["tracking"]
+        assert evidence["trackers"]["missing_tag"]["eligible_samples"] == 0
+        assert evidence["verification"]["trackers"] == 2
+        assert evidence["verification"]["sufficient_trackers"] == 1
+        assert not any(row["candidate_eligible"] for row in preview["rows"])
+        assert (current, solved, coordinator.options, hass._store_saves) == before
+    asyncio.run(scenario())

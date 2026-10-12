@@ -164,8 +164,8 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
             truth = truth_for(annotations, target, members, frame["time"])
             if not truth or truth.get("floor") != floor_name:
                 continue
-            # Even a marked stop with no usable readings is missing coverage
-            # for a beacon tested elsewhere in this compatible recording.
+            # Truth marks require coverage for every selected beacon, including
+            # group members with no usable readings anywhere in the recording.
             measured_by_tracker.setdefault(target, set()).add((truth["x_m"], truth["y_m"]))
             gate = reading_max_age(layout, context.get("defaults", {}).get("reading_max_age_s", 30))
             rows = [r for r in frame.get("readings", []) if r.get("tracker") == target
@@ -192,10 +192,9 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
     eligible = len(samples)
     # Record coverage before downsampling: a short measured stop omitted by the
     # replay budget must remain missing evidence, rather than disappear entirely.
-    tested_trackers = {target for target, *_ in samples}
-    measured_points = sorted({point for target in tested_trackers for point in measured_by_tracker[target]})
+    measured_points = sorted({point for points in measured_by_tracker.values() for point in points})
     location_ids = {point: index + 1 for index, point in enumerate(measured_points)}
-    for target in sorted(tested_trackers):
+    for target in sorted(measured_by_tracker):
         reports[target] = {**empty_stats(), "locations": {
             location_ids[point]: empty_stats() for point in sorted(measured_by_tracker[target])}}
     for target, truth, *_ in samples:
@@ -279,7 +278,7 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
             "Group recordings test their member beacons. Includes nearby range trust, obstruction weights and height projection; "
             "excludes temporal jump weights, Kalman smoothing, group fusion, floor election and zone snapping. "
             "Improvement requires at least 5 paired distinct observations at each measured location, "
-            "at least 2 locations per replayed tracker, improved median and p95 for every tracker, "
+            "at least 2 locations per truth-marked tracker, improved median and p95 for every tracker, "
             "and no measured-location regression. No calibration changed."}
 
 

@@ -1356,7 +1356,8 @@ It ignores duplicate polls, stale/future observations, unknown distance units,
 and recordings whose floor geometry differs from the current floor. It samples
 at most 128 distinct beacon observations spread across the recording. At least
 five paired fixes at each measured location and two locations per tested beacon
-are required before claiming improvement. Missing readings or replay truncation
+are required before claiming improvement, including group members that supplied
+no usable readings at any stop. Missing readings or replay truncation
 at a marked stop leave an explicit coverage gap. Median and p95 must improve
 for every tested beacon by at least 0.25 m or 10%, whichever is larger,
 without a measured-location regression or additional candidate solve failures.

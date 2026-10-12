@@ -6,7 +6,8 @@ import pytest
 from bps import calibration_validation as validation
 
 
-def compare_errors(monkeypatch, evidence, *, invalid_locations=None, cleared_locations=()):
+def compare_errors(monkeypatch, evidence, *, invalid_locations=None, cleared_locations=(),
+                   group_members=None):
     """Replay explicit error pairs while exercising real filtering and sampling."""
     floor = {'name': 'Synthetic', 'scale': 1., 'zones': [], 'receivers': [
         {'entity_id': f'r{i}', 'cords': {'x': i, 'y': i % 2}}
@@ -14,6 +15,9 @@ def compare_errors(monkeypatch, evidence, *, invalid_locations=None, cleared_loc
     data = {'format': 'bps-diagnostics-v1', 'started': 0.,
             'targets': list(evidence), 'contexts': {'c': {'layout': {'floor': [floor]}}},
             'annotations': [], 'frames': [{'time': 0., 'context_id': 'c', 'readings': []}]}
+    if group_members is not None:
+        data['targets'] = ['bps_group_synthetic']
+        data['contexts']['c']['target_members'] = {'bps_group_synthetic': group_members}
     now = 0
     for tracker, locations in evidence.items():
         for location, errors in locations.items():
@@ -21,6 +25,8 @@ def compare_errors(monkeypatch, evidence, *, invalid_locations=None, cleared_loc
                     'target': tracker, 'floor': 'Synthetic', 'x_m': float(location), 'y_m': 0.}
             if (tracker, location) in cleared_locations:
                 mark = {'time': float(now + 1), 'kind': 'clear_position', 'target': tracker}
+            if group_members is not None:
+                mark['target'] = 'bps_group_synthetic'
             data['annotations'].append(mark)
             for baseline, candidate in errors:
                 now += 1
@@ -183,3 +189,67 @@ def test_empty_evidence_explains_why_it_is_inconclusive(monkeypatch):
     assert result['verdict'] == 'inconclusive'
     assert result['verification']['reasons'] == ['no_paired_samples']
     assert not result['verification']['sufficient']
+
+
+@pytest.mark.parametrize('invalid', ['missing', 'stale', 'insufficient'])
+def test_wholly_unobserved_tracker_cannot_be_omitted_from_verification(monkeypatch, invalid):
+    result = compare_errors(monkeypatch, {
+        'tag_a': {0: [(3., 1.)] * 5, 1: [(3., 1.)] * 5},
+        'tag_b': {0: [(3., 1.)] * 5, 1: [(3., 1.)] * 5}},
+        invalid_locations={('tag_b', 0): invalid, ('tag_b', 1): invalid})
+    assert result['trackers']['tag_a']['sufficient']
+    assert result['trackers']['tag_a']['improves']
+    assert result['verification']['trackers'] == 2
+    assert result['verification']['sufficient_trackers'] == 1
+    missing = result['trackers']['tag_b']
+    assert missing['eligible_samples'] == missing['replayed_samples'] == 0
+    assert missing['baseline']['samples'] == missing['candidate']['samples'] == 0
+    assert len(missing['locations']) == 2
+    assert not missing['sufficient']
+    assert result['verdict'] == 'inconclusive'
+    assert not result['verification']['sufficient']
+    assert 'insufficient_location_samples' in result['verification']['reasons']
+
+
+def test_group_truth_and_context_members_require_wholly_missing_beacon(monkeypatch):
+    result = compare_errors(monkeypatch, {'tag_a': {
+        0: [(3., 1.)] * 5, 1: [(3., 1.)] * 5}}, group_members=['tag_a', 'tag_b'])
+    assert result['baseline']['samples'] == result['replayed_samples'] == 10
+    assert result['candidate']['median_m'] < result['baseline']['median_m']
+    assert result['candidate']['p95_m'] < result['baseline']['p95_m']
+    assert set(result['trackers']) == {'tag_a', 'tag_b'}
+    assert result['verification']['trackers'] == 2
+    assert result['verification']['sufficient_trackers'] == 1
+    missing = result['trackers']['tag_b']
+    assert missing['eligible_samples'] == missing['replayed_samples'] == 0
+    assert [s['location'] for s in missing['locations']] == [1, 2]
+    assert all(s['baseline']['samples'] == 0 and not s['sufficient'] for s in missing['locations'])
+    assert result['verdict'] == 'inconclusive'
+    assert not result['verification']['sufficient']
+    assert result['verification']['reasons'] == ['insufficient_location_samples']
+
+
+def test_group_with_complete_member_evidence_can_still_improve(monkeypatch):
+    result = compare_errors(monkeypatch, {
+        'tag_a': {0: [(3., 1.)] * 5, 1: [(3., 1.)] * 5},
+        'tag_b': {0: [(3., 1.)] * 5, 1: [(3., 1.)] * 5}},
+        group_members=['tag_a', 'tag_b'])
+    assert result['verdict'] == 'improves'
+    assert result['verification']['sufficient']
+    assert result['verification']['trackers'] == result['verification']['sufficient_trackers'] == 2
+    assert result['verification']['reasons'] == []
+
+
+def test_all_group_members_missing_still_reports_required_beacon_count(monkeypatch):
+    result = compare_errors(monkeypatch, {'tag_a': {
+        0: [(3., 1.)] * 5, 1: [(3., 1.)] * 5}}, group_members=['tag_a', 'tag_b'],
+        invalid_locations={('tag_a', 0): 'missing', ('tag_a', 1): 'missing'})
+    assert result['eligible_samples'] == result['replayed_samples'] == 0
+    assert result['verification']['observed_locations'] == 2
+    assert result['verification']['trackers'] == 2
+    assert result['verification']['sufficient_trackers'] == 0
+    assert set(result['trackers']) == {'tag_a', 'tag_b'}
+    assert all(not s['sufficient'] and s['baseline']['samples'] == 0 for s in result['trackers'].values())
+    assert result['verdict'] == 'inconclusive'
+    assert not result['verification']['sufficient']
+    assert result['verification']['reasons'] == ['no_paired_samples', 'insufficient_location_samples']
