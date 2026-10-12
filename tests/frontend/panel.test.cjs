@@ -1075,6 +1075,58 @@ test('receiver matching blocks a canonical alias already placed using its proven
     await dialog.cancel.fire('click');
 });
 
+function sharedSavedMatching() {
+    const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
+    const mac = matching.options[0].scanner_mac;
+    matching.options.push({entity_id: 'shared', name: 'Shared', identity_ambiguous: true, selectable: false,
+        scanner_mac: null, config_entry_ids: ['owner-a', 'owner-b'], scanner_identities: [
+            {config_entry_id: 'owner-a', scanner_mac: mac},
+            {config_entry_id: 'owner-b', scanner_mac: 'dd:ee:ff:44:55:66'}]});
+    return matching;
+}
+
+test('Place Receiver hides and rejects a unique alias of saved hardware under an ambiguous slug', async () => {
+    for (const bluetooth of [false, true]) {
+        const matching = sharedSavedMatching(), mac = matching.options[0].scanner_mac, ble = 'dd:ee:ff:90:80:00';
+        if (bluetooth) matching.runtime_address_map = [{config_entry_id: 'owner-a', scanner_mac: mac, scanner_ble_mac: ble}];
+        const source = layout(); source.floor[0].receivers = [{entity_id: 'shared', scanner_mac: bluetooth ? ble : mac,
+            scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}}];
+        const p = await panel(source, [], false, matching); p.hooks.select('Property');
+        await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+        assert.ok(!p.el('receiverName').options.some(o => o.value === 'workshop_112233'));
+        p.el('receiverName').value = '__custom__'; p.el('receiverCustomName').value = 'workshop_112233';
+        const before = plain(p.hooks.layout()); await p.hooks.saveReceiver();
+        assert.deepEqual(plain(p.hooks.layout()), before);
+        assert.match(placementToasts(p), /already placed/);
+    }
+});
+
+test('Match rejects a unique alias already bound by saved hardware under an ambiguous slug', async () => {
+    const matching = sharedSavedMatching(), mac = matching.options[0].scanner_mac;
+    const source = layout(); source.floor[0].receivers = [
+        {entity_id: 'unmatched', cords: {x: 10, y: 20}},
+        {entity_id: 'shared', scanner_mac: mac, scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}}];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    const before = plain(p.hooks.layout()), dialog = await receiverMatch(p);
+    dialog.select.value = 'workshop_112233'; await dialog.apply.fire('click');
+    assert.match(dialog.error.textContent, /already bound/);
+    assert.deepEqual(plain(p.hooks.layout()), before);
+    await dialog.cancel.fire('click');
+});
+
+test('ambiguous saved slug does not block the same MAC proven to a distinct Bermuda owner', async () => {
+    const matching = sharedSavedMatching(), mac = matching.options[0].scanner_mac;
+    matching.options.find(o => o.entity_id === 'shared').scanner_identities[1].scanner_mac = mac;
+    matching.options.push({...matching.options[0], entity_id: 'owner_b_alias', config_entry_ids: ['owner-b']});
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'shared', scanner_mac: mac,
+        scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}}];
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    await p.hooks.addDeviceButton.fire('click'); await p.el('canvas').fire('click', {clientX: 400, clientY: 400});
+    assert.ok(p.el('receiverName').options.some(o => o.value === 'owner_b_alias'));
+    p.el('receiverName').value = 'owner_b_alias'; await p.hooks.saveReceiver();
+    assert.equal(p.hooks.layout().floor[0].receivers[1].scanner_config_entry_id, 'owner-b');
+});
+
 test('proven distinct Bermuda owners with the same MAC can be placed and matched independently', async () => {
     const matching = matchingFixture(); matching.options[0].config_entry_ids = ['owner-a'];
     matching.options.push({...matching.options[0], entity_id: 'second_owner_station', config_entry_ids: ['owner-b']});

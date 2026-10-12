@@ -5185,16 +5185,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (left.entity_id === right.entity_id) return true;
         const leftOption = options.find(o => o.entity_id === left.entity_id);
         const rightOption = options.find(o => o.entity_id === right.entity_id);
-        if (leftOption?.identity_ambiguous || rightOption?.identity_ambiguous) return false;
         const canonicalMac = (rec, option) => {
-            const raw = rec.scanner_mac || option?.scanner_mac;
-            if (typeof raw !== 'string' || !raw) return null;
+            const raw = rec.scanner_mac || (!option?.identity_ambiguous ? option?.scanner_mac : null);
+            if (typeof raw !== 'string' || !/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(raw)) return null;
             const mac = raw.toLowerCase(), owner = rec.scanner_config_entry_id;
             const mapped = (addressMap || []).filter(row => row.scanner_ble_mac === mac && row.scanner_mac !== mac);
             if (!mapped.length) return mac;
             const candidates = mapped.map(row => [row.config_entry_id, row.scanner_mac]);
-            for (const current of options.filter(row => row.scanner_mac === mac)) {
-                for (const currentOwner of current.config_entry_ids || []) candidates.push([currentOwner, mac]);
+            for (const current of options) {
+                const proofs = current.scanner_identities || (current.config_entry_ids || [])
+                    .map(config_entry_id => ({config_entry_id, scanner_mac: current.scanner_mac}));
+                for (const proof of proofs) {
+                    if (proof.scanner_mac === mac) candidates.push([proof.config_entry_id, mac]);
+                }
             }
             if (!owner && new Set(candidates.map(row => row[0])).size !== 1) return null;
             const identities = new Set(candidates.filter(row => !owner || row[0] === owner).map(row => JSON.stringify(row)));
