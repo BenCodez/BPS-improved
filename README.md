@@ -9,6 +9,8 @@ maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hog
 
 Quick list of changes in this fork:
 
+- Home Assistant device links and registry iteration support the 2026.8/2026.9
+  API changes while retaining compatibility with older cores.
 - Receiver matching uses Bermuda names and proven hardware identities. Old and
   current aliases work across renames; missing readings show Unknown or Unmatched
   status rather than falsely implying Offline.
@@ -214,8 +216,8 @@ Every tracked device's BPS sensors — `_bps_zone`, `_bps_floor`,
 `_bps_nearest_zone`, and `_bps_sub_zone` — are grouped under **their own Home
 Assistant device**, named `<device> (BPS)`, instead of piling into one shared
 list. That BPS device is **nested under the matching Bermuda tracker device**
-(via `via_device`), so a device's positioning sensors sit alongside the rest of
-its entities.
+(its `via_device_id` on Home Assistant 2026.8 and later, `via_device` before
+that), so a device's positioning sensors sit alongside the rest of its entities.
 
 ![The BPS integration page: one "(BPS)" device per tracked device, each holding that device's four positioning sensors](img/screenshots/per-device-grouping.png)
 
