@@ -126,16 +126,26 @@ def _position_error(target, marker, positions, floor, context, now, role):
             row["status"] = "ambiguous"
         return row
     pos = candidates[0]
-    quality = pos.get("outdoor") if isinstance(pos.get("outdoor"), dict) else {}
+    outdoor = isinstance(pos.get("outdoor"), dict)
+    quality = pos["outdoor"] if outdoor else {}
     observed = pos.get("updated") if quality.get("use_observation_age") is False else quality.get("observed", pos.get("updated"))
     age = max(0, now - observed) if number(observed) and 0 <= observed <= now else None
     layout, defaults = context["layout"], context.get("defaults", {})
-    threshold = quality.get("stale_after_s", layout.get("position_timeout", defaults.get("position_timeout_s", 30)))
-    threshold = threshold if number(threshold) and threshold >= 0 else 30
-    stale = quality.get("stale") is True or (age is not None and threshold > 0 and age >= threshold)
+    if outdoor:
+        threshold = quality.get("stale_after_s", 30)
+        threshold = threshold if number(threshold) and threshold > 0 else 30
+        expired = age is not None and age >= threshold
+    else:
+        default = defaults.get("position_timeout_s", 300) if isinstance(defaults, dict) else 300
+        default = default if number(default) and default > 0 else 300
+        threshold = layout.get("position_timeout", default)
+        threshold = threshold if number(threshold) and threshold > 0 else default
+        # Indoor pruning uses a strict boundary on the last published fix.
+        expired = age is not None and age > threshold
+    stale = quality.get("stale") is True or expired
     detection_only = quality.get("detection_only") is True or quality.get("direction_known") is False
     row.update(floor=pos.get("floor"), updated=_scalar(pos.get("updated")), observed=_scalar(observed),
-               age_s=age, wrong_floor=pos.get("floor") != marker["floor"], stale=stale,
+               age_s=age, stale_after_s=threshold, wrong_floor=pos.get("floor") != marker["floor"], stale=stale,
                detection_only=detection_only)
     if pos.get("group"):
         row["group_state_source"] = {"section": "positions", "ent": target}

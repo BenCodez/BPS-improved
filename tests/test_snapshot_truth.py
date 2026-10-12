@@ -14,7 +14,7 @@ def snapshot():
             {"entity_id": "receiver_b", "cords": {"x": 60, "y": 0}, "height": 1}]},
         {"name": "Upper", "scale": 10, "receivers": [
             {"entity_id": "receiver_c", "cords": {"x": 0, "y": 0}, "height": 1}]}],
-        "reading_max_age": 30}, "target_members": {
+        "reading_max_age": 30}, "defaults": {"position_timeout_s": 30}, "target_members": {
         "beacon_a": ["beacon_a"], "beacon_b": ["beacon_b"],
         "bps_group_pet": ["beacon_a", "beacon_b"]}},
         "readings": [reading()], "positions": [
@@ -355,3 +355,39 @@ def test_stale_wrong_floor_detection_retains_flags_and_source_clock():
     assert row["status"] == "stale" and row["age_s"] == 50
     assert row["stale"] and row["wrong_floor"] and row["detection_only"]
     assert not row["scored"] and "error_m" not in row
+
+
+@pytest.mark.parametrize("configured", [None, 0, -1, False, "invalid", float("nan"), float("inf")])
+@pytest.mark.parametrize("age, stale", [(300, False), (301, True)])
+def test_indoor_timeout_falls_back_to_captured_default_with_live_pruning_boundary(configured, age, stale):
+    data = snapshot()
+    data["time"] = 1000
+    data["context"]["defaults"]["position_timeout_s"] = 300
+    data["context"]["layout"]["position_timeout"] = configured
+    data["positions"][0]["updated"] = 1000 - age
+    row = truth.analyse(data, [marker()])["markers"][0]["position_errors"][0]
+    assert row["stale_after_s"] == 300 and row["stale"] is stale
+    assert row["scored"] is not stale
+
+
+def test_indoor_positive_override_and_captured_default_are_honored():
+    data = snapshot()
+    data["positions"][0]["updated"] = 60
+    data["context"]["defaults"]["position_timeout_s"] = 45
+    data["context"]["layout"]["position_timeout"] = 0
+    row = truth.analyse(data, [marker()])["markers"][0]["position_errors"][0]
+    assert row["stale_after_s"] == 45 and not row["stale"]
+    data["context"]["layout"]["position_timeout"] = 35
+    row = truth.analyse(data, [marker()])["markers"][0]["position_errors"][0]
+    assert row["stale_after_s"] == 35 and row["stale"]
+
+
+def test_outdoor_freshness_keeps_its_own_threshold_and_inclusive_boundary():
+    data = snapshot()
+    data["context"]["layout"]["position_timeout"] = 900
+    data["positions"][0].update(updated=70, outdoor={})
+    row = truth.analyse(data, [marker()])["markers"][0]["position_errors"][0]
+    assert row["stale_after_s"] == 30 and row["stale"]
+    data["positions"][0].update(updated=80, outdoor={"stale_after_s": 20})
+    row = truth.analyse(data, [marker()])["markers"][0]["position_errors"][0]
+    assert row["stale_after_s"] == 20 and row["stale"]
