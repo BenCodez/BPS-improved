@@ -900,6 +900,14 @@ def _scanner_diagnostics(hass, coordinates_json):
     for fname, slug, _uid, _mac in placed:
         key = fname if isinstance(fname, str) else None
         placed_by_floor.setdefault(key, set()).add(slug)
+    # A saved hardware binding also places its proven current/previous aliases.
+    # Keep them out of unplaced reports and same-floor relink suggestions.
+    # Proven duplicate/conflicting placements still occupy that scanner; their
+    # separate issue rows explain why it cannot currently supply tracking data.
+    for row in aliases + issues:
+        placed_slugs.update(row["aliases"])
+        key = row["floor"] if isinstance(row["floor"], str) else None
+        placed_by_floor.setdefault(key, set()).update(row["aliases"])
     # Candidates for a re-link: live scanner slugs not already correctly placed.
     candidates = {row["entity_id"]: row for row in matching["options"] if row["selectable"]}
     free_by_floor, identities_by_token = {}, {}

@@ -88,6 +88,55 @@ def test_saved_mac_and_owner_survive_removed_old_entities_without_rewriting_name
     assert bps._scanner_diagnostics(hass, json.dumps(data))["placement_issues"][0]["status"] == "scanner_identity_unavailable"
 
 
+@pytest.mark.parametrize("proof", ["valid", "wrong_owner", "replacement_mac"])
+def test_renamed_proven_scanner_is_not_reported_unplaced_by_authenticated_read(hass, monkeypatch, proof):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    del entries[old]; del states[old]
+    rec = data["floor"][0]["receivers"][0]
+    rec.update(scanner_mac=MAC, scanner_config_entry_id="entry")
+    if proof == "wrong_owner": rec["scanner_config_entry_id"] = "other-owner"
+    if proof == "replacement_mac": rec["scanner_mac"] = "dd:ee:ff:44:55:66"
+    other = "sensor.tag_distance_to_other_station"
+    add(other, "5", uid="synthetic-tracker_aa:bb:cc:44:55:66_range")
+    states[other].last_updated = timestamp(998)
+    hass.data["bps"]["layout"] = data
+    before = copy.deepcopy(data)
+    direct = bps._scanner_diagnostics(hass, json.dumps(data))
+    response = asyncio.run(bps.BPSReadAPIText().get(NS(app={"hass": hass})))
+    diagnostics = response.json_body["scanner_diagnostics"]
+    assert diagnostics == direct
+    assert diagnostics["unplaced_scanners"] == (["other_station"] if proof == "valid" else ["current_station", "other_station"])
+    assert hass.data["bps"]["layout"] == before
+    assert not hass._store_saves
+
+
+def test_proven_alias_is_not_a_free_same_floor_relink_candidate(hass, monkeypatch):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    del entries[old]; del states[old]
+    rec = data["floor"][0]["receivers"][0]
+    rec.update(scanner_mac=MAC, scanner_config_entry_id="entry")
+    orphan = {"entity_id": "missing_112233", "scanner_uid": "112233", "cords": {"x": 30, "y": 40}}
+    data["floor"][0]["receivers"].append(copy.deepcopy(orphan))
+    data["floor"].append({"name": "Upstairs", "scale": 10, "receivers": [copy.deepcopy(orphan)]})
+    report = bps._scanner_diagnostics(hass, json.dumps(data))
+    assert report["unplaced_scanners"] == []
+    suggestions = {row["floor"]: row["suggested"] for row in report["unmatched_receivers"]}
+    assert suggestions == {"Ground": None, "Upstairs": "current_station"}
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_proven_duplicate_or_conflicting_aliases_still_occupy_the_scanner(hass, monkeypatch, conflict):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    first = data["floor"][0]["receivers"][0]
+    first.update(scanner_mac=MAC, scanner_config_entry_id="entry")
+    duplicate = copy.deepcopy(first); duplicate["entity_id"] = "removed_other_alias"
+    if conflict: duplicate["cords"]["x"] += 20
+    data["floor"][0]["receivers"].append(duplicate)
+    report = bps._scanner_diagnostics(hass, json.dumps(data))
+    assert report["unplaced_scanners"] == []
+    assert report["placement_issues"]
+
+
 @pytest.mark.parametrize("invalid", ["raw", "disabled", "other_integration", "future", "different_tracker"])
 def test_invalid_alias_source_cannot_displace_trusted_exact_source(hass, monkeypatch, invalid):
     data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
