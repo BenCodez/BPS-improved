@@ -611,8 +611,11 @@ class BpsMapCard extends HTMLElement {
       const resolved = savedMac ? this._resolveReceiverMac(savedMac, rec.scanner_config_entry_id) : null;
       if (savedMac && !resolved) return [rec.entity_id, {invalid: true}];
       const mac = resolved?.scanner_mac || (!option?.identity_ambiguous ? option?.scanner_mac : null) || null;
+      const identities = (option?.scanner_identities || []).filter(row => row.scanner_mac === mac);
       const owner = resolved?.owner || rec.scanner_config_entry_id || (option?.scanner_mac === mac && !option?.identity_ambiguous
-        && option?.config_entry_ids?.length === 1 ? option.config_entry_ids[0] : null);
+        && option?.config_entry_ids?.length === 1 ? option.config_entry_ids[0] : null)
+        || (savedMac && identities.length === 1 && (this._receiverMacOwners?.get(mac)?.length || 0) === 1
+          ? identities[0].config_entry_id : null);
       return [rec.entity_id, mac && owner ? {scanner_mac: mac, owner,
         ...(savedMac && savedMac !== mac ? {scanner_ble_mac: savedMac} : {})} : null];
     }));
@@ -630,10 +633,21 @@ class BpsMapCard extends HTMLElement {
       const current = this._resolveReceiverMac(binding.scanner_ble_mac, binding.owner);
       if (current?.scanner_mac !== binding.scanner_mac || current.owner !== binding.owner) return null;
     }
-    const matches = option => !option?.identity_ambiguous && option?.scanner_mac === binding.scanner_mac
-      && option.config_entry_ids?.length === 1 && option.config_entry_ids[0] === binding.owner;
-    if (direct) return matches(direct) ? direct : null;
-    return [...(this._receiverMatching?.values() || [])].find(matches) || null;
+    if (direct) return this._narrowReceiverOption(direct, binding.scanner_mac, binding.owner);
+    for (const option of this._receiverMatching?.values() || []) {
+      const matched = this._narrowReceiverOption(option, binding.scanner_mac, binding.owner);
+      if (matched) return matched;
+    }
+    return null;
+  }
+
+  _narrowReceiverOption(option, mac, owner) {
+    if (!option?.identity_ambiguous) return option?.scanner_mac === mac
+      && option.config_entry_ids?.length === 1 && option.config_entry_ids[0] === owner ? option : null;
+    const rows = (option.scanner_identities || []).filter(row => row.scanner_mac === mac && row.config_entry_id === owner);
+    if (rows.length !== 1) return null;
+    return {...option, ...rows[0], scanner_mac: mac, config_entry_ids: [owner],
+      identity_ambiguous: false, liveness_name_unique: false};
   }
 
   _computeReceiverStatuses() {
@@ -655,7 +669,9 @@ class BpsMapCard extends HTMLElement {
       && a.scanner_mac === b.scanner_mac && a.config_entry_ids[0] === b.config_entry_ids[0];
     const distanceSources = (id, identity) => {
       const candidates = new Set();
-      const options = [...(this._receiverMatching?.values() || [])].filter(option => sameIdentity(identity, option));
+      const options = [...(this._receiverMatching?.values() || [])]
+        .map(option => this._narrowReceiverOption(option, identity?.scanner_mac, identity?.config_entry_ids?.[0]))
+        .filter(option => sameIdentity(identity, option));
       if (!options.length && identity) options.push(identity);
       let hasInventory = false;
       for (const option of options) {
@@ -736,7 +752,7 @@ class BpsMapCard extends HTMLElement {
       // unavailable" would report a dead proxy as online. Require the
       // connectivity device_class so an unrelated entity that merely shares
       // the binary_sensor.<id>_status slug does not hijack the status.
-      const aliases = new Set([id]);
+      const aliases = new Set(this._receiverMatching?.get(id)?.identity_ambiguous ? [] : [id]);
       if (identity?.liveness_name_unique !== false && (ownersByMac.get(identity?.scanner_mac)?.size || 0) === 1) {
         for (const [alias, option] of this._receiverMatching || []) {
           if (sameIdentity(identity, option)) {

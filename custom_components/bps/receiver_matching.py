@@ -90,6 +90,14 @@ def inventory(hass):
             if isinstance(owner, str) and owner:
                 mac_owners.setdefault(mac, set()).add(owner)
     options = []
+    identity_sources = {}
+    for ent in getattr(registry, "entities", {}).values():
+        uid = getattr(ent, "unique_id", "") or ""
+        match = _RANGE_MAC.search(uid)
+        owner = getattr(ent, "config_entry_id", None)
+        if ent.platform != "bermuda" or not ent.entity_id.startswith("sensor.") or not match or not isinstance(owner, str) or not owner:
+            continue
+        identity_sources[ent.entity_id] = ((owner, match[1].lower()), ent)
     for slug, target in sorted(rows.items()):
         if not slug:
             continue
@@ -104,6 +112,23 @@ def inventory(hass):
                       identity_ambiguous=ambiguous, selectable=not ambiguous and not renamed_only,
                       warning="Bermuda scanner identity is ambiguous across owners or names." if ambiguous else
                       "Restore Bermuda distance entity IDs with _distance_to_<scanner slug> before matching." if renamed_only else None)
+        # Keep underlying hardware proofs even when the display slug cannot be
+        # selected without an owner/MAC. Existing explicitly matched placements
+        # can still resolve one scanner without borrowing the other one's data.
+        grouped_sources = {}
+        for eid in target["distance_sensors"]:
+            if eid in identity_sources:
+                key, ent = identity_sources[eid]
+                grouped_sources.setdefault(key, []).append(ent)
+        target["scanner_identities"] = [{
+            "config_entry_id": owner, "scanner_mac": address,
+            "distance_sensors": sorted(ent.entity_id for ent in grouped_sources.get((owner, address), [])),
+            "disabled_sensors": sorted(ent.entity_id for ent in grouped_sources.get((owner, address), [])
+                                       if getattr(ent, "disabled_by", None) is not None),
+            "renamed_sensors": sorted(ent.entity_id for ent in grouped_sources.get((owner, address), [])
+                                      if "_distance_to_" not in ent.entity_id),
+        } for owner, address in sorted(identities, key=lambda key: (str(key[0]), key[1]))
+            if isinstance(owner, str) and owner]
         for key in ("distance_sensors", "renamed_sensors", "disabled_sensors"):
             target[key].sort()
         target["label"] = f'{target["name"]} · {slug}' + (f' · {mac}' if mac else '')

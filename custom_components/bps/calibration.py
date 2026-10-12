@@ -1446,7 +1446,7 @@ class BPSCalibrationAPI(HomeAssistantView):
                         tracking = None
                 if cal.get("mode") == "auto":
                     coords["auto_calibration"] = True
-                return web.json_response(build_preview(coords, name, result, source, tracking))
+                return web.json_response(build_preview(coords, name, result, source, tracking, hass=hass))
             elif action == "apply":
                 updated = await apply_corrections(hass, cal, data.get("floor") or cal.get("floor"))
                 await save_calibration_state(hass)

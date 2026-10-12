@@ -731,6 +731,9 @@ identity evidence and deduplicates physical scanner observations.
 Applying a correction keeps equivalent same-floor aliases synchronized. Automatic
 calibration uses each floor's own geometry when a scanner is shared between floors.
 Receiver discovery runs once per automatic calibration refresh across all floors.
+An existing saved full scanner MAC and Bermuda owner can disambiguate a shared
+receiver name. Tracking, calibration and automatic station status use only that
+hardware's sources; a shared name without hardware proof remains unresolved.
 The receiver self-test also uses each floor's placements and routes raw sample
 links through proven aliases, counting equivalent same-floor placements once.
 Manual results capture the scanner MAC and owner so their corrections follow the

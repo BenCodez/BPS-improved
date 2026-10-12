@@ -507,6 +507,53 @@ function fallbackCard(saved = 'old_station') {
     return c;
 }
 
+test('floor load and refreshed status honor saved hardware within an ambiguous scanner slug', async () => {
+    for (const sharedMac of [false, true]) {
+        const c = fallbackCard('shared'), mac = 'aa:bb:cc:11:22:33', other = sharedMac ? mac : 'dd:ee:ff:44:55:66';
+        const chosen = 'sensor.tag_distance_to_shared', foreign = 'sensor.other_distance_to_shared';
+        const option = {entity_id: 'shared', name: 'Shared', scanner_mac: null, config_entry_ids: ['owner-a', 'owner-b'],
+            identity_ambiguous: true, selectable: false, liveness_name_unique: false,
+            distance_sensors: [chosen, foreign], disabled_sensors: [], scanner_identities: [
+                {config_entry_id: 'owner-a', scanner_mac: mac, distance_sensors: [chosen], disabled_sensors: []},
+                {config_entry_id: 'owner-b', scanner_mac: other, distance_sensors: [foreign], disabled_sensors: []}]};
+        const matching = {options: [option], mac_owners: sharedMac ? {[mac]: ['owner-a', 'owner-b']} : {[mac]: ['owner-a'], [other]: ['owner-b']}};
+        const rec = {...c._receivers[0], cords: {x: 1, y: 2}};
+        c._apiFetch = async path => ({ok: true, json: async () => path === '/api/bps/read_text'
+            ? {receiver_matching: matching, coordinates: JSON.stringify({floor: [{name: 'Property', scale: 20, receivers: [rec], zones: []}]})}
+            : {matching}});
+        c._hass.callWS = async () => ({response: {}});
+        c._resolveMapUrl = async () => 'synthetic.png'; c._loadFloorImage = async () => {c._baseImage = {};};
+        c._hass.states[chosen] = {state: '3', last_updated: new Date(Date.now() - 1000).toISOString()};
+        c._hass.states[foreign] = {state: '9', last_updated: new Date(Date.now() - 1000).toISOString()};
+        c._hass.entities[chosen] = {platform: 'bermuda', config_entry_id: 'owner-a'};
+        c._hass.entities[foreign] = {platform: 'bermuda', config_entry_id: 'owner-b'};
+        await c._loadFloorResources(1);
+        assert.equal(c._receiverStatuses.get('shared'), true, 'saved owner/MAC uses its filtered source');
+        assert.equal(c._currentReceiverOption('shared').scanner_mac, mac);
+        c._hass.states[chosen].state = 'unavailable';
+        c._hass.states['binary_sensor.shared_status'] = {state: 'on', attributes: {device_class: 'connectivity'}};
+        assert.equal(c._computeReceiverStatuses().get('shared'), null, 'other hardware and ambiguous connectivity do not lend liveness');
+        option.scanner_identities.shift();
+        c._nextReceiverInventoryAt = 0; c._nextBermudaDumpAt = 0;
+        await c._refreshBermudaScanners();
+        assert.equal(c._currentReceiverOption('shared'), null, 'removed owner/MAC cannot be rebound by the slug');
+        assert.equal(c._computeReceiverStatuses().get('shared'), null);
+        assert.equal(c._receivers[0].scanner_mac, mac);
+        assert.equal(c._receivers[0].scanner_config_entry_id, 'owner-a');
+    }
+});
+
+test('an ambiguous scanner slug without a saved hardware identity remains unknown', () => {
+    const c = fallbackCard('shared');
+    c._receivers = [{entity_id: 'shared'}];
+    c._receiverMatching = new Map([['shared', {entity_id: 'shared', identity_ambiguous: true, scanner_mac: null,
+        scanner_identities: [{scanner_mac: 'aa:bb:cc:11:22:33', config_entry_id: 'owner-a', distance_sensors: ['sensor.tag_distance_to_shared']}]}]]);
+    c._hass.states['sensor.tag_distance_to_shared'] = {state: '3', last_updated: new Date().toISOString()};
+    c._captureReceiverBindings();
+    assert.equal(c._currentReceiverOption('shared'), null);
+    assert.equal(c._computeReceiverStatuses().get('shared'), null);
+});
+
 test('automatic unknown connectivity falls through while explicit status remains authoritative', () => {
     for (const unknown of ['unknown', 'unavailable']) for (const evidence of ['distance', 'device']) {
         const c = fallbackCard();

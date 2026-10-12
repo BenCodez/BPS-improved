@@ -28,9 +28,15 @@ class ReceiverSources:
                 self.by_ble_address.setdefault(item["scanner_ble_mac"], set()).add(
                     (item["config_entry_id"], item["scanner_mac"]))
         self.owners_by_mac.update({mac: set(owners) for mac, owners in self.matching.get("mac_owners", {}).items()})
+        self.option_keys = {}
         for option in self.options.values():
-            key = self.option_identity(option)
-            if key:
+            keys = {(item["config_entry_id"], item["scanner_mac"])
+                    for item in option.get("scanner_identities", [])}
+            exact = self.option_identity(option)
+            if exact:
+                keys.add(exact)
+            self.option_keys[option["entity_id"]] = keys
+            for key in keys:
                 self.by_identity.setdefault(key, set()).add(option["entity_id"])
                 self.owners_by_mac.setdefault(key[1], set()).add(key[0])
         for ent in getattr(self.registry, "entities", {}).values():
@@ -69,8 +75,6 @@ class ReceiverSources:
             return {"identity": None, "status": "invalid_scanner_identity", "aliases": []}
         option = self.options.get(slug)
         exact = self.option_identity(option)
-        if option and option.get("identity_ambiguous"):
-            return {"identity": None, "status": "ambiguous_scanner_identity", "aliases": []}
         if isinstance(mac, str) and MAC.fullmatch(mac):
             mac = mac.lower()
             # Older layouts can carry Bermuda's Bluetooth address while range
@@ -100,10 +104,28 @@ class ReceiverSources:
                 key = keys[0] if len(keys) == 1 and len(self.owners_by_mac.get(mac, ())) == 1 else None
             if key is None or key not in self.by_identity:
                 return {"identity": None, "status": "scanner_identity_unavailable", "aliases": []}
+            if option and option.get("identity_ambiguous") and key not in self.option_keys.get(slug, ()):
+                return {"identity": None, "status": "scanner_identity_conflict", "aliases": []}
         else:
+            if option and option.get("identity_ambiguous"):
+                return {"identity": None, "status": "ambiguous_scanner_identity", "aliases": []}
             key = exact
         return {"identity": key, "status": "matched" if key or option else "unmatched",
                 "aliases": sorted(self.by_identity.get(key, {slug}))}
+
+    def resolved_option(self, slug, binding):
+        """Narrow an ambiguous display option to the saved hardware proof."""
+        option = self.options.get(slug)
+        if not option or self.blocked(binding):
+            return None
+        key = binding.get("identity")
+        if not option.get("identity_ambiguous"):
+            return option if key is None or self.option_identity(option) == key else None
+        for row in option.get("scanner_identities", []):
+            if (row["config_entry_id"], row["scanner_mac"]) == key:
+                return {**option, **row, "config_entry_ids": [key[0]], "identity_ambiguous": False,
+                        "liveness_name_unique": False}
+        return None
 
     def floor_bindings(self, floor):
         receivers = floor.get("receivers", [])

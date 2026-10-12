@@ -994,7 +994,8 @@ def _scanner_linking(hass, coordinates_json):
                         owned.add(source)
                 sensors = [sensor for sensor in sensors if sensor["entity_id"] in owned]
             reporting = _reporting(sensors)
-            matched = next((options[alias] for alias in binding["aliases"] if alias in options),
+            matched = next((option for alias in binding["aliases"]
+                            if (option := sources.resolved_option(alias, binding)) is not None),
                            options.get(slug) if isinstance(slug, str) else None)
             if sources.blocked(binding):
                 status = "conflict"
@@ -1202,7 +1203,8 @@ async def update_receiver_liveness(hass):
                 identity_conflicts.add(rec["entity_id"])
                 receivers.add(rec["entity_id"])
             if not sources.blocked(binding) and binding["identity"]:
-                alias = next((matching[name] for name in binding["aliases"] if name in matching), None)
+                alias = next((option for name in binding["aliases"]
+                              if (option := sources.resolved_option(name, binding)) is not None), None)
                 if alias:
                     matching[rec["entity_id"]] = alias
                     receivers.add(rec["entity_id"])
@@ -1238,7 +1240,7 @@ async def update_receiver_liveness(hass):
         binding = bindings.get(slug, {})
         option = matching.get(slug, {})
         key = binding.get("identity")
-        names = [slug]
+        names = [] if sources.options.get(slug, {}).get("identity_ambiguous") else [slug]
         if key and option.get("liveness_name_unique", True) and len(sources.owners_by_mac.get(key[1], ())) == 1:
             names.extend(binding.get("aliases", []))
             if option.get("name"):
@@ -1248,8 +1250,8 @@ async def update_receiver_liveness(hass):
     def live_distance(slug):
         binding = bindings.get(slug, {})
         key = binding.get("identity")
-        options = [option for option in sources.options.values()
-                   if sources.option_identity(option) == key] if key else [sources.options.get(slug, {})]
+        options = [option for name in binding.get("aliases", [])
+                   if (option := sources.resolved_option(name, binding)) is not None] if key else [sources.options.get(slug, {})]
         candidates = {eid for option in options for eid in option.get("distance_sensors", [])
                       if eid not in option.get("disabled_sensors", [])}
         now, max_age = time.time(), _reading_max_age(layout)
@@ -1274,7 +1276,7 @@ async def update_receiver_liveness(hass):
         return False
 
     def is_online(slug):
-        if slug in identity_conflicts or matching.get(slug, {}).get("identity_ambiguous"):
+        if slug in identity_conflicts or sources.blocked(bindings.get(slug, {"status": "unmatched"})):
             return None
         name = matching.get(slug, {}).get("name")
         mac = matching.get(slug, {}).get("scanner_mac")
