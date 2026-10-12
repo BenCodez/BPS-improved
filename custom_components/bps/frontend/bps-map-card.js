@@ -1093,10 +1093,8 @@ class BpsMapCard extends HTMLElement {
         ctx.fill();
         ctx.stroke();
       }
-      const status = BPSOutdoor.markerStatus(pos.outdoor, marker.offMap);
-      if (this._config.show_labels || status) {
-        const label = this._config.show_labels ? this._markerLabelText(trackerKey, pos) : '';
-        const text = [label, status].filter(Boolean).join(' · ');
+      if (this._config.show_labels) {
+        const text = this._markerLabelText(trackerKey, pos);
         if (text) {
           const scale = this._config.scale_labels / 100;
           const fontPx = Math.max(11, iconSize * 0.35) * scale;

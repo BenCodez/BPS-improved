@@ -226,7 +226,7 @@ test('panel Show distances draws same-floor group member ranges once while retai
     assert.match(p.el('outdoorDiagnosticText').textContent, /capped for display.*displayed 8.0 m/);
 });
 
-test('panel marks outside-map positions at the edge and labels detection-only fixes without moving raw ranges', async () => {
+test('panel marks outside-map positions at the edge without status captions or moving raw ranges', async () => {
     const source = layout(); source.outdoor_tracking = {enabled: true};
     const p = await panel(source); p.hooks.select('Property');
     p.el('entSelector').value = 'beacon_a'; await p.el('entSelector').fire('change');
@@ -237,12 +237,12 @@ test('panel marks outside-map positions at the edge and labels detection-only fi
     assert.equal(p.hooks.tracks().get('beacon_a').x, 2200);
     assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[1] === 2200 && c[3] === 160), 'uncertainty stays at raw position');
     assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[1] < 2000 && c[1] > 1900), 'edge marker remains inside map');
-    assert.ok(p.canvasCalls.some(c => c[0] === 'text' && /Off map.*inferred/.test(c[1])));
+    assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'text').map(c => c[1]), ['beacon_a']);
     assert.equal(p.hooks.hitDeviceAt({x: 1954, y: 500}), 'beacon_a', 'visible edge marker is selectable');
     assert.equal(p.hooks.hitDeviceAt({x: 2200, y: 500}), null, 'raw coordinates are not an invisible hit target');
     row.cords = [100, 100]; row.outdoor.detection_only = true; row.outdoor.direction_known = false;
     p.canvasCalls.length = 0; await p.intervals.findLast(i => i.ms === 500).cb();
-    assert.ok(p.canvasCalls.some(c => c[0] === 'text' && /Detected only.*direction unknown/.test(c[1])));
+    assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'text').map(c => c[1]), ['beacon_a']);
 });
 
 test('full report includes selected map and unsaved placements separately without images or auth tokens', async () => {
@@ -588,7 +588,7 @@ test('panel displays tiny numbered beacons under the main icon with diagnostics 
     const beaconA = {ent: 'beacon_a', cords: [60, 100], floor: 'Property', updated: 1000};
     const beaconB = {ent: 'beacon_b', cords: [140, 100], floor: 'Property', updated: 1000};
     p.network.cords = [{ent: 'bps_group_rover', group: true, name: 'Rover', cords: [100, 100], floor: 'Property',
-        updated: 1000, outdoor: {observed: 1000}, beacon_positions: [beaconA, beaconB,
+        updated: 1000, outdoor: {observed: 1000, detection_only: true, direction_known: false}, beacon_positions: [beaconA, beaconB,
             {ent: 'other', cords: [500, 500], floor: 'Barn'}, {ent: 'invalid', cords: [NaN, 100]}, null]}];
     p.el('entSelector').value = 'bps_group_rover'; await p.el('entSelector').fire('change');
     await p.el('starttrack').fire('click');
@@ -600,8 +600,7 @@ test('panel displays tiny numbered beacons under the main icon with diagnostics 
     const main = p.canvasCalls.findIndex(c => c[0] === 'image' && c[1] === '/bps/person.svg');
     assert.ok(main > p.canvasCalls.findLastIndex(c => c[0] === 'arc'), 'main icon is painted on top');
     assert.deepEqual(p.canvasCalls[main].slice(-2), [80, 80], 'main icon stays full size');
-    assert.ok(p.canvasCalls.some(c => c[0] === 'text' && c[1] === 'Rover'));
-    assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'text' && ['1', '2'].includes(c[1])).map(c => c[1]), ['1', '2']);
+    assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'text').map(c => c[1]), ['1', '2', 'Rover']);
     p.network.cords[0].beacon_positions = [beaconB];
     p.canvasCalls.length = 0; await poll.cb();
     assert.deepEqual(p.canvasCalls.filter(c => c[0] === 'text' && ['1', '2'].includes(c[1])).map(c => c[1]), ['2']);

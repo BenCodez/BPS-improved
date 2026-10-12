@@ -990,8 +990,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             // Name pill so each marker is identifiable on the map (colour matches
             // the legend); off-floor devices also get the red "on <floor>" pill.
-            const status = outdoor.markerStatus(t.outdoor, marker.offMap);
-            drawLabelPill((t.group ? (t.name || entKey) : entKey) + (status ? ' · ' + status : ''), marker.x, marker.y + iconSize / 2 + 16, baseHue);
+            drawLabelPill(t.group ? (t.name || entKey) : entKey, marker.x, marker.y + iconSize / 2 + 16, baseHue);
             if (t.offFloor && t.floor) {
                 drawLabelPill(`on ${t.floor}`, marker.x, marker.y + iconSize / 2 + 44, 0);
             }
