@@ -67,18 +67,20 @@ test('card polling caps displayed uncertainty and exposes cap diagnostics withou
     assert.match(status, /capped for display.*displayed 8.0 m/);
 });
 
-test('card keeps outside-map icons visible without moving uncertainty and labels detection-only markers', () => {
+test('card keeps outside-map icons visible without moving uncertainty or adding status captions', () => {
     const c = card(), cv = canvas(); c._canvas = cv.value; c._outdoorSettings.enabled = true;
     c._getIconImage = () => null; c._trackerIconUrl = () => 'beacon.svg';
     const raw = {x: 2200, y: 500, label: 'Beacon A', outdoor: {estimated_uncertainty_m: 8}};
     c._positions.set('beacon_a', raw); c._drawMarkers();
     const arcs = cv.calls.filter(Array.isArray);
     assert.deepEqual(arcs.map(a => a.slice(0, 3)), [[2200, 500, 160], [1974, 500, 24], [1974, 500, 20]]);
-    assert.ok(cv.calls.some(c => typeof c === 'string' && /Off map.*inferred/.test(c)));
+    assert.deepEqual(cv.calls.filter(c => typeof c === 'string'), ['Beacon A']);
     assert.equal(raw.x, 2200);
     raw.x = 300; raw.outdoor.detection_only = true; raw.outdoor.direction_known = false;
+    cv.calls.length = 0; c._drawMarkers();
+    assert.deepEqual(cv.calls.filter(c => typeof c === 'string'), ['Beacon A']);
     c._config.show_labels = false; cv.calls.length = 0; c._drawMarkers();
-    assert.ok(cv.calls.some(c => typeof c === 'string' && /Detected only.*direction unknown/.test(c)));
+    assert.deepEqual(cv.calls.filter(c => typeof c === 'string'), []);
 });
 
 test('card loads floor scale/settings from authenticated existing layout endpoint', async () => {
@@ -144,7 +146,8 @@ test('card shows quiet member icons without diagnostics and retains one main gro
     const beaconB = {ent: 'beacon_b', floor: 'Property', cords: [300, 100]};
     const row = {group: true, beacon_positions: [beaconA, beaconB,
         {ent: 'other_floor', floor: 'Barn', cords: [400, 300]}, {ent: 'invalid', cords: [null, 100]}, null]};
-    c._positions.set('bps_group_rover', {x: 200, y: 100, label: 'Rover', payload: row});
+    c._positions.set('bps_group_rover', {x: 200, y: 100, label: 'Rover', payload: row,
+        outdoor: {detection_only: true, direction_known: false}});
     c._drawMarkers();
     assert.deepEqual(cv.calls.filter(Array.isArray).map(v => v.slice(0, 3)), [[100, 100, 6], [300, 100, 6], [200, 100, 20]],
         'two tiny markers drawn underneath one full-size marker; no diagnostic circles');

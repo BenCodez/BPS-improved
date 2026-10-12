@@ -250,7 +250,7 @@ in two ways:
   the nearest zone** before it's published.
 
 The map card, `/api/bps/cords`, and the zone sensors all see the same corrected
-position. Outdoor Tracking allows estimates beyond the plan and labels them
+position. Outdoor Tracking allows estimates beyond the plan and displays them
 at the map edge instead; see [Outdoor dog tracking](#outdoor-dog-tracking).
 
 ## Away detection
@@ -463,12 +463,13 @@ fresh path needs only the original solve. No battery/solar entities are required
 and the existing reading-age cutoff still excludes stale receiver measurements.
 
 Outdoor positions are classified against zones without snapping them into a
-zone. An estimate beyond the map shows a subdued **Off map · inferred** marker
-at the image edge; diagnostics retain its actual coordinates. With only one or
-two fresh receivers, BPS shows **Detected only · direction unknown** at a
-reporting receiver, retaining its range rather than claiming a position or zone.
-These detections do not become position-history records. Indoor tracking keeps
-its existing zone-snapping behaviour.
+zone. An estimate beyond the map shows a subdued marker at the image edge;
+diagnostics retain its actual coordinates. With only one or two fresh receivers,
+BPS shows a detection at a reporting receiver, retaining its range rather than
+claiming a position or zone. Map captions keep the normal tracker labels;
+detection-only details remain in outdoor diagnostics. These detections do not
+become position-history records. Indoor tracking keeps its existing zone-snapping
+behaviour.
 
 Group movement rejects brief large member excursions, then approaches persistent
 new evidence gradually. Its diagnostics explain held or limited movement. Group
@@ -853,12 +854,13 @@ worker is still finishing. All original BLE data remains
 in the report. A geometric disagreement can reflect smoothing, obstruction,
 incorrect placements/heights or calibration; it does not prove hardware failure.
 
-For stronger mapped obstruction effects, set **Map & Setup → Outdoor tracking
-→ Tree / building influence → Stronger** and save. Standard preserves previous
-behavior. Stronger levels account for depth through tree areas and reduce trust
-in wall/fence crossings, with bounded minimum trust; raw distances and receiver
-factors remain unchanged. Compare known-position snapshots before increasing
-the setting further. Incorrectly placed obstructions can worsen tracking.
+Start with **Map & Setup → Outdoor tracking → Tree / building influence →
+Standard**, which preserves previous behavior. Higher levels account for depth
+through tree areas and reduce trust in wall/fence crossings, with bounded minimum
+trust; raw distances and receiver factors remain unchanged. Stronger influence
+can worsen position accuracy even when the mapped shapes are correct. Compare
+known-position snapshots at the same stationary locations before keeping an
+increase. Incorrectly placed obstructions can also worsen tracking.
 
 Bermuda scanner identity evidence includes source/Bluetooth/Wi-Fi address field
 types and validation outcomes. Invalid address values are omitted rather than
