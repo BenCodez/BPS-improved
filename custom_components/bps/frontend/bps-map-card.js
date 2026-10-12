@@ -571,7 +571,7 @@ class BpsMapCard extends HTMLElement {
 
   static validReceiverIdentityFields(rec) {
     return typeof rec?.entity_id === "string" && rec.entity_id.length > 0
-      && (rec.scanner_mac == null || typeof rec.scanner_mac === "string")
+      && (rec.scanner_mac == null || typeof rec.scanner_mac === "string" && /^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(rec.scanner_mac))
       && (rec.scanner_config_entry_id == null || typeof rec.scanner_config_entry_id === "string");
   }
 

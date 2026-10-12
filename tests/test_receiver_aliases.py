@@ -88,6 +88,26 @@ def test_saved_mac_and_owner_survive_removed_old_entities_without_rewriting_name
     assert bps._scanner_diagnostics(hass, json.dumps(data))["placement_issues"][0]["status"] == "scanner_identity_unavailable"
 
 
+@pytest.mark.parametrize("invalid", ["", "112233", "not-a-mac", "aa:bb:cc:11:22", " aa:bb:cc:11:22:33", "aa:bb:cc:11:22:zz"])
+def test_malformed_saved_mac_cannot_infer_current_hardware_from_a_unique_slug(hass, monkeypatch, invalid):
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    rec = data["floor"][0]["receivers"][0]
+    rec.update(scanner_mac=invalid, scanner_config_entry_id="entry", distance=99)
+    rec["cords"]["r"] = 999
+    sources = ReceiverSources(hass)
+    binding = sources.binding(rec)
+    assert binding == {"identity": None, "status": "invalid_scanner_identity", "aliases": []}
+    assert sources.source("tag", rec, binding)[1] is None
+    assert C._build_receiver_map(data, hass=hass) == {}
+    asyncio.run(bps.update_receiver_radii(hass, {"entity": "tag", "data": data}))
+    assert "distance" not in rec and "r" not in rec["cords"]
+    assert rec["scanner_mac"] == invalid and rec["correction"] == 2
+    assert bps._scanner_diagnostics(hass, json.dumps(data))["placement_issues"][0]["status"] == "invalid_scanner_identity"
+    hass.data["bps"]["layout"] = data
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "old_station" in hass.data["bps"]["rl_unknown"]
+
+
 @pytest.mark.parametrize("proof", ["valid", "wrong_owner", "replacement_mac"])
 def test_renamed_proven_scanner_is_not_reported_unplaced_by_authenticated_read(hass, monkeypatch, proof):
     data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)

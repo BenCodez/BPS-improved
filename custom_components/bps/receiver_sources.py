@@ -70,7 +70,7 @@ class ReceiverSources:
         slug = receiver.get("entity_id", "")
         mac, owner = receiver.get("scanner_mac"), receiver.get("scanner_config_entry_id")
         if (not isinstance(slug, str) or not slug
-                or mac is not None and not isinstance(mac, str)
+                or mac is not None and (not isinstance(mac, str) or not MAC.fullmatch(mac))
                 or owner is not None and not isinstance(owner, str)):
             return {"identity": None, "status": "invalid_scanner_identity", "aliases": []}
         option = self.options.get(slug)

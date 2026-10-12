@@ -672,6 +672,8 @@ function nextInventory(c, {mac = 'aa:bb:cc:11:22:33', owner = 'owner-a', slug = 
 test('real floor loading keeps malformed saved identity fields unknown instead of inferring current hardware', async () => {
     const cases = [['entity_id', ['old_station']], ['entity_id', {bad: true}],
         ['scanner_mac', ['aa:bb:cc:11:22:33']], ['scanner_mac', {bad: true}],
+        ['scanner_mac', ''], ['scanner_mac', '112233'], ['scanner_mac', 'not-a-mac'],
+        ['scanner_mac', 'aa:bb:cc:11:22'], ['scanner_mac', ' aa:bb:cc:11:22:33'], ['scanner_mac', 'aa:bb:cc:11:22:zz'],
         ['scanner_config_entry_id', ['owner-a']], ['scanner_config_entry_id', {bad: true}],
         ['scanner_config_entry_id', 1]];
     for (const [field, value] of cases) {
