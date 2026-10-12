@@ -6698,7 +6698,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         (result.matrix || []).forEach(m => { cells[`${m.tx}|${m.rx}`] = m; });
         const lowConfidence = result.low_confidence || [];
 
-        let html = '<table style="border-collapse:collapse; font-size:11px; margin-top:8px">'
+        const floorNow = (finalcords.floor || []).find(f => sameFloorName(f.name, result.floor));
+        const current = new Map((floorNow?.receivers || []).map(r => [r.entity_id, r.correction ?? 1]));
+        const changes = slugs.filter(s => Number.isFinite(current.get(s)) && current.get(s) > 0
+            && Number.isFinite(result.receivers[s]) && Math.abs(result.receivers[s] / current.get(s) - 1) >= .05);
+        let html = `<p>${changes.length} proposed receiver changes of at least 5%. These need verification; `
+            + 'the model fit above does not prove better tracking. Apply corrections applies the full solution.</p>';
+        if (changes.length) {
+            html += '<table class="bps-calib-table"><tr><th>Receiver</th><th>Current → proposed factor</th><th>Change</th><th>Confidence</th></tr>';
+            for (const slug of changes) {
+                const percent = (result.receivers[slug] / current.get(slug) - 1) * 100;
+                html += `<tr><td>${escHtml(slug)}</td><td>×${current.get(slug)} → ×${result.receivers[slug]}</td>`
+                    + `<td>${percent > 0 ? '+' : ''}${percent.toFixed(1)}%</td><td>${lowConfidence.includes(slug) ? '⚠ Low' : 'Needs tracking test'}</td></tr>`;
+            }
+            html += '</table>';
+        }
+        html += '<details><summary>Show full probe matrix and all factors</summary><table style="border-collapse:collapse; font-size:11px; margin-top:8px">'
             + '<tr><th style="text-align:left; padding:2px 6px">tx \\ rx</th>';
         slugs.forEach(s => {
             html += `<th class="bps-calib-colhead"><div><span>${escHtml(s)}</span></div></th>`;
@@ -6721,7 +6736,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             html += `<td style="text-align:center; padding:2px 6px">×${result.receivers[tx]}</td></tr>`;
         });
-        html += '</table>';
+        html += '</table></details>';
         if (lowConfidence.length) {
             html += `<p class="text-sm text-gray-500" style="margin-top:6px">⚠ Low confidence (aggressive correction or few pairs): ${escHtml(lowConfidence.join(', '))} — verify those receivers before applying.</p>`;
         }
@@ -6745,8 +6760,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 + '<div class="bps-calib-missing-title">Placed on this floor but missing from this report</div>';
             if (miss.missUnmatched.length) {
                 html += `<p><strong>No matching Bermuda scanner:</strong> ${escHtml(miss.missUnmatched.join(', '))} — `
-                    + 'the device name no longer matches the placed id (usually a rename after moving the probe). '
-                    + 'Check the <strong>Debugging</strong> tab, or rename the device/entity so they match.</p>';
+                    + 'identity was not resolved when these samples were collected. '
+                    + 'Check <strong>Debugging</strong> and use <strong>Match receiver</strong> to select the correct scanner, then collect fresh samples.</p>';
             }
             if (miss.missNoData.length) {
                 html += `<p><strong>Matched, but no beacon samples:</strong> ${escHtml(miss.missNoData.join(', '))} — `
@@ -6917,7 +6932,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 `${result.baseline.samples} paired fixes at ${result.locations} locations; ` +
                 `${result.candidate_failures} candidate failures. ` +
                 `${result.truncated ? 'Sampled across the recording. ' : ''}` +
-                `Candidate solved ${result.candidate_solved_at || 'unknown'}. ${result.scope}`;
+                `Candidate solved ${result.candidate_solved_at || 'unknown'}. ` +
+                (result.verification ? `Verified coverage: ${result.verification.sufficient_trackers}/${result.verification.trackers} beacons. `
+                    + (result.verification.reasons.length ? result.verification.reasons.join(' · ').replace(/_/g, ' ') + '. ' : '') : '') + result.scope;
         } catch (error) {
             calibTrackingTest.textContent = error.message;
         } finally {

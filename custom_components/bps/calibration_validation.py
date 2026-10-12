@@ -12,6 +12,8 @@ from .environment import reading_max_age
 from .uncertainty import estimate_uncertainty
 
 MAX_REPLAYS = 128
+MIN_LOCATION_SAMPLES = 5
+MIN_TRACKER_LOCATIONS = 2
 
 
 def number(value):
@@ -49,6 +51,29 @@ def metrics(values):
         lo, hi = math.floor(at), math.ceil(at)
         return round(ordered[lo] + (ordered[hi] - ordered[lo]) * (at - lo), 4)
     return {"samples": len(values), "median_m": percentile(.5), "p95_m": percentile(.95)}
+
+
+def change(baseline, candidate, *, regression=False):
+    """Require meaningful paired changes; empty replay metrics prove nothing."""
+    if not baseline["samples"] or not candidate["samples"]:
+        return False
+    changes = [(candidate[k] - baseline[k] if regression else baseline[k] - candidate[k])
+               >= max(.25, baseline[k] * .1) for k in ("median_m", "p95_m")]
+    return any(changes) if regression else all(changes)
+
+
+def empty_stats():
+    return {"baseline": [], "candidate": [], "candidate_failures": 0,
+            "baseline_failures": 0, "eligible_samples": 0, "replayed_samples": 0}
+
+
+def summarized_stats(stats):
+    baseline, candidate = metrics(stats["baseline"]), metrics(stats["candidate"])
+    return {**{key: stats[key] for key in ("candidate_failures", "baseline_failures",
+                                          "eligible_samples", "replayed_samples")},
+            "baseline": baseline, "candidate": candidate,
+            "improves": change(baseline, candidate),
+            "regression": change(baseline, candidate, regression=True)}
 
 
 def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_s=30.0,
@@ -115,7 +140,7 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
                                                for v in baseline_corrections.values()):
         raise ValueError("No valid current receiver corrections for this floor")
     before, after, failures, locations, seen = [], [], 0, set(), set()
-    reports, samples = {}, []
+    reports, samples, measured_by_tracker = {}, [], {}
     context_id, context_since = None, bundle["started"]
     annotations = sorted(bundle.get("annotations", []), key=lambda m: m["time"])
     for frame in bundle.get("frames", []):
@@ -139,6 +164,9 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
             truth = truth_for(annotations, target, members, frame["time"])
             if not truth or truth.get("floor") != floor_name:
                 continue
+            # Even a marked stop with no usable readings is missing coverage
+            # for a beacon tested elsewhere in this compatible recording.
+            measured_by_tracker.setdefault(target, set()).add((truth["x_m"], truth["y_m"]))
             gate = reading_max_age(layout, context.get("defaults", {}).get("reading_max_age_s", 30))
             rows = [r for r in frame.get("readings", []) if r.get("tracker") == target
                 and r.get("floor") == floor_name and r.get("status") == "current"
@@ -162,41 +190,97 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
     # Spread the bounded work over the recording instead of testing only its
     # first location. Report truncation; additional polls do not add samples.
     eligible = len(samples)
+    # Record coverage before downsampling: a short measured stop omitted by the
+    # replay budget must remain missing evidence, rather than disappear entirely.
+    tested_trackers = {target for target, *_ in samples}
+    measured_points = sorted({point for target in tested_trackers for point in measured_by_tracker[target]})
+    location_ids = {point: index + 1 for index, point in enumerate(measured_points)}
+    for target in sorted(tested_trackers):
+        reports[target] = {**empty_stats(), "locations": {
+            location_ids[point]: empty_stats() for point in sorted(measured_by_tracker[target])}}
+    for target, truth, *_ in samples:
+        stats = reports[target]
+        point = (truth["x_m"], truth["y_m"])
+        local = stats["locations"][location_ids[point]]
+        stats["eligible_samples"] += 1
+        local["eligible_samples"] += 1
     if eligible > MAX_REPLAYS:
         samples = [samples[round(i * (eligible - 1) / (MAX_REPLAYS - 1))] for i in range(MAX_REPLAYS)]
     for target, truth, now, floor, rows, layout, scale, gate in samples:
         baseline = replay(floor, rows, baseline_corrections or {}, scale, layout, now, solver, max_age_s=gate, eligible_receivers=eligible_receivers)
         proposed = replay(floor, rows, corrections, scale, layout, now, solver, max_age_s=gate, eligible_receivers=eligible_receivers)
-        stats = reports.setdefault(target, {"baseline": [], "candidate": [], "candidate_failures": 0})
+        stats = reports[target]
+        point = (truth["x_m"], truth["y_m"])
+        local = stats["locations"][location_ids[point]]
+        stats["replayed_samples"] += 1
+        local["replayed_samples"] += 1
         if baseline is None:
+            stats["baseline_failures"] += 1
+            local["baseline_failures"] += 1
             continue
         if proposed is None:
             failures += 1
             stats["candidate_failures"] += 1
+            local["candidate_failures"] += 1
             continue
-        point = (truth["x_m"], truth["y_m"])
         b = math.dist([v / scale for v in baseline["cords"]], point)
         c = math.dist([v / scale for v in proposed["cords"]], point)
         before.append(b); after.append(c)
         stats["baseline"].append(b); stats["candidate"].append(c)
+        local["baseline"].append(b); local["candidate"].append(c)
         locations.add(point)
     b, c = metrics(before), metrics(after)
-    enough = len(before) >= 5 and len(locations) >= 2
-    improves = enough and all(b[k] - c[k] >= max(.25, b[k] * .1) for k in ("median_m", "p95_m"))
-    tracker_regression = any(len(s["baseline"]) >= 5 and any(
-        metrics(s["candidate"])[k] - metrics(s["baseline"])[k] >= max(.25, metrics(s["baseline"])[k] * .1)
-        for k in ("median_m", "p95_m")) for s in reports.values())
-    worse = failures or tracker_regression or (enough and any(c[k] - b[k] >= max(.25, b[k] * .1) for k in ("median_m", "p95_m")))
+    tracker_reports = {}
+    for target, stats in reports.items():
+        local_reports = [{"location": index, **summarized_stats(local),
+                          "sufficient": len(local["baseline"]) >= MIN_LOCATION_SAMPLES}
+                         for index, local in sorted(stats["locations"].items())]
+        tracker_reports[target] = {**summarized_stats(stats), "locations": local_reports,
+            "sufficient": len(local_reports) >= MIN_TRACKER_LOCATIONS
+                          and all(local["sufficient"] for local in local_reports)}
+    enough = bool(tracker_reports) and all(s["sufficient"] for s in tracker_reports.values())
+    overall_improves = change(b, c)
+    all_trackers_improve = bool(tracker_reports) and all(s["improves"] for s in tracker_reports.values())
+    tracker_regression = any(s["baseline"]["samples"] >= MIN_LOCATION_SAMPLES and s["regression"]
+                             for s in tracker_reports.values())
+    location_regression = any(local["regression"] for s in tracker_reports.values()
+                              for local in s["locations"])
+    # Preserve the aggregate negative check while requiring stronger coverage
+    # for a positive claim. A sparse location can still veto a regression.
+    overall_regression = len(before) >= MIN_LOCATION_SAMPLES and len(locations) >= 2 and change(b, c, regression=True)
+    improves = enough and overall_improves and all_trackers_improve
+    worse = bool(failures or tracker_regression or location_regression or overall_regression)
+    reasons = []
+    if not before:
+        reasons.append("no_paired_samples")
+    if any(len(s["locations"]) < MIN_TRACKER_LOCATIONS for s in tracker_reports.values()):
+        reasons.append("insufficient_tracker_locations")
+    if any(not local["sufficient"] for s in tracker_reports.values() for local in s["locations"]):
+        reasons.append("insufficient_location_samples")
+    for applies, reason in ((failures, "candidate_replay_failure"),
+                            (location_regression, "location_regression"),
+                            (tracker_regression, "tracker_regression"),
+                            (overall_regression, "overall_regression"),
+                            (enough and not overall_improves, "overall_improvement_not_demonstrated"),
+                            (enough and not all_trackers_improve, "tracker_improvement_not_demonstrated")):
+        if applies:
+            reasons.append(reason)
     return {"floor": floor_name, "verdict": "worse" if worse else "improves" if improves else "inconclusive",
         "baseline": b, "candidate": c, "candidate_failures": failures, "locations": len(locations),
         "eligible_samples": eligible, "replayed_samples": len(samples), "truncated": eligible > MAX_REPLAYS,
-        "trackers": {key: {"baseline": metrics(s["baseline"]), "candidate": metrics(s["candidate"]),
-            "candidate_failures": s["candidate_failures"]} for key, s in reports.items()},
+        "trackers": tracker_reports,
+        "verification": {"sufficient": enough, "reasons": reasons,
+            "requirements": {"samples_per_location": MIN_LOCATION_SAMPLES,
+                             "locations_per_tracker": MIN_TRACKER_LOCATIONS},
+            "observed_locations": len(measured_points), "trackers": len(tracker_reports),
+            "sufficient_trackers": sum(s["sufficient"] for s in tracker_reports.values())},
         "scope": "Paired raw beacon fixes on the marked floor, using "
             + ("current layout corrections" if baseline_corrections is not None else "recorded corrections") + " as baseline. "
             "Group recordings test their member beacons. Includes nearby range trust, obstruction weights and height projection; "
             "excludes temporal jump weights, Kalman smoothing, group fusion, floor election and zone snapping. "
-            "At least 5 distinct observations at 2 measured locations are needed. No calibration changed."}
+            "Improvement requires at least 5 paired distinct observations at each measured location, "
+            "at least 2 locations per replayed tracker, improved median and p95 for every tracker, "
+            "and no measured-location regression. No calibration changed."}
 
 
 def compare_tracking_export(payload, floor_name, corrections, current_floor, solver,

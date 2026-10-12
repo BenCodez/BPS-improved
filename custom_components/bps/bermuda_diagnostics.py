@@ -164,6 +164,13 @@ def snapshot(hass, now):
         devices = getattr(coordinator, "devices", {})
         if not isinstance(devices, Mapping):
             continue
+        # A loaded coordinator is not proof that live scanner models are
+        # available. Separate that failure from registry-backed distance data.
+        row["runtime_scanner_counts"] = {
+            "devices": len(devices),
+            "scanners": sum(getattr(device, "_is_scanner", None) is True for device in devices.values()),
+            "missing_scanner_flag": sum(getattr(device, "_is_scanner", None) is None for device in devices.values()),
+        }
         for device in devices.values():
             if len(result["adverts"]) >= MAX_ADVERTS:
                 result["adverts_limit_reached"] = True

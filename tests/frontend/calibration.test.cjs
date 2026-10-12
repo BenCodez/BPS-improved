@@ -86,7 +86,8 @@ test('eligible proposal uses absolute candidate offset and full report JSON pres
 
 test('unknown transfer is disabled and clipboard denial exposes selected plain JSON', async () => {
     const p = panel(); p.network.data.rows[0].transfer_current_eligible = false;
-    await p.el('Preview').fire(); assert.equal(p.buttons()[0].disabled, true);
+    await p.el('Preview').fire(); assert.equal(p.buttons().length, 0);
+    await p.el('PreviewAll').fire(); assert.equal(p.buttons()[0].disabled, true);
     await p.buttons()[0].fire(); assert.equal(p.copied.length, 0);
     p.network.clipboardError = true; await p.el('PreviewCopy').fire();
     assert.equal(p.el('PreviewText').selected, true);
@@ -116,4 +117,37 @@ test('failed refresh clears candidate actions and permits retry', async () => {
     assert.equal(p.el('PreviewStatus').textContent, 'Bermuda runtime unavailable');
     assert.equal(p.el('Preview').disabled, false);
     p.network.error = null; await p.el('Preview').fire(); assert.equal(p.el('PreviewCopy').disabled, false);
+});
+
+test('preview defaults to useful eligible changes and expands blocked/no-op details without fetching', async () => {
+    const p = panel();
+    const row = p.network.data.rows[0];
+    p.network.data.rows.push({...row, receiver: 'blocked', transfer_current_eligible: false});
+    p.network.data.rows.push({...row, receiver: 'unchanged', current_bps_factor: 1,
+        transfer_current_offset_db: row.current_offset_db, candidate_eligible: true,
+        proposed_offset_db: row.current_offset_db + .1, reasons: []});
+    await p.el('Preview').fire();
+    assert.equal(p.buttons().length, 2);
+    assert.match(p.el('PreviewSummary').textContent, /1 useful receiver change.*2 blocked or unchanged/);
+    assert.equal(p.el('PreviewAll').hidden, false);
+    await p.el('PreviewAll').fire();
+    assert.equal(p.buttons().length, 6);
+    assert.equal(p.buttons()[4].disabled, true); assert.equal(p.buttons()[5].disabled, true);
+    await p.el('PreviewAll').fire(); assert.equal(p.buttons().length, 2);
+    assert.equal(p.requests.length, 1);
+    await p.el('PreviewCopy').fire();
+    assert.equal(JSON.parse(p.copied[0]).rows.length, 3);
+});
+
+test('verification displays measured evidence and detached actions cannot copy an obsolete preview', async () => {
+    const p = panel();
+    p.network.data.verification = {source_matches: true, candidate_matches_test: true, tracking_verdict: 'inconclusive',
+        tracking: {replayed_samples: 20, locations: 2, baseline: {median_m: 4, p95_m: 8},
+            candidate: {median_m: 3, p95_m: 9}, verification: {reasons: ['location_regression']}}};
+    await p.el('Preview').fire();
+    assert.match(p.el('PreviewVerification').textContent, /inconclusive.*20 observations.*2 measured locations.*median 4 → 3.*p95 8 → 9.*location regression/);
+    const obsolete = p.buttons()[0];
+    await p.el('Preview').fire(); await obsolete.fire();
+    assert.equal(p.copied.length, 0);
+    await p.buttons()[0].fire(); assert.equal(p.copied.length, 1);
 });

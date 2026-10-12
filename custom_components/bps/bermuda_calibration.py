@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from .bermuda_diagnostics import MAC, _coordinator
 from .scanner_addresses import retained_mac
 
+MIN_USEFUL_OFFSET_DB = .5
 
 def number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
@@ -81,6 +82,7 @@ def runtime_context(hass, coords, floor_name):
     manager = getattr(hass, "config_entries", None)
     entries = manager.async_entries("bermuda") if manager is not None else []
     devices, owners, options_by_mac, offset_keys = {}, {}, {}, {}
+    runtime_scanners = 0
     for entry in entries:
         coordinator = _coordinator(hass, entry)
         live = getattr(coordinator, "devices", {})
@@ -89,6 +91,7 @@ def runtime_context(hass, coords, floor_name):
         for dev in live.values():
             if getattr(dev, "_is_scanner", False) is not True:
                 continue
+            runtime_scanners += 1
             address = getattr(dev, "address", None)
             identity = retained_mac(dev)
             if not isinstance(address, str) or not MAC.fullmatch(address) or identity is None:
@@ -111,6 +114,10 @@ def runtime_context(hass, coords, floor_name):
     scanner_map = _match_scanners(private, devices)
     scanner_map = {a: s for a, s in scanner_map.items() if len(owners.get(a, ())) == 1}
     source = source_snapshot(receivers, devices, scanner_map)
+    source["runtime"] = {"entries": len(entries), "scanners": runtime_scanners,
+                         "usable_scanners": len(devices), "matched_receivers": len(scanner_map)}
+    source["warnings"] = (["runtime_scanners_unavailable"] if not runtime_scanners else
+                          ["runtime_scanner_addresses_unusable"] if not devices else [])
     for slug, row in source["receivers"].items():
         address = row["scanner_mac"]
         row["entry_id"] = next(iter(owners[address])) if address else None
@@ -247,12 +254,14 @@ def build_preview(coords, floor_name, result, current_source, tracking=None, *, 
             row_warnings.append("current_bps_factor_invalid")
         if proposed is None:
             row_warnings.append("receiver_unsupported_by_solve")
-        elif delta_db(proposed, n) is None:
+        elif not number(proposed) or not .2 <= proposed <= 5:
             row_warnings.append("proposed_bps_factor_invalid")
         if slug in weak:
             row_warnings.append("weak_receiver_confidence")
         delta = delta_db(proposed, n)
         transfer = delta_db(current, n)
+        if proposed is not None and delta is None and "proposed_bps_factor_invalid" not in row_warnings:
+            row_warnings.append("proposed_factor_conversion_unavailable")
         valid_offset = number(offset)
         if transfer is None:
             row_warnings.append("current_factor_conversion_unavailable")
@@ -276,6 +285,8 @@ def build_preview(coords, floor_name, result, current_source, tracking=None, *, 
             "incremental_distance_factor": proposed / current if delta is not None and transfer is not None else None,
             "transfer_current_offset_db": transfer_offset,
             "transfer_current_delta_db": transfer, "transfer_current_eligible": not transfer_reasons,
+            "transfer_current_useful": transfer is not None and abs(transfer) + 1e-9 >= MIN_USEFUL_OFFSET_DB,
+            "candidate_useful": delta is not None and abs(delta) + 1e-9 >= MIN_USEFUL_OFFSET_DB,
             "transfer_current_reasons": transfer_reasons, "candidate_eligible": not row_warnings,
             "status": "eligible" if not row_warnings else "blocked", "reasons": row_warnings})
     return {"format": "bps-bermuda-correction-preview-v1", "read_only": True, "floor": floor["name"],
@@ -283,5 +294,14 @@ def build_preview(coords, floor_name, result, current_source, tracking=None, *, 
             "distance_factor": "dimensionless multiplier", "attenuation": "dimensionless path-loss exponent"},
         "formula": "proposed_offset_db = current_offset_db - 10 * attenuation * log10(proposed_bps_factor)",
         "reference_error": {"before": before if number(before) else None, "after": after if number(after) else None},
+        "minimum_useful_offset_db": MIN_USEFUL_OFFSET_DB,
+        "runtime": copy.deepcopy(current_source.get("runtime", {})),
+        "runtime_warnings": list(current_source.get("warnings", [])),
+        "verification": {"source_matches": bool(historical) and historical == comparable_current,
+            "candidate_matches_test": validated,
+            "tracking_verdict": tracking.get("verdict") if validated else "unavailable",
+            "tracking": copy.deepcopy({k: tracking[k] for k in (
+                "baseline", "candidate", "locations", "eligible_samples", "replayed_samples", "truncated",
+                "candidate_failures", "trackers", "verification", "scope") if k in tracking}) if validated else {}},
         "warnings": warnings, "rows": rows,
         "instructions": "Preview only: uses the saved BPS layout and live Bermuda runtime; no Bermuda options, BPS layout, or calibration are saved. Disable BPS automatic calibration before a manual transfer. Apply only eligible rows manually in Bermuda Calibration 2 using the matched scanner MAC/name, then reset only those affected BPS receiver factors to 1. Use the floor-wide Reset only if every non-unit factor on that floor has been transferred; otherwise manually edit only the affected factors in the BPS layout. Solver factors replace current BPS factors; do not multiply them together. Re-check offsets and attenuation immediately before applying, collect fresh samples and validate at measured stationary locations afterward. RSSI conversion preserves raw distance scale; Bermuda filtering and velocity history may respond differently."}

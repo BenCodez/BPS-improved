@@ -1018,7 +1018,8 @@ async def _auto_solve_and_apply_locked(hass, cal: dict, tracking_recording=None)
                 statuses[floor_name] = decision
                 continue
             decision["tracking_validation"] = {k: report[k] for k in
-                ("verdict", "baseline", "candidate", "locations", "candidate_failures")}
+                ("verdict", "baseline", "candidate", "locations", "candidate_failures",
+                 "verification", "trackers") if k in report}
             if report["verdict"] == "worse":
                 decision.update(state="skipped", updated_receivers=0,
                                 reason="Measured beacon tracking would worsen; keeping current corrections")
