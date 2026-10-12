@@ -89,3 +89,21 @@ def test_liveness_uses_only_saved_scanner_sources_for_ambiguous_name(hass, monke
     states[first].state = "3"
     asyncio.run(bps.update_receiver_liveness(hass))
     assert "shared" in hass.data["bps"]["rl_unknown"]
+
+
+@pytest.mark.parametrize("status", ["off", "on"])
+def test_unique_alias_does_not_reintroduce_shared_connectivity_evidence(hass, monkeypatch, status):
+    from types import SimpleNamespace as NS
+    entries, states, rec, layout, first, second = shared(hass, monkeypatch, same_owner=True)
+    alias = "sensor.tag_distance_to_a_current"
+    entries[alias] = NS(**{**vars(entries[first]), "entity_id": alias})
+    states[alias] = NS(entity_id=alias, state="unavailable", attributes={}, last_updated=states[first].last_updated)
+    states[first].state = "unavailable"
+    states["binary_sensor.shared_status"] = NS(state=status, attributes={"device_class": "connectivity"})
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert {"shared", "a_current"} <= set(hass.data["bps"]["rl_unknown"])
+    assert hass.data["bps"]["rl_offline"] == []
+    states["binary_sensor.a_current_status"] = NS(state=status, attributes={"device_class": "connectivity"})
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert "shared" not in hass.data["bps"]["rl_unknown"]
+    assert ("shared" in hass.data["bps"]["rl_offline"]) is (status == "off")

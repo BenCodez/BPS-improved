@@ -1242,7 +1242,8 @@ async def update_receiver_liveness(hass):
         key = binding.get("identity")
         names = [] if sources.options.get(slug, {}).get("identity_ambiguous") else [slug]
         if key and option.get("liveness_name_unique", True) and len(sources.owners_by_mac.get(key[1], ())) == 1:
-            names.extend(binding.get("aliases", []))
+            names.extend(alias for alias in binding.get("aliases", [])
+                         if not sources.options.get(alias, {}).get("identity_ambiguous"))
             if option.get("name"):
                 names.append(slugify(option["name"]))
         return list(dict.fromkeys(names))
