@@ -47,7 +47,8 @@ function panel(panelSnapshot, locationTools = {}) {
                     comparison: {time: 100, markers: body.known_positions.map(marker => ({...marker,
                         summary: {disagreeing_readings: 1, unscored_readings: 0}, position_errors: [],
                         ranked_readings: [{tracker: '<tag>', receiver: '<receiver>', status: 'current', expected_distance_m: 2,
-                            corrected_distance_m: 5, signed_error_m: 3, age_s: 1, environment: {intersections: [{type: 'building', material: 'metal'}]}}],
+                            corrected_distance_m: 5, signed_error_m: 3, age_s: 1, environment: network.snapshotEnvironment === undefined
+                                ? {intersections: [{type: 'building', material: 'metal'}]} : network.snapshotEnvironment}],
                         unscored_readings: []}))}})};
             if (body.action === 'start') Object.assign(network.status, {active: true, available: true, targets: body.targets, frames: 1, reason: 'Recording', seconds_left: 600});
             if (body.action === 'stop') Object.assign(network.status, {active: false, reason: 'Stopped'});
@@ -196,6 +197,23 @@ test('known-position capture freezes truth, includes all BLE data and creates no
     const text = node => [node.textContent, ...node.children.map(text)].join(' ');
     assert.match(text(p.el('SnapshotComparison')), /actual \(0.00, 4.20\).*<receiver>.*metal/);
     assert.equal(p.el('SnapshotCapture').disabled, false);
+});
+
+test('snapshot paths distinguish clear geometry from failed or omitted assessments', async () => {
+    const p = panel(); await p.el('SnapshotLoad').fire();
+    p.el('SnapshotX').value = '1'; p.el('SnapshotY').value = '2';
+    const text = node => [node.textContent, ...node.children.map(text)].join(' ');
+    for (const environment of [null, {classification: 'unknown', intersections: []},
+        {classification: 'clear', environment_error: 'ValueError', intersections: []},
+        {classification: 'clear', invalid_path: true, intersections: []}]) {
+        p.network.snapshotEnvironment = environment; await p.el('SnapshotCapture').fire();
+        assert.match(text(p.el('SnapshotComparison')), /Path unavailable/);
+        assert.doesNotMatch(text(p.el('SnapshotComparison')), /No mapped crossing/);
+    }
+    p.network.snapshotEnvironment = {classification: 'not_evaluated', intersections: []};
+    await p.el('SnapshotCapture').fire(); assert.match(text(p.el('SnapshotComparison')), /Path not assessed/);
+    p.network.snapshotEnvironment = {classification: 'clear', intersections: [], environmental_weight: 1};
+    await p.el('SnapshotCapture').fire(); assert.match(text(p.el('SnapshotComparison')), /No mapped crossing; trust 1.00/);
 });
 
 test('snapshot location validation and unsaved-map guard preserve previous reports', async () => {

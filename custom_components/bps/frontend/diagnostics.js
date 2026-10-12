@@ -78,11 +78,16 @@
                     for (const row of rows) {
                         const tr = make('tr');
                         const paths = (row.environment?.intersections || []).map(p => `${p.type || p.kind || ''} ${p.material || ''}`).join(', ');
+                        const environment = row.environment;
+                        const pathStatus = !environment || environment.classification === 'unknown'
+                            || environment.environment_error || environment.invalid_path ? 'Path unavailable'
+                            : environment.classification === 'not_evaluated' ? 'Path not assessed'
+                            : paths || 'No mapped crossing';
                         const prior = row.solver_evidence?.reading;
                         const note = (row.reasons?.join(', ').replace(/_/g, ' ') || row.status)
                             + (prior ? `; prior solve ${prior.used === false ? 'excluded' : prior.used === true ? 'used' : prior.status || 'unknown'}` : '');
                         for (const value of [row.tracker, row.receiver, metric(row.expected_distance_m), metric(row.corrected_distance_m),
-                            metric(row.signed_error_m), metric(row.age_s), `${paths || (row.environment?.classification === 'not_evaluated' ? 'Path not assessed' : row.environment ? 'No mapped crossing' : 'Path unavailable')}; trust ${metric(row.environment?.environmental_weight)}; ${note}`]) tr.appendChild(make('td', value));
+                            metric(row.signed_error_m), metric(row.age_s), `${pathStatus}; trust ${metric(environment?.environmental_weight)}; ${note}`]) tr.appendChild(make('td', value));
                         table.appendChild(tr);
                     }
                     return table;
