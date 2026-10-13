@@ -1241,8 +1241,9 @@ have no fresh distance for any member beacon. A group is not published within
 3 metres of such a station: BPS selects a supported member fix within the motion
 limit or retains a recent supported group fix with its original timestamp. If
 neither is available, the group position becomes unknown rather than inventing a
-new point. An unavailable result retains its private motion baseline until expiry
-so repeated polls of cached observations cannot bypass the jump limit. Offline
+new point. An unavailable result retains its private motion baseline and consumed
+observations until expiry, including across empty/pruned member cycles, so cached
+readings cannot bypass the jump limit. Offline
 stations, unknown health, disabled/missing pair entities,
 ambiguous identities or pairs, incomplete exports, invalid clocks, manually
 ignored receivers and current raw packets awaiting filter acceptance do not create

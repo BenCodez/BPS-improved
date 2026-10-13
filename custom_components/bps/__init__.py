@@ -2027,6 +2027,7 @@ async def update_tracker_groups(hass):
                                       minimum=0.0) or STALE_POSITION_SECS
     fusion_time = time.time()
     active_groups = {"bps_group_" + g["id"] for g in groups}
+    group_definitions = {"bps_group_" + g["id"]: g for g in groups}
     published_previous = {p["ent"]: p for p in apitricords if p.get("group")}
     stability = dom.setdefault("group_stability", {})
     for ent, p in {**dom.get("group_guard_baselines", {}), **published_previous}.items():
@@ -2040,6 +2041,17 @@ async def update_tracker_groups(hass):
                  and (stamp := finite_number(p.get("updated"), minimum=0)) is not None
                  and 0 <= fusion_time - stamp < group_max_age}
     dom["group_guard_baselines"] = baselines
+    for ent, baseline in list(baselines.items()):
+        saved_state = baseline.get("_motion_state", {})
+        signature = saved_state.get("signature")
+        expected = (tuple(group_definitions[ent]["beacons"]), baseline.get("floor"),
+                    scales.get(baseline.get("floor")), bool(baseline.get("outdoor", {}).get("detection_only")))
+        if signature != expected:
+            baselines.pop(ent)
+        elif not stability.get(ent):
+            # Empty/pruned member cycles clear fusion's ordinary state. A
+            # still-fresh private baseline must retain its consumed evidence.
+            stability[ent] = copy.deepcopy(saved_state)
     previous = {**baselines, **published_previous}
     motion_epochs = {ent: finite_number(state.get("motion_epoch"), minimum=0)
                      for ent, state in stability.items()}
@@ -2048,7 +2060,6 @@ async def update_tracker_groups(hass):
                         use_observation_age=use_observation_age, known_trackers=known,
                         previous=previous, stability=stability)
     sources = _receiver_sources_context.get() or ReceiverSources(hass)
-    group_definitions = {"bps_group_" + g["id"]: g for g in groups}
     guarded, reports = [], {}
     for position in fused:
         floor = next(f for f in layout["floor"] if f["name"] == position["floor"])
@@ -2083,6 +2094,7 @@ async def update_tracker_groups(hass):
                 # evidence. Keep the prior fix private, with its source time,
                 # so polling cached observations cannot restart with no limit.
                 baselines[position["ent"]] = copy.deepcopy(prior)
+                baselines[position["ent"]]["_motion_state"] = copy.deepcopy(stability[position["ent"]])
                 report["motion_baseline"] = {"cords": list(prior["cords"]), "updated": stamp}
             else:
                 baselines.pop(position["ent"], None)
@@ -3392,6 +3404,10 @@ def _diagnostic_report_snapshot(hass, now):
         receiver_offline_after_s=RECEIVER_OFFLINE_SECS, receiver_liveness_poll_interval_s=RECEIVER_DUMP_INTERVAL,
         queued_tracking_updates=update_queue.qsize())
     snapshot["runtime"]["group_receiver_guards"] = copy.deepcopy(dom.get("group_receiver_guards", {}))
+    snapshot["runtime"]["group_guard_baselines"] = {ent: {
+        "cords": copy.deepcopy(p["cords"]), "floor": p["floor"], "updated": p["updated"],
+        "motion_epoch": p.get("_motion_state", {}).get("motion_epoch")}
+        for ent, p in dom.get("group_guard_baselines", {}).items()}
     snapshot["bermuda"] = bermuda_diagnostics.snapshot(hass, now)
     try:
         snapshot["bps_entities"], _, snapshot["bps_entity_counts"] = bermuda_diagnostics.entity_snapshot(hass, DOMAIN, now)

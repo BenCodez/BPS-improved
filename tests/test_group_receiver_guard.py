@@ -212,7 +212,7 @@ def test_removed_groups_clear_receiver_guard_diagnostics(monkeypatch, outdoor):
     assert "group_guard_baselines" not in hass.data["bps"]
 
 
-@pytest.mark.parametrize("recovery", ["new_observations", "expiry", "membership"])
+@pytest.mark.parametrize("recovery", ["new_observations", "expiry", "membership", "empty_cycle"])
 def test_unavailable_guard_cannot_restart_motion_on_cached_observations(monkeypatch, recovery):
     import asyncio
     import bps
@@ -250,6 +250,22 @@ def test_unavailable_guard_cannot_restart_motion_on_cached_observations(monkeypa
         baseline = hass.data["bps"]["group_guard_baselines"]["bps_group_rover"]
         assert baseline["cords"] == [0, 0] and baseline["updated"] == NOW
         assert hass.data["bps"]["group_stability"]["bps_group_rover"]["motion_epoch"] == NOW + 1
+    if recovery == "empty_cycle":
+        layout["position_timeout"] = .5
+        clock = NOW + 2
+        asyncio.run(bps.prune_stale_positions(hass))
+        assert not bps.apitricords
+        asyncio.run(bps.update_tracker_groups(hass))
+        assert not hass.data["bps"]["group_stability"]["bps_group_rover"]
+        clock = NOW + 2.1
+        bps.apitricords = fixes(30, NOW + 1)
+        asyncio.run(bps.update_tracker_groups(hass))
+        assert not any(p.get("group") for p in bps.apitricords)
+        assert hass.data["bps"]["group_stability"]["bps_group_rover"]["motion_epoch"] == NOW + 1
+        baseline = hass.data["bps"]["group_guard_baselines"]["bps_group_rover"]
+        assert baseline["updated"] == NOW
+        assert baseline["_motion_state"]["motion_epoch"] == NOW + 1
+        return
     if recovery == "new_observations":
         for update in (2, 3, 4):
             clock = NOW + update
