@@ -1257,6 +1257,22 @@ to match. Hover a receiver in the sidebar to highlight its map icon in blue.
 Live-tracker and receiver-to-receiver labels default to metres. The **Distances**
 selector under **View** changes BLE, map and difference labels to feet together,
 independently of the grid. The selection persists in this browser.
+
+Grouped positions also check proximity to stations that are confirmed online but
+have no fresh distance for any member beacon. A group is not published within
+3 metres of such a station: BPS selects a supported member fix within the motion
+limit or retains a recent supported group fix with its original timestamp. If
+neither is available, the group position becomes unknown rather than inventing a
+new point. An unavailable result retains its private motion baseline and consumed
+observations until expiry, including across empty/pruned member cycles, so cached
+readings cannot bypass the jump limit. Offline
+stations, unknown health, disabled/missing pair entities,
+ambiguous identities or pairs, incomplete exports, invalid clocks, manually
+ignored receivers and current raw packets awaiting filter acceptance do not create
+exclusions. The check uses Bermuda's direct
+scanner/packet data when available and recent proven liveness for older versions.
+Diagnostics show the rejected point, affected stations and the chosen action;
+full reports retain the reason even when the group position is unknown.
 The **Δ** value is BLE distance minus the comparison distance: positive means
 the range reads farther, negative means closer. Live tracking compares against
 the estimated beacon/group position, so its disagreement does not prove a bad

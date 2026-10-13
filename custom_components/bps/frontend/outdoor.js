@@ -315,6 +315,7 @@
         radiusInputs(out);
         if (row.group && number(out.combined_beacon_uncertainty_m)) lines.push(`Group radius inputs: ${out.beacons_used || 0} beacons combined · beacon uncertainty ${display(out.combined_beacon_uncertainty_m, ' m')} · position spread ${display(out.beacon_scatter_m, ' m')}`);
         if (row.motion_gate) lines.push(`Group motion: ${row.motion_gate.state || 'filtered'} · candidate shift ${display(row.motion_gate.displacement_m, ' m')} · allowed step ${display(row.motion_gate.allowed_step_m, ' m')}`);
+        if (out.receiver_guard) lines.push(`Group receiver check: ${out.receiver_guard.state} · no fresh member range at ${(out.receiver_guard.receivers || []).map(r => r.receiver).join(', ')} · near-station limit ${display(out.receiver_guard.radius_m, ' m')}`);
         if (number(out.position_age_s)) lines.push(`Position age: ${display(out.position_age_s, ' s')}${isStale(out) ? ' · stale / last known' : ''}`);
         if (row.group) lines.push(`${row.name || row.ent}: ${row.beacons_reporting || 0}/${row.total_beacons || 0} beacons · disagreement ${display(row.beacon_disagreement_m, ' m')} · ${row.fusion_confidence || 'unknown'}`);
         (row.beacon_positions || []).forEach(p => {

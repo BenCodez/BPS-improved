@@ -58,7 +58,8 @@ from .outdoor_tracking import solve_outdoor, account_for_published_position
 from .display_radius import reporting_radius_limit
 from .sparse_tracking import solve_sparse_detection
 from .solver_settings import MIN_WEIGHT_RADIUS_M, SOLVER_ROBUST_F_SCALE
-from .tracker_groups import fuse_groups, normalize_groups
+from .tracker_groups import fuse_groups, normalize_groups, GROUP_MAX_SPEED_MS, GROUP_MOTION_SLACK_M
+from .group_receiver_guard import receiver_constraints, constrain_group
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
 from .receiver_matching import inventory as receiver_inventory
@@ -1328,6 +1329,8 @@ async def update_receiver_liveness(hass):
                 names.append(slugify(option["name"]))
         return list(dict.fromkeys(names))
 
+    source_evidence_ages = {}
+
     def live_distance(slug):
         binding = bindings.get(slug, {})
         key = binding.get("identity")
@@ -1335,7 +1338,9 @@ async def update_receiver_liveness(hass):
             clock, cutoff = time.time(), _reading_max_age(layout)
             for device in sources.direct.snapshots[key[0]]["devices"]:
                 state = sources.direct.reading(key[0], device, key[1], "", now=clock)
-                if isinstance(state.state, (int, float)) and (not cutoff or _reading_age_secs(state, now=clock) <= cutoff):
+                source_age = _reading_age_secs(state, now=clock)
+                if isinstance(state.state, (int, float)) and (not cutoff or source_age <= cutoff):
+                    source_evidence_ages[slug] = source_age
                     return True
             return False
         options = [option for name in binding.get("aliases", [])
@@ -1358,6 +1363,7 @@ async def update_receiver_liveness(hass):
                 observed = stamp.timestamp()
                 if math.isfinite(value) and value >= 0 and math.isfinite(observed) and observed <= now \
                         and (max_age == 0 or now - observed <= max_age):
+                    source_evidence_ages[slug] = now - observed
                     return True
             except (TypeError, ValueError, AttributeError, OSError, OverflowError):
                 continue
@@ -1372,7 +1378,9 @@ async def update_receiver_liveness(hass):
         if identity in sources.direct.scanners:
             direct_age = sources.direct.scanner_age(identity)
             if direct_age is not None and direct_age >= 0:
-                return direct_age <= RECEIVER_OFFLINE_SECS
+                source_age = direct_age + max(0.0, time.time() - sources.direct.now)
+                source_evidence_ages[slug] = source_age
+                return source_age <= RECEIVER_OFFLINE_SECS
         age = (dom.get("rl_mac_ages", {}).get(mac) if len(sources.owners_by_mac.get(mac, ())) <= 1
                and identity not in sources.direct.scanners else None)
         if age is None and not mac and matching.get(slug, {}).get("liveness_name_unique", True):
@@ -1380,6 +1388,7 @@ async def update_receiver_liveness(hass):
             # own age or current connectivity/readings, even after dump failure.
             age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
+            source_evidence_ages[slug] = age + elapsed
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS
         aliases = evidence_slugs(slug)
         for alias in aliases:
@@ -1396,6 +1405,16 @@ async def update_receiver_liveness(hass):
     resolved = {s: is_online(s) for s in receivers}
     dom["rl_offline"] = sorted(s for s, status in resolved.items() if status is False)
     dom["rl_unknown"] = sorted(s for s, status in resolved.items() if status is None)
+    def evidence_age(slug):
+        # Radio/reading ages are recorded only when that evidence is used.
+        # Current connectivity/device status must not inherit a rejected,
+        # globally keyed MAC age belonging to another Bermuda owner.
+        return finite_number(source_evidence_ages.get(slug, 0.0), minimum=0)
+
+    dom["rl_status_snapshot"] = {slug: {"online": status,
+        "identity": list(bindings[slug]["identity"]) if bindings.get(slug, {}).get("identity") else None,
+        "source_age_s": evidence_age(slug),
+        "captured": time.time()} for slug, status in resolved.items()}
 
 
 async def update_receiver_radii(hass, eids, receiver_sources=None):
@@ -1975,6 +1994,8 @@ async def update_tracker_groups(hass):
         sync = dom.get("sync_group_sensors")
         if sync is not None:
             await sync([])
+        dom.pop("group_receiver_guards", None)
+        dom.pop("group_guard_baselines", None)
         return
     originals = [p for p in apitricords if not p.get("group")]
     known = {p["ent"] for p in originals}
@@ -1990,6 +2011,8 @@ async def update_tracker_groups(hass):
     dom["groups_active"] = bool(groups) or len(originals) != len(apitricords)
     if not groups and len(originals) == len(apitricords):
         dom.pop("group_stability", None)
+        dom.pop("group_receiver_guards", None)
+        dom.pop("group_guard_baselines", None)
         return
     scales = {f["name"]: f.get("scale") for f in layout.get("floor", [])} if isinstance(layout, dict) else {}
     safe_layout = {**layout, "tracker_groups": groups} if isinstance(layout, dict) else {}
@@ -2002,10 +2025,81 @@ async def update_tracker_groups(hass):
         group_max_age = finite_number(layout.get("position_timeout"), STALE_POSITION_SECS,
                                       minimum=0.0) or STALE_POSITION_SECS
     fusion_time = time.time()
-    previous = {p["ent"]: p for p in apitricords if p.get("group")}
+    active_groups = {"bps_group_" + g["id"] for g in groups}
+    group_definitions = {"bps_group_" + g["id"]: g for g in groups}
+    published_previous = {p["ent"]: p for p in apitricords if p.get("group")}
+    stability = dom.setdefault("group_stability", {})
+    for ent, p in {**dom.get("group_guard_baselines", {}), **published_previous}.items():
+        stamp = finite_number(p.get("updated"), minimum=0)
+        if stamp is None or not 0 <= fusion_time - stamp < group_max_age:
+            # A fresh start after expiry must not inherit a consumed epoch
+            # from the unavailable/held track and gain an oversized next step.
+            stability.pop(ent, None)
+    baselines = {ent: p for ent, p in dom.get("group_guard_baselines", {}).items()
+                 if ent in active_groups and p.get("floor") in scales
+                 and (stamp := finite_number(p.get("updated"), minimum=0)) is not None
+                 and 0 <= fusion_time - stamp < group_max_age}
+    dom["group_guard_baselines"] = baselines
+    for ent, baseline in list(baselines.items()):
+        saved_state = baseline.get("_motion_state", {})
+        signature = saved_state.get("signature")
+        expected = (tuple(group_definitions[ent]["beacons"]), baseline.get("floor"),
+                    scales.get(baseline.get("floor")), bool(baseline.get("outdoor", {}).get("detection_only")))
+        if signature != expected:
+            baselines.pop(ent)
+        elif not stability.get(ent):
+            # Empty/pruned member cycles clear fusion's ordinary state. A
+            # still-fresh private baseline must retain its consumed evidence.
+            stability[ent] = copy.deepcopy(saved_state)
+    previous = {**baselines, **published_previous}
+    motion_epochs = {ent: finite_number(state.get("motion_epoch"), minimum=0)
+                     for ent, state in stability.items()}
+    prior_signatures = {ent: state.get("signature") for ent, state in stability.items()}
     fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
                         use_observation_age=use_observation_age, known_trackers=known,
-                        previous=previous, stability=dom.setdefault("group_stability", {}))
+                        previous=previous, stability=stability)
+    sources = _receiver_sources_context.get() or ReceiverSources(hass)
+    guarded, reports = [], {}
+    for position in fused:
+        floor = next(f for f in layout["floor"] if f["name"] == position["floor"])
+        constraints = receiver_constraints(floor, group_definitions[position["ent"]]["beacons"],
+            sources, dom.get("rl_status_snapshot", {}), fusion_time, group_max_age,
+            reading_max_age_s=_reading_max_age(layout))
+        # A changed membership, floor, scale or detection mode invalidates the
+        # old point in fusion and must invalidate it in this publication check.
+        signature = stability.get(position["ent"], {}).get("signature")
+        prior = previous.get(position["ent"]) if signature is not None \
+            and signature == prior_signatures.get(position["ent"]) else None
+        # Fusion consumes its observation epoch even when the receiver check
+        # holds an older fix. Preserve this cycle's allowance without requiring
+        # a motion_gate payload, which fusion omits for ordinary small steps.
+        old_epoch = motion_epochs.get(position["ent"]) if prior is not None else None
+        if old_epoch is None:
+            old_epoch = finite_number((prior or {}).get("updated"), minimum=0)
+        new_epoch = finite_number(stability.get(position["ent"], {}).get("motion_epoch"), minimum=0)
+        motion_budget = max(GROUP_MOTION_SLACK_M, GROUP_MAX_SPEED_MS * max(0, new_epoch - old_epoch)) \
+            if old_epoch is not None and new_epoch is not None else None
+        checked, report = constrain_group(position, constraints, prior,
+            scales[position["floor"]], fusion_time, group_max_age, motion_budget_m=motion_budget)
+        if report is not None:
+            reports[position["ent"]] = report
+        if checked is not None:
+            guarded.append(checked)
+            baselines.pop(position["ent"], None)
+        else:
+            stamp = finite_number((prior or {}).get("updated"), minimum=0)
+            if prior is not None and stamp is not None and 0 <= fusion_time - stamp < group_max_age:
+                # An unsupported publication does not erase consumed motion
+                # evidence. Keep the prior fix private, with its source time,
+                # so polling cached observations cannot restart with no limit.
+                baselines[position["ent"]] = copy.deepcopy(prior)
+                baselines[position["ent"]]["_motion_state"] = copy.deepcopy(stability[position["ent"]])
+                report["motion_baseline"] = {"cords": list(prior["cords"]), "updated": stamp}
+            else:
+                baselines.pop(position["ent"], None)
+                dom["group_stability"].pop(position["ent"], None)
+    fused = guarded
+    dom["group_receiver_guards"] = reports
     source_positions = {p["ent"]: p for p in originals}
     for position in fused:
         floor = next(f for f in layout["floor"] if f["name"] == position["floor"])
@@ -2064,9 +2158,12 @@ async def update_tracker_groups(hass):
     for group in groups:
         ent = "bps_group_" + group["id"]
         if ent not in live:
+            guard = reports.get(ent)
             update_bps_sensor_state(hass, f"sensor.{ent}_bps_position", "unknown",
                                     {"group": True, "tracker_key": ent, "name": group["name"],
-                                     "beacons_reporting": 0, "total_beacons": len(group["beacons"])},
+                                     "beacons_reporting": guard.get("beacons_reporting", 0) if guard else 0,
+                                     "total_beacons": len(group["beacons"]),
+                                     **({"outdoor": {"receiver_guard": guard}} if guard else {})},
                                     only_changed=True)
             for kind in ("zone", "floor"):
                 update_bps_sensor_state(hass, f"sensor.{ent}_bps_{kind}", "unknown", {}, only_changed=True)
@@ -3305,6 +3402,11 @@ def _diagnostic_report_snapshot(hass, now):
         tracking_update_interval_s=secToUpdate, max_concurrent_trackers=MAX_CONCURRENT_TRACKERS,
         receiver_offline_after_s=RECEIVER_OFFLINE_SECS, receiver_liveness_poll_interval_s=RECEIVER_DUMP_INTERVAL,
         queued_tracking_updates=update_queue.qsize())
+    snapshot["runtime"]["group_receiver_guards"] = copy.deepcopy(dom.get("group_receiver_guards", {}))
+    snapshot["runtime"]["group_guard_baselines"] = {ent: {
+        "cords": copy.deepcopy(p["cords"]), "floor": p["floor"], "updated": p["updated"],
+        "motion_epoch": p.get("_motion_state", {}).get("motion_epoch")}
+        for ent, p in dom.get("group_guard_baselines", {}).items()}
     snapshot["bermuda"] = bermuda_diagnostics.snapshot(hass, now)
     try:
         snapshot["bps_entities"], _, snapshot["bps_entity_counts"] = bermuda_diagnostics.entity_snapshot(hass, DOMAIN, now)
