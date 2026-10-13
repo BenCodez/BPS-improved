@@ -2027,13 +2027,20 @@ async def update_tracker_groups(hass):
                                       minimum=0.0) or STALE_POSITION_SECS
     fusion_time = time.time()
     active_groups = {"bps_group_" + g["id"] for g in groups}
+    published_previous = {p["ent"]: p for p in apitricords if p.get("group")}
+    stability = dom.setdefault("group_stability", {})
+    for ent, p in {**dom.get("group_guard_baselines", {}), **published_previous}.items():
+        stamp = finite_number(p.get("updated"), minimum=0)
+        if stamp is None or not 0 <= fusion_time - stamp < group_max_age:
+            # A fresh start after expiry must not inherit a consumed epoch
+            # from the unavailable/held track and gain an oversized next step.
+            stability.pop(ent, None)
     baselines = {ent: p for ent, p in dom.get("group_guard_baselines", {}).items()
                  if ent in active_groups and p.get("floor") in scales
                  and (stamp := finite_number(p.get("updated"), minimum=0)) is not None
                  and 0 <= fusion_time - stamp < group_max_age}
     dom["group_guard_baselines"] = baselines
-    previous = {**baselines, **{p["ent"]: p for p in apitricords if p.get("group")}}
-    stability = dom.setdefault("group_stability", {})
+    previous = {**baselines, **published_previous}
     motion_epochs = {ent: finite_number(state.get("motion_epoch"), minimum=0)
                      for ent, state in stability.items()}
     prior_signatures = {ent: state.get("signature") for ent, state in stability.items()}

@@ -278,6 +278,11 @@ def test_unavailable_guard_cannot_restart_motion_on_cached_observations(monkeypa
     current = next(p for p in bps.apitricords if p.get("group"))
     assert current["cords"] == [30, 0]
     assert not hass.data["bps"]["group_guard_baselines"]
+    clock += 1
+    bps.apitricords = fixes(330, clock) + [current]
+    asyncio.run(bps.update_tracker_groups(hass))
+    following = next(p for p in bps.apitricords if p.get("group"))
+    assert 30 <= following["cords"][0] <= 40
 
 
 @pytest.mark.parametrize("case,expected", [
