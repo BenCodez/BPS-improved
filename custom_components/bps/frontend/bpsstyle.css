@@ -3002,6 +3002,7 @@ select.bps-input { cursor: pointer; }
     top: 10px;
     display: flex;
     gap: 8px;
+    z-index: 6;
 }
 #mapToolActions button {
     padding: 6px 12px;

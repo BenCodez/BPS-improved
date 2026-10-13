@@ -258,20 +258,21 @@ test('receiver icons cancel zoom-in and sidebar hover recolors only the matching
     const source=layout(); source.floor[0].receivers=[{entity_id:'proxy',cords:{x:200,y:200}},
         {entity_id:'other',cords:{x:400,y:400}}];
     const p=await panel(source,undefined,true); p.hooks.select('Property'); p.hooks.zoom(4);
-    assert.equal(p.hooks.receiverIconSize(),20);
+    const size=80/Math.pow(4,1.25), left=200-size/2;
+    assert.equal(p.hooks.receiverIconSize(),size); assert.ok(size*4<80,'icons become smaller on screen at higher zoom');
     p.canvasCalls.length=0; p.hooks.redrawAll();
-    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[4]===20&&call[5]===20));
-    assert.equal(p.hooks.hitReceiverAt({x:212,y:200}).entity_id,'proxy');
+    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[4]===size&&call[5]===size));
+    assert.equal(p.hooks.hitReceiverAt({x:209,y:200}).entity_id,'proxy');
     assert.equal(p.hooks.hitReceiverAt({x:220,y:200}),null,'smaller glyph has a matching click target');
     const row={getAttribute:()=> 'proxy'};
     p.canvasCalls.length=0;
     p.listeners.get('mouseover')({target:{closest:selector=>selector==='[data-type="focusrec"]'?row:null}});
-    assert.ok(p.hooks.tintCache().has('#0ea5e9|20'));
-    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]===undefined&&call[2]===190&&call[3]===190));
-    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[2]===390&&call[3]===390));
+    assert.ok(p.hooks.tintCache().has('#0ea5e9|14'));
+    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]===undefined&&call[2]===left&&call[3]===left));
+    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[2]===400-size/2&&call[3]===400-size/2));
     p.canvasCalls.length=0;
     p.listeners.get('mouseout')({target:{closest:()=>row},relatedTarget:null});
-    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[2]===190&&call[3]===190));
+    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[2]===left&&call[3]===left));
 });
 
 test('Debugging refresh updates detected model and inherited antenna without rewriting placement metadata', async () => {
@@ -353,6 +354,38 @@ test('live distance defaults to dashed measured and solid estimated group circle
     p.network.cords[2].outdoor={detection_only:true,direction_known:false}; p.canvasCalls.length=0;
     await p.intervals.findLast(i => i.ms === 500).cb();
     assert.deepEqual(atReceiver(),[], 'a one-receiver detection cannot claim an estimated direction');
+});
+
+test('both distance styles for two trackers keep all four labels apart at the map edge', async () => {
+    const p=await panel(layout()); p.hooks.select('Property');
+    for(const entity of ['beacon_a','beacon_b']) {p.el('entSelector').value=entity; await p.el('entSelector').fire('change');}
+    await p.el('starttrack').fire('click'); p.el('circleToggle').checked=true; p.canvasCalls.length=0;
+    p.network.cords=[{ent:'beacon_a',floor:'Property',cords:[100,40],radii:[[100,12,120]]},
+        {ent:'beacon_b',floor:'Property',cords:[120,40],radii:[[100,12,140]]}];
+    await p.intervals.findLast(i=>i.ms===500).cb();
+    const labels=p.canvasCalls.filter(call=>call[0]==='text'&&/^(BLE|Est) /.test(call[1]));
+    assert.equal(labels.length,4);
+    const y=labels.map(call=>call[3]).sort((a,b)=>a-b);
+    assert.ok(y.every((value,index)=>index===0||value-y[index-1]>=28));
+});
+
+test('saving a floor retains receiver placement controls', async () => {
+    const p=await panel(layout()); p.hooks.select('Property');
+    p.el('mapbuttondiv').appendChild(p.hooks.addDeviceButton);
+    assert.equal(await p.hooks.savedata(true),true);
+    assert.ok(p.el('mapbuttondiv').children.includes(p.hooks.addDeviceButton));
+    await p.hooks.addDeviceButton.fire('click'); assert.equal(p.el('mapToolActions').style.display,'');
+});
+
+test('distance legend yields space below active tool actions', async () => {
+    const source=layout(); source.floor[0].receivers=[{entity_id:'a',cords:{x:0,y:0}},
+        {entity_id:'b',cords:{x:60,y:80}},{entity_id:'c',cords:{x:200,y:200}}];
+    const p=await panel(source); p.hooks.select('Property'); p.el('recDistToggle').checked=true;
+    p.hooks.setCalibration({Property:{floor:'Property',matrix:[{tx:'a',rx:'b',corrected_m:3,measured_m:4,true_m:5}]}});
+    p.hooks.redrawAll(); assert.equal(p.el('recDistLegend').style.top,'10px');
+    await p.hooks.addDeviceButton.fire('click'); assert.equal(p.el('recDistLegend').style.top,'52px');
+    assert.equal(p.el('mapToolActions').style.display,'');
+    await p.el('cancelToolBtn').fire('click'); assert.equal(p.el('recDistLegend').style.top,'10px');
 });
 
 test('panel marks outside-map positions at the edge without status captions or moving raw ranges', async () => {

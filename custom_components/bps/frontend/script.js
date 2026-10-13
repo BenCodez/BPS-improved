@@ -775,6 +775,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         
             const maps = await mapsResponse.json();
+            const previousMap = mapSelector.value;
             mapSelector.innerHTML = '<option value="">--Please choose an option--</option>';
             maps.forEach(map => {
                 const option = document.createElement('option');
@@ -782,6 +783,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 option.textContent = mapOptionLabel(map);
                 mapSelector.appendChild(option);
             });
+            if (maps.includes(previousMap)) mapSelector.value = previousMap;
+            else {
+                const currentMap = maps.find(value => sameFloorName(removeExtension(value), SelMapName));
+                if (currentMap) mapSelector.value = currentMap;
+            }
             return true;
         }
         
@@ -959,9 +965,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function receiverIconSize() {
-        // Fully cancel zoom-in for receivers, so nearby stations remain
-        // distinguishable. Tracker markers retain their existing sizing.
-        return canvas.width * .04 / Math.max(1, view.zoom || 1);
+        // Shrink receivers on screen as zoom increases, so nearby stations
+        // remain distinguishable. Tracker markers retain their existing sizing.
+        return canvas.width * .04 / Math.pow(Math.max(1, view.zoom || 1), 1.25);
     }
 
     function drawTrackOverlay() {
@@ -1428,44 +1434,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    // Draw each receiver's distance values, positioned by how many it has (a
-    // receiver heard by several tracked beacons gets one pill per beacon):
-    //   1-3 -> a vertical stack centred on the receiver;
-    //   4   -> a 2x2 grid around it;
-    //   5+  -> evenly spaced around it (pentagon at 5, hexagon at 6, ...).
+    // Stack receiver values vertically so long BLE/mismatch labels cannot
+    // overlap estimated labels. Clamp the stack as a whole at the image edge.
     // Pills are ordered by the device's slot in the Tracking section (top / first
     // position = first tracked). Called after the receiver icons so values stay
     // readable on top.
     function drawDistanceLabels(labels) {
-        // Offsets are in pill-sized units divided by view.zoom, so the cluster
-        // stays the same tight on-screen size as the pills at any zoom. Every
-        // arrangement is centred on (rx, ry) = the receiver.
         const z = view.zoom || 1;
         const STEP = 28 / z; // pill height (26) plus a hair of gap
         labels.forEach((arr) => {
             arr.sort((a, b) => a.order - b.order);
             const n = arr.length;
             const rx = arr[0].x, ry = arr[0].y;
-            const place = (lab, cx, cy) => drawLabelPill(lab.text, cx, cy, lab.hue);
-            if (n <= 3) {
-                arr.forEach((lab, j) => place(lab, rx, ry + (j - (n - 1) / 2) * STEP));
-            } else if (n === 4) {
-                const dx = 34 / z, dy = STEP / 2;
-                const offs = [[-dx, -dy], [dx, -dy], [-dx, dy], [dx, dy]]; // TL, TR, BL, BR
-                arr.forEach((lab, j) => place(lab, rx + offs[j][0], ry + offs[j][1]));
-            } else {
-                // Snug ring, growing just enough with count to stay centred;
-                // spaced a touch wider (25%) so 5+ pills stay legible.
-                const R = 1.25 * Math.max(STEP, (n * 6) / z);
-                arr.forEach((lab, j) => {
-                    const ang = -Math.PI / 2 + (j / n) * Math.PI * 2; // first at top, clockwise
-                    const c = Math.cos(ang), s = Math.sin(ang);
-                    // Push the low pills (e.g. the pentagon's bottom pair) apart
-                    // horizontally so they don't crowd together under the receiver.
-                    const xSpread = s > 0.3 ? 1.45 : 1;
-                    place(lab, rx + R * c * xSpread, ry + R * s);
-                });
-            }
+            const first = Math.max(2 + 13 / z,
+                Math.min(canvas.height - 2 - 13 / z - (n - 1) * STEP, ry - (n - 1) * STEP / 2));
+            arr.forEach((lab, j) => drawLabelPill(lab.text, rx, first + j * STEP, lab.hue));
         });
     }
 
@@ -1631,6 +1614,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // least one link below (so it's gone when the toggle is off, no floor,
         // off-floor, or the data doesn't match the placed receivers).
         if (recDistLegend) recDistLegend.style.display = "none";
+        if (recDistLegend) recDistLegend.style.top = anyLayoutToolActive() ? '52px' : '10px';
         if (!recDistToggle.checked || receiversHidden()) return;
         const floor = finalcords.floor.find(f => sameFloorName(f.name, SelMapName));
         const links = shownRecDistLinks();
@@ -6434,10 +6418,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 body: data,
             });
             if (response.ok) {
-                drawAreaButton.remove();
-                addDeviceButton.remove();
-                clearCanvasButton.remove();
-                SetScaleButton.remove();
+                if (removefile) {
+                    drawAreaButton.remove();
+                    addDeviceButton.remove();
+                    clearCanvasButton.remove();
+                    SetScaleButton.remove();
+                }
                 saveButton.remove();
                 new_floor = false;
                 return true;

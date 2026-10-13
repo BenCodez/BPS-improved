@@ -1223,7 +1223,7 @@ not independently verify its accuracy. Walls, trees and fences affect the
 position solver's trust rather than inventing a new range correction.
 Select **BLE ranges** or **Estimated position** to see just one view. With
 multiple devices shown, lines replace circles; select a beacon to isolate it.
-Receiver icons keep a constant size as you zoom in, with click targets scaled
+Receiver icons become smaller on screen as you zoom in, with click targets scaled
 to match. Hover a receiver in the sidebar to highlight its map icon in blue.
 Live-tracker labels use the selected grid unit. Receiver-to-receiver labels show
 both feet and metres for the BLE distance and the map distance.
