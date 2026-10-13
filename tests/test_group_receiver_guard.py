@@ -204,10 +204,80 @@ def test_removed_groups_clear_receiver_guard_diagnostics(monkeypatch, outdoor):
     hass = make_hass()
     hass.data["bps"] = {"layout": {"outdoor_tracking": {"enabled": outdoor},
         "floor": [copy.deepcopy(FLOOR)], "tracker_groups": []},
-        "group_receiver_guards": {"bps_group_rover": {"state": "unavailable"}}}
+        "group_receiver_guards": {"bps_group_rover": {"state": "unavailable"}},
+        "group_guard_baselines": {"bps_group_rover": {"floor": "Yard", "cords": [0, 0], "updated": NOW}}}
     monkeypatch.setattr(bps, "apitricords", [])
     asyncio.run(bps.update_tracker_groups(hass))
     assert "group_receiver_guards" not in hass.data["bps"]
+    assert "group_guard_baselines" not in hass.data["bps"]
+
+
+@pytest.mark.parametrize("recovery", ["new_observations", "expiry", "membership"])
+def test_unavailable_guard_cannot_restart_motion_on_cached_observations(monkeypatch, recovery):
+    import asyncio
+    import bps
+    from conftest import make_hass
+
+    hass = make_hass()
+    floor = copy.deepcopy(FLOOR)
+    floor["scale"] = 1
+    layout = {"outdoor_tracking": {"enabled": True}, "reading_max_age": 30, "floor": [floor],
+        "tracker_groups": [{"id": "rover", "beacons": ["a", "b"]}]}
+    hass.data["bps"] = {"layout": layout}
+    reading = state("2")
+    source = sources()
+    source.source = lambda *args, **kwargs: ("sensor.range", reading)
+    source.direct_trackers = lambda: {"a", "b"}
+    monkeypatch.setattr(bps, "ReceiverSources", lambda _: source)
+    monkeypatch.setattr(bps, "get_position_history", lambda _: NS(record=lambda *a: None, mark_gap=lambda *a: None))
+    clock = NOW
+    monkeypatch.setattr(bps.time, "time", lambda: clock)
+
+    def fixes(x, stamp):
+        return [{"ent": ent, "floor": "Yard", "cords": [x, 0], "updated": stamp,
+            "outdoor": {"observed": stamp, "estimated_uncertainty_m": 4, "receivers_used": 4}} for ent in ("a", "b")]
+
+    monkeypatch.setattr(bps, "apitricords", fixes(0, NOW))
+    asyncio.run(bps.update_tracker_groups(hass))
+    original = next(p for p in bps.apitricords if p.get("group"))
+    reading = state("unavailable")
+    clock = NOW + 1
+    bps.apitricords = fixes(30, clock) + [original]
+    for poll in (NOW + 1, NOW + 1, NOW + 2):
+        clock = poll
+        asyncio.run(bps.update_tracker_groups(hass))
+        assert not any(p.get("group") for p in bps.apitricords)
+        baseline = hass.data["bps"]["group_guard_baselines"]["bps_group_rover"]
+        assert baseline["cords"] == [0, 0] and baseline["updated"] == NOW
+        assert hass.data["bps"]["group_stability"]["bps_group_rover"]["motion_epoch"] == NOW + 1
+    if recovery == "new_observations":
+        for update in (2, 3, 4):
+            clock = NOW + update
+            bps.apitricords = fixes(30, clock)
+            asyncio.run(bps.update_tracker_groups(hass))
+            if update < 4:
+                assert not any(p.get("group") for p in bps.apitricords)
+        current = next(p for p in bps.apitricords if p.get("group"))
+        assert 3 <= current["cords"][0] <= 10
+        assert not hass.data["bps"]["group_guard_baselines"]
+        return
+    if recovery == "membership":
+        layout["tracker_groups"][0]["beacons"] = ["c", "d"]
+        source.source = lambda *args, **kwargs: ("sensor.range", reading)
+        clock = NOW + 3
+        bps.apitricords = [{**p, "ent": ent} for p, ent in zip(fixes(0, clock), ("c", "d"))]
+        asyncio.run(bps.update_tracker_groups(hass))
+        assert not any(p.get("group") for p in bps.apitricords)
+        assert not hass.data["bps"]["group_guard_baselines"]
+        return
+    # The hidden baseline expires by its original source time, allowing a fresh
+    # fix to establish a new track rather than holding an old point forever.
+    clock = NOW + 31
+    bps.apitricords = fixes(30, clock)
+    asyncio.run(bps.update_tracker_groups(hass))
+    current = next(p for p in bps.apitricords if p.get("group"))
+    assert current["cords"] == [30, 0]
+    assert not hass.data["bps"]["group_guard_baselines"]
 
 
 @pytest.mark.parametrize("case,expected", [

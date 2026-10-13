@@ -1996,6 +1996,7 @@ async def update_tracker_groups(hass):
         if sync is not None:
             await sync([])
         dom.pop("group_receiver_guards", None)
+        dom.pop("group_guard_baselines", None)
         return
     originals = [p for p in apitricords if not p.get("group")]
     known = {p["ent"] for p in originals}
@@ -2012,6 +2013,7 @@ async def update_tracker_groups(hass):
     if not groups and len(originals) == len(apitricords):
         dom.pop("group_stability", None)
         dom.pop("group_receiver_guards", None)
+        dom.pop("group_guard_baselines", None)
         return
     scales = {f["name"]: f.get("scale") for f in layout.get("floor", [])} if isinstance(layout, dict) else {}
     safe_layout = {**layout, "tracker_groups": groups} if isinstance(layout, dict) else {}
@@ -2024,7 +2026,13 @@ async def update_tracker_groups(hass):
         group_max_age = finite_number(layout.get("position_timeout"), STALE_POSITION_SECS,
                                       minimum=0.0) or STALE_POSITION_SECS
     fusion_time = time.time()
-    previous = {p["ent"]: p for p in apitricords if p.get("group")}
+    active_groups = {"bps_group_" + g["id"] for g in groups}
+    baselines = {ent: p for ent, p in dom.get("group_guard_baselines", {}).items()
+                 if ent in active_groups and p.get("floor") in scales
+                 and (stamp := finite_number(p.get("updated"), minimum=0)) is not None
+                 and 0 <= fusion_time - stamp < group_max_age}
+    dom["group_guard_baselines"] = baselines
+    previous = {**baselines, **{p["ent"]: p for p in apitricords if p.get("group")}}
     stability = dom.setdefault("group_stability", {})
     motion_epochs = {ent: finite_number(state.get("motion_epoch"), minimum=0)
                      for ent, state in stability.items()}
@@ -2060,8 +2068,18 @@ async def update_tracker_groups(hass):
             reports[position["ent"]] = report
         if checked is not None:
             guarded.append(checked)
+            baselines.pop(position["ent"], None)
         else:
-            dom["group_stability"].pop(position["ent"], None)
+            stamp = finite_number((prior or {}).get("updated"), minimum=0)
+            if prior is not None and stamp is not None and 0 <= fusion_time - stamp < group_max_age:
+                # An unsupported publication does not erase consumed motion
+                # evidence. Keep the prior fix private, with its source time,
+                # so polling cached observations cannot restart with no limit.
+                baselines[position["ent"]] = copy.deepcopy(prior)
+                report["motion_baseline"] = {"cords": list(prior["cords"]), "updated": stamp}
+            else:
+                baselines.pop(position["ent"], None)
+                dom["group_stability"].pop(position["ent"], None)
     fused = guarded
     dom["group_receiver_guards"] = reports
     source_positions = {p["ent"]: p for p in originals}
