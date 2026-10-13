@@ -396,6 +396,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 });
             }
             const metadataInputs = [];
+            const hardware = opts.receiverHardware;
+            const hardwareInfo = opts.receiverMetadata ? document.createElement('p') : null;
+            const externalAntenna = opts.receiverMetadata ? document.createElement('select') : null;
             if (opts.receiverMetadata) {
                 for (const [key, label, maxLength] of [
                     ['hardware_model', 'Hardware / model (optional)', 128],
@@ -405,10 +408,24 @@ document.addEventListener('DOMContentLoaded', async () => {
                     field.type = 'text'; field.className = 'bps-modal-input';
                     field.maxLength = maxLength; field.placeholder = label;
                     field.value = typeof opts.receiverMetadata[key] === 'string' ? opts.receiverMetadata[key] : '';
+                    if (key === 'hardware_model' && hardware?.effective?.model) field.placeholder = `Automatic: ${hardware.effective.model}`;
                     const wrapper = document.createElement('label');
                     wrapper.textContent = label; wrapper.appendChild(field);
                     metadataInputs.push({key, maxLength, field, wrapper});
                 }
+            }
+            if (hardwareInfo) {
+                const fields = hardware?.effective || {};
+                const description = [fields.manufacturer, fields.model, fields.hardware_type].filter(value => typeof value === 'string' && value);
+                hardwareInfo.textContent = description.length ? `Automatic hardware: ${description.join(' · ')}. Leave the model override empty to use this information.`
+                    : 'Automatic hardware: unknown. Match the receiver to its HA / Bermuda scanner, or enter a model override.';
+                hardwareInfo.dataset.role = 'receiver-hardware';
+                externalAntenna.className = 'bps-modal-input'; externalAntenna.title = 'External antenna';
+                const inherited = typeof fields.external_antenna === 'boolean' ? (fields.external_antenna ? 'external' : 'built-in') : 'unknown';
+                for (const [value, label] of [['', `Use Bermuda setting (${inherited})`], ['true', 'External antenna'], ['false', 'Built-in antenna']]) {
+                    const option = document.createElement('option'); option.value = value; option.textContent = label; externalAntenna.appendChild(option);
+                }
+                externalAntenna.value = typeof opts.receiverMetadata.external_antenna === 'boolean' ? String(opts.receiverMetadata.external_antenna) : '';
             }
             const row = document.createElement("div");
             row.className = "bps-modal-actions";
@@ -427,6 +444,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (unitSelect) dialog.appendChild(unitSelect);
             metadataInputs.forEach(({wrapper}) => dialog.appendChild(wrapper));
             if (accuracyLabel) dialog.appendChild(accuracyLabel);
+            if (hardwareInfo) {
+                dialog.appendChild(hardwareInfo);
+                const label = document.createElement('label'); label.textContent = 'External antenna'; label.appendChild(externalAntenna); dialog.appendChild(label);
+            }
             dialog.appendChild(row);
             overlay.appendChild(dialog);
             document.body.appendChild(overlay);
@@ -445,6 +466,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
                 const properties = {height, height_unit: height === null && accuracy === null ? null : heightUnit,
                     distance_accuracy_m: accuracy === null ? null : Number(accuracy.toFixed(10))};
+                if (!['', 'true', 'false'].includes(externalAntenna.value)) {bpsToast('Choose an antenna option.'); return;}
+                properties.external_antenna = externalAntenna.value === '' ? null : externalAntenna.value === 'true';
                 for (const {key, maxLength, field} of metadataInputs) {
                     const value = field.value.trim();
                     if (value.length > maxLength) {
@@ -752,6 +775,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         
             const maps = await mapsResponse.json();
+            const previousMap = mapSelector.value;
             mapSelector.innerHTML = '<option value="">--Please choose an option--</option>';
             maps.forEach(map => {
                 const option = document.createElement('option');
@@ -759,6 +783,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 option.textContent = mapOptionLabel(map);
                 mapSelector.appendChild(option);
             });
+            if (maps.includes(previousMap)) mapSelector.value = previousMap;
+            else {
+                const currentMap = maps.find(value => sameFloorName(removeExtension(value), SelMapName));
+                if (currentMap) mapSelector.value = currentMap;
+            }
             return true;
         }
         
@@ -935,6 +964,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         return pollTrackActive ? base / Math.pow(view.zoom || 1, 2 / 3) : base;
     }
 
+    function receiverIconSize() {
+        // Shrink receivers on screen as zoom increases, so nearby stations
+        // remain distinguishable. Tracker markers retain their existing sizing.
+        return canvas.width * .04 / Math.pow(Math.max(1, view.zoom || 1), 1.25);
+    }
+
     function drawTrackOverlay() {
         if (!pollTrackActive || lastTracks.size === 0) return;
         // A focus on a device that's gone (removed/stale) reverts to showing all.
@@ -1073,9 +1108,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     // label) so a dead node stands out; otherwise the plain black glyph. The hue
     // tint is gated on an active tracking session because that is the only time
     // the distance-lines toggle is shown.
-    function drawReceiverIcon(x, y, iconSize, offline) {
+    function drawReceiverIcon(x, y, iconSize, offline, highlighted = false) {
         let fill = null;
-        if (circleToggle.checked && pollTrackActive) {
+        if (highlighted) {
+            fill = '#0ea5e9';
+        } else if (circleToggle.checked && pollTrackActive) {
             fill = `hsl(${floorReceiverHue(x, y)}, 90%, 42%)`;
         } else if (offline) {
             fill = OFFLINE_RED;
@@ -1298,25 +1335,49 @@ document.addEventListener('DOMContentLoaded', async () => {
     //   Multi: circles from several beacons pile into noise, so just a thin line
     //   from each beacon to the receivers hearing it.
     // Returns a Map: receiver coord key -> [{order, text, hue, x, y}].
+    function trackingDistanceMarks(t) {
+        if (!Array.isArray(t.circles)) return [];
+        const measured = validRadii(t.circles);
+        const mode = document.getElementById('trackingDistanceMode')?.value || 'both';
+        const hasPosition = Number.isFinite(t.x) && Number.isFinite(t.y)
+            && !t.payload?.outdoor?.detection_only && t.payload?.outdoor?.direction_known !== false;
+        const valid = mode === 'estimated' ? [] : measured.map(c => [...c, 'measured',
+            hasPosition ? c[2] - Math.hypot(t.x - c[0], t.y - c[1]) : null]);
+        if (mode !== 'measured' && hasPosition) {
+            const seen = new Set();
+            for (const c of measured) {
+                const key = JSON.stringify(c.slice(0, 2));
+                if (seen.has(key)) continue;
+                seen.add(key);
+                valid.push([c[0], c[1], Math.hypot(t.x - c[0], t.y - c[1]), 'estimated']);
+            }
+        }
+        return valid;
+    }
+
     function drawDistanceMarks(entries, solo) {
         const labels = new Map();
         if (!circleToggle.checked) return labels;
         entries.forEach(([entKey, t]) => {
-            if (!Array.isArray(t.circles)) return; // off-floor: no distance overlay
             const order = trackedDevices.indexOf(entKey);
-            const valid = validRadii(t.circles);
+            const valid = trackingDistanceMarks(t);
             const hueOf = (c) => solo ? floorReceiverHue(c[0], c[1]) : deviceBaseHue(entKey);
             ctx.save();
             ctx.lineCap = "round";
             if (solo) {
                 // Thick receiver -> tracker connectors first, so the circle rings
                 // (next) overlap them at the edge.
+                const connected = new Set();
                 valid.forEach((c) => {
+                    const key = JSON.stringify(c.slice(0, 2));
+                    if (connected.has(key)) return;
+                    connected.add(key);
                     ctx.beginPath();
                     ctx.moveTo(t.x, t.y);
                     ctx.lineTo(c[0], c[1]);
                     ctx.strokeStyle = `hsla(${hueOf(c)}, 90%, 42%, 0.9)`;
-                    ctx.lineWidth = 5;
+                    ctx.setLineDash([]);
+                    ctx.lineWidth = 3;
                     ctx.stroke();
                 });
                 // Circles on top: faint tint inside, receiver-coloured ring.
@@ -1324,10 +1385,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const hue = hueOf(c);
                     ctx.beginPath();
                     ctx.arc(c[0], c[1], c[2], 0, Math.PI * 2);
-                    ctx.fillStyle = `hsla(${hue}, 95%, 55%, 0.10)`;
+                    const estimated = c[3] === 'estimated';
+                    ctx.setLineDash(estimated ? [] : [10, 7]);
+                    ctx.fillStyle = `hsla(${hue}, 95%, 55%, ${estimated ? 0.025 : 0.04})`;
                     ctx.fill();
                     ctx.strokeStyle = `hsla(${hue}, 95%, 48%, 0.95)`;
-                    ctx.lineWidth = 3;
+                    ctx.lineWidth = estimated ? 3 : 2;
                     ctx.stroke();
                 });
             } else {
@@ -1335,6 +1398,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     ctx.beginPath();
                     ctx.moveTo(t.x, t.y);
                     ctx.lineTo(c[0], c[1]);
+                    ctx.setLineDash(c[3] === 'estimated' ? [] : [10, 7]);
                     ctx.strokeStyle = `hsla(${hueOf(c)}, 90%, 50%, 0.55)`;
                     ctx.lineWidth = 2.5;
                     ctx.stroke();
@@ -1342,8 +1406,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             ctx.restore();
             valid.forEach((c) => {
-                const text = distanceLabel(c[2]);
-                if (!text) return;
+                const distance = distanceLabel(c[2]);
+                if (!distance) return;
+                const delta = Number.isFinite(c[4]) ? distanceLabel(Math.abs(c[4])) : null;
+                const text = `${c[3] === 'estimated' ? 'Est' : 'BLE'} ${distance}`
+                    + (delta ? ` · Δ ${c[4] < 0 ? '−' : '+'}${delta}` : '');
                 const key = `${Math.round(c[0])},${Math.round(c[1])}`;
                 let arr = labels.get(key);
                 if (!arr) { arr = []; labels.set(key, arr); }
@@ -1363,48 +1430,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         (floor.receivers || []).forEach(r => {
             if (!r.cords) return;
             if (focusedReceiver && r.entity_id !== focusedReceiver) return;
-            drawReceiverIcon(r.cords.x, r.cords.y, iconSize, isReceiverOffline(r.entity_id));
+            drawReceiverIcon(r.cords.x, r.cords.y, receiverIconSize(), isReceiverOffline(r.entity_id), r.entity_id === hoveredReceiver);
         });
     }
 
-    // Draw each receiver's distance values, positioned by how many it has (a
-    // receiver heard by several tracked beacons gets one pill per beacon):
-    //   1-3 -> a vertical stack centred on the receiver;
-    //   4   -> a 2x2 grid around it;
-    //   5+  -> evenly spaced around it (pentagon at 5, hexagon at 6, ...).
+    // Stack receiver values vertically so long BLE/mismatch labels cannot
+    // overlap estimated labels. Clamp the stack as a whole at the image edge.
     // Pills are ordered by the device's slot in the Tracking section (top / first
     // position = first tracked). Called after the receiver icons so values stay
     // readable on top.
     function drawDistanceLabels(labels) {
-        // Offsets are in pill-sized units divided by view.zoom, so the cluster
-        // stays the same tight on-screen size as the pills at any zoom. Every
-        // arrangement is centred on (rx, ry) = the receiver.
         const z = view.zoom || 1;
         const STEP = 28 / z; // pill height (26) plus a hair of gap
         labels.forEach((arr) => {
             arr.sort((a, b) => a.order - b.order);
             const n = arr.length;
             const rx = arr[0].x, ry = arr[0].y;
-            const place = (lab, cx, cy) => drawLabelPill(lab.text, cx, cy, lab.hue);
-            if (n <= 3) {
-                arr.forEach((lab, j) => place(lab, rx, ry + (j - (n - 1) / 2) * STEP));
-            } else if (n === 4) {
-                const dx = 34 / z, dy = STEP / 2;
-                const offs = [[-dx, -dy], [dx, -dy], [-dx, dy], [dx, dy]]; // TL, TR, BL, BR
-                arr.forEach((lab, j) => place(lab, rx + offs[j][0], ry + offs[j][1]));
-            } else {
-                // Snug ring, growing just enough with count to stay centred;
-                // spaced a touch wider (25%) so 5+ pills stay legible.
-                const R = 1.25 * Math.max(STEP, (n * 6) / z);
-                arr.forEach((lab, j) => {
-                    const ang = -Math.PI / 2 + (j / n) * Math.PI * 2; // first at top, clockwise
-                    const c = Math.cos(ang), s = Math.sin(ang);
-                    // Push the low pills (e.g. the pentagon's bottom pair) apart
-                    // horizontally so they don't crowd together under the receiver.
-                    const xSpread = s > 0.3 ? 1.45 : 1;
-                    place(lab, rx + R * c * xSpread, ry + R * s);
-                });
-            }
+            const first = Math.max(2 + 13 / z,
+                Math.min(canvas.height - 2 - 13 / z - (n - 1) * STEP, ry - (n - 1) * STEP / 2));
+            arr.forEach((lab, j) => drawLabelPill(lab.text, rx, first + j * STEP, lab.hue));
         });
     }
 
@@ -1570,13 +1614,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         // least one link below (so it's gone when the toggle is off, no floor,
         // off-floor, or the data doesn't match the placed receivers).
         if (recDistLegend) recDistLegend.style.display = "none";
+        if (recDistLegend) recDistLegend.style.top = anyLayoutToolActive() ? '52px' : '10px';
         if (!recDistToggle.checked || receiversHidden()) return;
         const floor = finalcords.floor.find(f => sameFloorName(f.name, SelMapName));
         const links = shownRecDistLinks();
         if (!links.length) return;
         if (recDistLegend) recDistLegend.style.display = "";
-        const fmt = (meters) => gridUnit === "ft"
-            ? `${(meters * 3.28084).toFixed(1)} ft` : `${meters.toFixed(1)} m`;
+        const fmt = meters => `${(meters / .3048).toFixed(1)} ft / ${meters.toFixed(1)} m`;
+        const mismatch = (measured, mapped) => `${measured < mapped ? '−' : '+'}${fmt(Math.abs(measured - mapped))}`;
         // While actively hovering a line or a receiver, the link(s) being
         // inspected stay full strength and every other line dims to 10% so the
         // hovered path stands out of a dense mesh. A hovered receiver lights up
@@ -1620,11 +1665,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         // receivers entirely while one is focused.
         const endpoints = new Set();
         links.forEach(l => { endpoints.add(l.a); endpoints.add(l.b); });
-        const iconSize = mapIconSize();
+        const iconSize = receiverIconSize();
         ((floor && floor.receivers) || []).forEach(r => {
             if (!r.cords || !endpoints.has(r.entity_id)) return;
             const recOffline = isReceiverOffline(r.entity_id);
-            drawReceiverIcon(r.cords.x, r.cords.y, iconSize, recOffline);
+            drawReceiverIcon(r.cords.x, r.cords.y, iconSize, recOffline, r.entity_id === hoveredReceiver);
             if (r.entity_id === hoveredReceiver && r.entity_id !== focusedReceiver) {
                 let labelY = r.cords.y - iconSize / 2 - 8;
                 if (labelY < 24) labelY = r.cords.y + iconSize / 2 + 24;
@@ -1651,8 +1696,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (showPill) {
                 const mx = (l.A.x + l.B.x) / 2, my = (l.A.y + l.B.y) / 2;
                 pill = l.stale
-                    ? drawLabelPill(`${fmt(l.detected)} (${fmt(l.liveM)}) — recalibrate`, mx, my, 0, RECDIST_STALE)
-                    : drawLabelPill(`${fmt(l.detected)} (${fmt(l.trueM)})`, mx, my, l.hue);
+                    ? drawLabelPill(`BLE ${fmt(l.detected)} · Map ${fmt(l.liveM)} — recalibrate`, mx, my, 0, RECDIST_STALE)
+                    : drawLabelPill(`BLE ${fmt(l.detected)} · Map ${fmt(l.trueM)} · Δ ${mismatch(l.detected, l.trueM)}`, mx, my, l.hue);
             }
             recDistDrawn.push({ key, A: l.A, B: l.B, pill });
         });
@@ -3250,11 +3295,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 `Receiver properties for "${recId}". Mount height above this floor (empty = unknown); select metres or feet. Heights are saved in metres. `
                 + `Used to remove the vertical leg from its distances and to judge calibration `
                 + `against the true 3D distance — recalibrate after changing it.`,
-                { initial: Number.isFinite(rec.height) ? rec.height : "", placeholder: "Mount height m (optional)", receiverMetadata: rec }
+                { initial: Number.isFinite(rec.height) ? rec.height : "", placeholder: "Mount height m (optional)", receiverMetadata: rec, receiverHardware: receiverHardware(rec) }
             ).then(val => {
                 if (val === undefined) return;                       // cancelled
                 const heightChanged = rec.height !== (val.height === null ? undefined : val.height);
-                for (const key of ['height', 'height_unit', 'hardware_model', 'antenna_notes', 'distance_accuracy_m']) {
+                for (const key of ['height', 'height_unit', 'hardware_model', 'antenna_notes', 'distance_accuracy_m', 'external_antenna']) {
                     if (val[key] === null) delete rec[key]; else rec[key] = val[key];
                 }
                 savebuttondiv.appendChild(saveButton);               // reveal Save Floor Plan
@@ -4590,7 +4635,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (receiversHidden()) return null;
         const floor = finalcords.floor.find(f => sameFloorName(f.name, SelMapName));
         if (!floor) return null;
-        const hitRadius = canvas.width * 0.02 + 10; // icon radius plus slack
+        const hitRadius = receiverIconSize() / 2 + 10 / (view.zoom || 1);
         // When one receiver is focused, only what's drawn is hittable: normally
         // just the focused receiver — but with the receiver-distances overlay on,
         // its link neighbours are drawn too (drawReceiverDistances), so clicking
@@ -4938,6 +4983,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function drawElements(xp, yp, type){
         const tmpdrawcords = [];
         const iconSize = mapIconSize(); // zoom-compensated while tracking (see mapIconSize)
+        const receiverSize = receiverIconSize();
         deleteButton.remove();
         drawGrid();
 
@@ -5035,7 +5081,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const x = item.cords.x;
                 const y = item.cords.y;
                 const recOffline = isReceiverOffline(item.entity_id);
-                drawReceiverIcon(x, y, iconSize, recOffline);
+                drawReceiverIcon(x, y, receiverSize, recOffline, item.entity_id === hoveredReceiver);
 
                 // Names are hidden by default (too many receivers overlap);
                 // show one only when it's hovered or focused. The full list of
@@ -5043,9 +5089,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (item.entity_id === hoveredReceiver || item.entity_id === focusedReceiver) {
                     // Name centered above the icon; below it when too close to
                     // the top edge.
-                    let labelY = y - iconSize / 2 - 8;
+                    let labelY = y - receiverSize / 2 - 8;
                     if (labelY < 24) {
-                        labelY = y + iconSize / 2 + 24;
+                        labelY = y + receiverSize / 2 + 24;
                     }
                     drawCenteredLabel(receiverStatusLabel(item.entity_id) + item.entity_id, x, labelY,
                         "600 22px system-ui, sans-serif", recOffline ? OFFLINE_RED : "#111111");
@@ -5197,6 +5243,30 @@ document.addEventListener('DOMContentLoaded', async () => {
         return JSON.stringify(stored);
     }
 
+    function receiverHardware(rec) {
+        if (Object.hasOwn(rec, 'scanner_mac') && (typeof rec.scanner_mac !== 'string'
+            || !/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(rec.scanner_mac))) return undefined;
+        if (Object.hasOwn(rec, 'scanner_config_entry_id') && (typeof rec.scanner_config_entry_id !== 'string'
+            || !rec.scanner_config_entry_id.trim())) return undefined;
+        // Saved MAC/owner proof takes priority over a reused friendly-name slug.
+        if (!rec.scanner_mac) {
+            const option = receiverMatching.options.find(o => o.entity_id === rec.entity_id && !o.identity_ambiguous
+                && (!rec.scanner_config_entry_id || o.config_entry_ids?.includes(rec.scanner_config_entry_id)));
+            return option?.hardware;
+        }
+        const matches = [];
+        for (const option of receiverMatching.options) {
+            for (const proof of option.scanner_identities || []) {
+                const bound = {entity_id: `${option.entity_id}#hardware`, scanner_mac: proof.scanner_mac, scanner_config_entry_id: proof.config_entry_id};
+                if (rec.scanner_config_entry_id && rec.scanner_config_entry_id !== proof.config_entry_id) continue;
+                if (sameReceiverIdentity(rec, bound, receiverMatching.options)) matches.push({owner: proof.config_entry_id, hardware: proof.hardware});
+            }
+        }
+        if (new Set(matches.map(match => match.owner)).size !== 1) return undefined;
+        const values = matches.map(match => match.hardware);
+        return values.length && values.every(value => JSON.stringify(value) === JSON.stringify(values[0])) ? values[0] : undefined;
+    }
+
     function sameReceiverIdentity(left, right, options, addressMap = receiverMatching.runtime_address_map) {
         if (left.entity_id === right.entity_id) return true;
         const leftOption = options.find(o => o.entity_id === left.entity_id);
@@ -5340,6 +5410,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Live HA state changes constantly, so there's no useful cache to keep — a
     // stale/failed fetch just shows an empty snapshot.
     async function loadScannerLinking() {
+        const priorMatching = receiverMatching;
         scannerLinkingLoading = true;
         renderDebugView();
         let data = { placed: [], unplaced: [], beacons: [] };
@@ -5348,6 +5419,18 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (res.ok) {
                 const parsed = await res.json();
                 if (parsed && typeof parsed === 'object') {
+                    const fresh = parsed.matching;
+                    if (fresh && typeof fresh.revision === 'string' && Array.isArray(fresh.options)
+                        && receiverMatching === priorMatching) {
+                        // Keep a later placement/matching refresh authoritative
+                        // when this read began against an older inventory.
+                        receiverMatching = fresh;
+                        receiverOptions = fresh.options.map(option => option.entity_id);
+                        receiverInventoryLoaded = true;
+                        if (addDeviceButton.dataset.active === 'true' && receiverSelect) populateReceiverSelect(true);
+                        renderEntityTree(currentFloor());
+                        renderScannerIssues();
+                    }
                     data = {
                         placed: Array.isArray(parsed.placed) ? parsed.placed : [],
                         unplaced: Array.isArray(parsed.unplaced) ? parsed.unplaced : [],
@@ -5721,6 +5804,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     // =================================================================
 
     const circleToggle = document.getElementById("circleToggle");
+    const trackingDistanceMode = document.getElementById('trackingDistanceMode');
+    if (trackingDistanceMode) {
+        const saved = localStorage.getItem('bpsTrackingDistanceMode');
+        trackingDistanceMode.value = ['both', 'measured', 'estimated'].includes(saved) ? saved : 'both';
+        trackingDistanceMode.addEventListener('change', () => {
+            if (!['both', 'measured', 'estimated'].includes(trackingDistanceMode.value)) trackingDistanceMode.value = 'both';
+            localStorage.setItem('bpsTrackingDistanceMode', trackingDistanceMode.value);
+            if (mapReady()) redrawAll();
+        });
+    }
     circleToggle.checked = localStorage.getItem("bpsCircles") === "on"; // off by default
     circleToggle.addEventListener("change", () => {
         localStorage.setItem("bpsCircles", circleToggle.checked ? "on" : "off");
@@ -5826,8 +5919,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Redraw only when a floor plan is actually loaded; the preference
         // itself always cycles and persists.
         if (img.naturalWidth > 0) {
-            clearCanvas();
-            drawElements();
+            redrawAll();
         }
     });
 
@@ -6326,10 +6418,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 body: data,
             });
             if (response.ok) {
-                drawAreaButton.remove();
-                addDeviceButton.remove();
-                clearCanvasButton.remove();
-                SetScaleButton.remove();
+                if (removefile) {
+                    drawAreaButton.remove();
+                    addDeviceButton.remove();
+                    clearCanvasButton.remove();
+                    SetScaleButton.remove();
+                }
                 saveButton.remove();
                 new_floor = false;
                 return true;
@@ -7155,10 +7249,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             image_size_px: {width: img.naturalWidth, height: img.naturalHeight},
             canvas_size_px: {width: canvas.width, height: canvas.height}, view: {...view},
             selected_tracker: activeDevice, displayed_trackers: [...trackedDevices],
+            distance_display: {enabled: circleToggle.checked, mode: trackingDistanceMode?.value || 'both',
+                unit: gridUnit === 'ft' ? 'ft' : 'm'},
             displayed_positions: [...lastTracks.entries()].map(([entity, position]) => ({entity,
                 floor: position.floor, x_px: position.x, y_px: position.y,
                 raw_uncertainty_m: position.outdoor?.estimated_uncertainty_m,
                 display_uncertainty_m: position.outdoor?.display_uncertainty_m,
+                displayed_receiver_radii: circleToggle.checked ? trackingDistanceMarks(position) : [],
                 received_at: position.receivedAt / 1000})),
             editor_layout: editor};
     }, snapshotLocationTools);

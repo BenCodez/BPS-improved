@@ -29,13 +29,13 @@ PRIVATE = re.compile(r"^[0-9a-fA-F]{32}$")
 _LOGGER = logging.getLogger(__name__)
 SCANNER_FIELDS = ("scanner_id", "address", "name", "slug", "unique_id", "entity_id_address",
                   "address_wifi_mac", "address_ble_mac", "device_registry_id", "binding", "source_aliases",
-                  "area_id", "area_name", "scanner_last_seen_age")
+                  "area_id", "area_name", "scanner_last_seen_age", "hardware")
 MEASUREMENT_FIELDS = ("device_id", "source_id", "observed", "observed_clock", "stamp", "age", "status",
     "rssi", "raw_rssi", "filtered_rssi", "rssi_offset", "reference_power", "attenuation", "raw_distance",
     "filtered_distance", "distance", "distance_raw", "model_version", "reference_power_verified", "quality",
     "unavailable", "history", "history_status", "history_omitted")
 DEVICE_FIELDS = ("device_id", "owner_id", "address", "name", "slug", "unique_id", "source_aliases", "tracked",
-                 "address_type", "area_id", "area_name")
+                 "address_type", "area_id", "area_name", "hardware")
 
 
 def number(value):
@@ -72,7 +72,11 @@ def detached(value, depth=0):
 
 
 def fields(row, names):
-    return {field: detached(row[field]) for field in names if field in row}
+    result = {field: detached(row[field]) for field in names if field in row and field != "hardware"}
+    if "hardware" in names and "hardware" in row:
+        from .scanner_hardware import hardware_metadata
+        result["hardware"] = hardware_metadata(row["hardware"])
+    return result
 
 
 def scanner_mac(row):

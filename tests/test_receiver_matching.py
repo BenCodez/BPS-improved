@@ -61,6 +61,28 @@ def test_inventory_names_mac_disabled_renamed_scanner_only_and_ownership(hass, m
     assert inventory(hass)["revision"] != result["revision"]
 
 
+def test_legacy_hardware_requires_selected_registry_device_and_exact_transport(hass, monkeypatch):
+    entries, states, devices, add = configure(hass, monkeypatch)
+    station = NS(_is_scanner=True, address=MAC, name="Workshop", entry_id="physical")
+    devices["scanner"] = station
+    physical = NS(id="physical", manufacturer="Synthetic", model="ESP32 board",
+                  connections={("bluetooth", MAC)}, config_entries={"esphome-entry"}, password="synthetic-secret")
+    monkeypatch.setattr(bps.dr, "async_get", lambda _h: NS(devices={"physical": physical}), raising=False)
+    metadata = inventory(hass)["options"][0]["hardware"]
+    assert metadata["detected"] == {"manufacturer": "Synthetic", "model": "ESP32 board"}
+    assert metadata["effective"] == metadata["detected"] and "external_antenna" not in metadata["effective"]
+    assert "synthetic-secret" not in json.dumps(inventory(hass))
+    physical.connections = {("mac", MAC)}
+    assert inventory(hass)["options"][0]["hardware"]["detected"] == {}
+    hass.config_entries.async_get_entry = lambda key: NS(domain="esphome")
+    assert inventory(hass)["options"][0]["hardware"]["detected"] == metadata["detected"]
+    station.address = "aa:bb:cc:11:22:35"  # Never guess the historical WiFi+2 match.
+    assert inventory(hass)["options"][0]["hardware"]["detected"] == {}
+    station.address = MAC
+    station.scanner_binding = {"status": "missing_manual_binding", "device_registry_id": "physical"}
+    assert inventory(hass)["options"][0]["hardware"]["detected"] == {}
+
+
 def test_conflicting_bermuda_owners_disable_identity_choice(hass, monkeypatch):
     entries, states, devices, add = configure(hass, monkeypatch)
     add("sensor.a_distance_to_workshop")

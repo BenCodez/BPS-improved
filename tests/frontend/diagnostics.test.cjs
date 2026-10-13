@@ -17,7 +17,7 @@ function panel(panelSnapshot, locationTools = {}) {
             addEventListener(type, cb) {this.events[type] = cb;},
             fire(type = 'click') {return this.events[type]();}, click() {downloads.push({href: this.href, name: this.download});}};
     }
-    for (const name of ['CopyAll', 'ReportText', 'ReportStatus', 'ReportPanel', 'SelectReport', 'Start', 'Stop', 'Download', 'Clear', 'Mark', 'Release', 'Note', 'Refresh', 'Target', 'Duration', 'Floor', 'Status', 'X', 'Y', 'Label',
+    for (const name of ['CopyAll', 'ReportText', 'ReportStatus', 'ReportPanel', 'SelectReport', 'Start', 'Stop', 'Download', 'Clear', 'Mark', 'Pick', 'Release', 'Note', 'Refresh', 'Target', 'Duration', 'Floor', 'Status', 'X', 'Y', 'Label',
         'SnapshotLoad', 'SnapshotPick', 'SnapshotTarget', 'SnapshotFloor', 'SnapshotX', 'SnapshotY', 'SnapshotAccuracy', 'SnapshotLabel', 'SnapshotCapture', 'SnapshotComparison']) {
         elements.set('diagnostic' + name, element(['Target', 'Duration', 'Floor', 'SnapshotTarget', 'SnapshotFloor'].includes(name) ? 'select' : 'input'));
     }
@@ -157,6 +157,60 @@ test('known markers require coordinates and clear/note actions preserve their se
     assert.equal(JSON.parse(p.requests.at(-1).options.body).kind, 'clear_position');
     await p.el('Note').fire();
     assert.equal(JSON.parse(p.requests.at(-1).options.body).kind, 'note');
+});
+
+test('recording map click annotates directly and clear removes the dot', async () => {
+    let picked, cancelled, cleared = 0;
+    const p = panel(undefined, {pick(done, cancel) {picked = done; cancelled = cancel; return cancel;}, clearPoint() {cleared++;}});
+    assert.equal(p.el('Pick').disabled, true);
+    await p.el('Refresh').fire(); await p.el('Start').fire();
+    assert.equal(p.el('Pick').disabled, false); p.el('Label').value = 'Measured stationary point';
+    p.el('SnapshotX').value='12'; p.el('SnapshotY').value='34';
+    await p.el('Pick').fire(); const before = p.requests.length;
+    await picked({floor: 'Yard', x_m: 2.34567, y_m: 8.90123});
+    assert.equal(p.requests.length, before + 1);
+    assert.deepEqual(JSON.parse(p.requests.at(-1).options.body), {action: 'annotate', kind: 'known_position',
+        target: 'bps_group_dog', floor: 'Yard', x_m: 2.34567, y_m: 8.90123, label: 'Measured stationary point'});
+    assert.equal(p.el('X').value, '2.346'); assert.equal(p.el('Y').value, '8.901');
+    assert.equal(p.el('SnapshotX').value,''); assert.equal(p.el('SnapshotY').value,'');
+    const clearCount=cleared;
+    await p.el('SnapshotCapture').fire();
+    assert.match(p.el('ReportStatus').textContent,/Pick the actual location/);
+    assert.equal(cleared,clearCount,'invalidating the older snapshot keeps the new recording dot');
+    await p.el('Release').fire(); assert.ok(cleared > 0);
+    assert.equal(p.el('X').value, ''); assert.equal(p.el('Y').value, '');
+    await p.el('Pick').fire(); cancelled();
+    assert.match(p.el('Status').textContent, /cancelled/);
+    assert.equal(JSON.parse(p.requests.at(-1).options.body).kind, 'clear_position');
+});
+
+test('map annotation waits for an in-flight recording refresh and rechecks recording state', async () => {
+    for (const remainsActive of [true, false]) {
+        let done, release;
+        const p = panel(undefined, {pick(callback) {done=callback; return () => {};}});
+        await p.el('Refresh').fire(); await p.el('Start').fire(); await p.el('Pick').fire();
+        p.network.pending=new Promise(resolve=>{release=resolve;});
+        p.timers.values().next().value.cb();
+        const action=done({floor:'Yard',x_m:4,y_m:5});
+        assert.equal(p.requests.filter(r=>r.options&&JSON.parse(r.options.body).action==='annotate').length,0);
+        p.network.status.active=remainsActive; p.network.pending=null; release(); await action;
+        const annotations=p.requests.filter(r=>r.options&&JSON.parse(r.options.body).action==='annotate');
+        assert.equal(annotations.length,remainsActive?1:0);
+        if(remainsActive) assert.equal(JSON.parse(annotations[0].options.body).x_m,4);
+    }
+});
+
+test('stopping or failed map selection never records a false known position', async () => {
+    let callback, cancellations = 0;
+    const p = panel(undefined, {pick(done, cancel) {callback = done; return () => {cancellations++; cancel();};}});
+    await p.el('Refresh').fire(); await p.el('Start').fire(); await p.el('Pick').fire(); await p.el('Stop').fire();
+    assert.equal(cancellations, 1); assert.equal(p.el('Pick').disabled, true);
+    const before = p.requests.length; await callback({floor: 'Yard', x_m: 1, y_m: 2});
+    assert.equal(p.requests.length, before);
+    const unavailable = panel(undefined, {pick() {throw new Error('Save Floor Plan first.');}});
+    await unavailable.el('Refresh').fire(); await unavailable.el('Start').fire(); await unavailable.el('Pick').fire();
+    assert.match(unavailable.el('Status').textContent, /Save Floor Plan/);
+    assert.equal(unavailable.requests.filter(r => r.options && JSON.parse(r.options.body).action === 'annotate').length, 0);
 });
 
 test('download uses the supplied authenticated fetch and releases the temporary local URL', async () => {
