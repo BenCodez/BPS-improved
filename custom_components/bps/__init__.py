@@ -59,6 +59,7 @@ from .display_radius import reporting_radius_limit
 from .sparse_tracking import solve_sparse_detection
 from .solver_settings import MIN_WEIGHT_RADIUS_M, SOLVER_ROBUST_F_SCALE
 from .tracker_groups import fuse_groups, normalize_groups
+from .group_receiver_guard import receiver_constraints, constrain_group
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
 from .receiver_matching import inventory as receiver_inventory
@@ -1396,6 +1397,15 @@ async def update_receiver_liveness(hass):
     resolved = {s: is_online(s) for s in receivers}
     dom["rl_offline"] = sorted(s for s, status in resolved.items() if status is False)
     dom["rl_unknown"] = sorted(s for s, status in resolved.items() if status is None)
+    def evidence_age(slug):
+        key = bindings.get(slug, {}).get("identity")
+        age = finite_number(dom.get("rl_mac_ages", {}).get(key[1]), minimum=0) if key else None
+        return age + elapsed if age is not None else 0.0
+
+    dom["rl_status_snapshot"] = {slug: {"online": status,
+        "identity": list(bindings[slug]["identity"]) if bindings.get(slug, {}).get("identity") else None,
+        "source_age_s": evidence_age(slug),
+        "captured": time.time()} for slug, status in resolved.items()}
 
 
 async def update_receiver_radii(hass, eids, receiver_sources=None):
@@ -2006,6 +2016,23 @@ async def update_tracker_groups(hass):
     fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
                         use_observation_age=use_observation_age, known_trackers=known,
                         previous=previous, stability=dom.setdefault("group_stability", {}))
+    sources = _receiver_sources_context.get() or ReceiverSources(hass)
+    group_definitions = {"bps_group_" + g["id"]: g for g in groups}
+    guarded, reports = [], {}
+    for position in fused:
+        floor = next(f for f in layout["floor"] if f["name"] == position["floor"])
+        constraints = receiver_constraints(floor, group_definitions[position["ent"]]["beacons"],
+            sources, dom.get("rl_status_snapshot", {}), fusion_time, group_max_age)
+        checked, report = constrain_group(position, constraints, previous.get(position["ent"]),
+            scales[position["floor"]], fusion_time, group_max_age)
+        if report is not None:
+            reports[position["ent"]] = report
+        if checked is not None:
+            guarded.append(checked)
+        else:
+            dom["group_stability"].pop(position["ent"], None)
+    fused = guarded
+    dom["group_receiver_guards"] = reports
     source_positions = {p["ent"]: p for p in originals}
     for position in fused:
         floor = next(f for f in layout["floor"] if f["name"] == position["floor"])
@@ -2064,9 +2091,12 @@ async def update_tracker_groups(hass):
     for group in groups:
         ent = "bps_group_" + group["id"]
         if ent not in live:
+            guard = reports.get(ent)
             update_bps_sensor_state(hass, f"sensor.{ent}_bps_position", "unknown",
                                     {"group": True, "tracker_key": ent, "name": group["name"],
-                                     "beacons_reporting": 0, "total_beacons": len(group["beacons"])},
+                                     "beacons_reporting": guard.get("beacons_reporting", 0) if guard else 0,
+                                     "total_beacons": len(group["beacons"]),
+                                     **({"outdoor": {"receiver_guard": guard}} if guard else {})},
                                     only_changed=True)
             for kind in ("zone", "floor"):
                 update_bps_sensor_state(hass, f"sensor.{ent}_bps_{kind}", "unknown", {}, only_changed=True)
@@ -3305,6 +3335,7 @@ def _diagnostic_report_snapshot(hass, now):
         tracking_update_interval_s=secToUpdate, max_concurrent_trackers=MAX_CONCURRENT_TRACKERS,
         receiver_offline_after_s=RECEIVER_OFFLINE_SECS, receiver_liveness_poll_interval_s=RECEIVER_DUMP_INTERVAL,
         queued_tracking_updates=update_queue.qsize())
+    snapshot["runtime"]["group_receiver_guards"] = copy.deepcopy(dom.get("group_receiver_guards", {}))
     snapshot["bermuda"] = bermuda_diagnostics.snapshot(hass, now)
     try:
         snapshot["bps_entities"], _, snapshot["bps_entity_counts"] = bermuda_diagnostics.entity_snapshot(hass, DOMAIN, now)
