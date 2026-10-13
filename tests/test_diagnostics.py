@@ -240,8 +240,10 @@ def test_automatic_history_packs_maximum_descriptive_profiles_and_tracks_radio_c
         assert dict(final.metadata)["oversize_samples"] == 0
         report = bps._diagnostic_report_snapshot(hass, clock[0])
         full = report["bermuda"]["entries"][0]["effective_settings"]["measurement_toolkit"]
-        assert full["receiver_profiles"]["aa:bb:cc:dd:ee:7f"]["notes"] == "Synthetic edited note"
-        assert full["beacon_profiles"]["synthetic-beacon-127"]["manufacturer"].startswith("Synthetic profile metadata")
+        assert full["receiver_profiles"]["aa:bb:cc:dd:ee:7f"]["attenuation"] == 2.5
+        configured = report["bermuda"]["entries"][0]["configured_settings"]["measurement_toolkit"]
+        assert configured["receiver_profiles"]["aa:bb:cc:dd:ee:00"]["manufacturer"].startswith("Synthetic profile metadata")
+        assert full["profile_metadata_export"]["omitted_profiles"]["receiver_profiles"] > 0
         assert "Synthetic profile metadata" in diag.format_report(report)
         assert not hass._store_saves
     asyncio.run(scenario())
@@ -264,6 +266,90 @@ def test_recurring_radio_context_budget_keeps_signatures_for_compacted_entries(h
     last.options["measurement_toolkit"]["beacon_profiles"]["synthetic-beacon-127"]["reference_power"] = -65.
     second = recent.pack(bps._recent_tracking_snapshot(hass, 1002.))
     assert second.context_id != first.context_id and len(second.context_json) < recent.MAX_CONTEXT_BYTES
+
+
+@pytest.mark.parametrize("entry_count", [1, 4])
+def test_full_report_budgets_maximum_utf8_profiles_across_all_settings_views(hass, monkeypatch, entry_count):
+    configure(hass, monkeypatch)
+    hass.states.async_all = lambda _domain=None: []
+    registry = SimpleNamespace(entities={}, async_get=lambda _eid: None)
+    monkeypatch.setattr(bps.er, "async_get", lambda _h: registry, raising=False)
+    monkeypatch.setattr(bps.dr, "async_get", lambda _h: SimpleNamespace(devices={}), raising=False)
+    toolkit = _metadata_heavy_toolkit_profiles()
+    # Each field is valid at Bermuda's 512-character profile limit, but four
+    # UTF-8 bytes per satellite made even one entry exceed BPS's 4 MiB report.
+    text = "🛰" * 512
+    for namespace in ("receiver_profiles", "beacon_profiles"):
+        for profile in toolkit[namespace].values():
+            for field in ("hardware_type", "manufacturer", "model", "antenna", "notes"):
+                profile[field] = text
+            profile["environment"] = "unknown"
+    options = {"attenuation": 2., "measurement_toolkit": toolkit}
+    entries = [SimpleNamespace(entry_id=f"synthetic-entry-{i}", title="Synthetic Bermuda", state="loaded",
+        options=copy.deepcopy(options), runtime_data=SimpleNamespace(coordinator=SimpleNamespace(
+            options=copy.deepcopy(options), devices={}))) for i in range(entry_count)]
+    hass.config_entries = SimpleNamespace(async_entries=lambda _domain: entries)
+    before = copy.deepcopy([(entry.options, entry.runtime_data.coordinator.options) for entry in entries])
+    report = bps._diagnostic_report_snapshot(hass, 1000.)
+    formatted = diag.format_report(report)
+    assert len(formatted.encode()) < diag.MAX_REPORT_BYTES
+    emitted_bytes, omitted, signatures = 0, 0, []
+    for entry in report["bermuda"]["entries"]:
+        for view in ("configured_settings", "effective_settings"):
+            settings = entry[view]["measurement_toolkit"]
+            assert settings["receiver_profiles"]["aa:bb:cc:dd:ee:00"]["notes"] == text
+            for namespace in ("receiver_profiles", "beacon_profiles"):
+                assert len(settings[namespace]) == 128
+                for identity, profile in settings[namespace].items():
+                    assert profile["environment"] == "unknown"
+                    radio = {"attenuation": 2., "rssi_offset": -3.} if namespace == "receiver_profiles" else {"reference_power": -60.}
+                    assert all(profile[key] == value for key, value in radio.items())
+                    rich = {field: profile[field] for field in bps.bermuda_diagnostics.PROFILE_TEXT_FIELDS if field in profile}
+                    if rich:
+                        assert all(value == text for value in rich.values())
+                        emitted_bytes += len(json.dumps(rich, ensure_ascii=False, separators=(",", ":")).encode())
+            loss = settings.get("profile_metadata_export")
+            if loss:
+                omitted += sum(loss["omitted_profiles"].values())
+                signatures.append(loss["signature"])
+                assert loss["omitted_fields"] == 5 * sum(loss["omitted_profiles"].values())
+    assert emitted_bytes <= bps.bermuda_diagnostics.MAX_PROFILE_METADATA_BYTES and omitted > 0
+    initial = report["bermuda"]["entries"][0]["configured_settings"]["measurement_toolkit"]
+    assert initial["receiver_profiles"]["aa:bb:cc:dd:ee:00"]["notes"] == text
+    assert [(entry.options, entry.runtime_data.coordinator.options) for entry in entries] == before
+    assert all(len(signature) == 64 for signature in signatures) and not hass._store_saves
+    if entry_count == 1:
+        # Standalone settings consumers also get a default bounded view.
+        views = {key: bps.bermuda_diagnostics.settings(options) for key in ("configured_settings", "effective_settings")}
+        assert len(diag.format_report({"bermuda": {"entries": [views]}}).encode()) < diag.MAX_REPORT_BYTES
+    # An omitted description still has a deterministic change witness.
+    entries[-1].runtime_data.coordinator.options["measurement_toolkit"]["beacon_profiles"]["synthetic-beacon-127"]["notes"] = "Synthetic changed tail"
+    updated = bps._diagnostic_report_snapshot(hass, 1002.)
+    last = updated["bermuda"]["entries"][-1]["effective_settings"]["measurement_toolkit"]
+    previous = report["bermuda"]["entries"][-1]["effective_settings"]["measurement_toolkit"]
+    assert last["profile_metadata_export"]["signature"] != previous["profile_metadata_export"]["signature"]
+
+
+def test_normal_full_profiles_remain_complete_and_scanner_recovery_is_allowlisted(hass):
+    from bps import bermuda_diagnostics as D
+    profile = {"hardware_type": "Synthetic receiver", "manufacturer": "Synthetic", "model": "Synthetic model",
+        "antenna": "Synthetic antenna", "notes": "Synthetic note", "environment": "unknown", "rssi_offset": -3.}
+    recovery = {"aa:bb:cc:dd:ee:00": {"entity_id": "sensor.synthetic_retained_range", "private_key": "excluded-secret"}}
+    options = {"measurement_toolkit": {"receiver_profiles": {"aa:bb:cc:dd:ee:00": profile},
+        "scanner_identity_recovery": recovery}}
+    full = D.settings(options)["measurement_toolkit"]
+    assert full["receiver_profiles"]["aa:bb:cc:dd:ee:00"] == profile
+    assert "profile_metadata_export" not in full
+    assert full["scanner_identity_recovery"] == {"aa:bb:cc:dd:ee:00": {"entity_id": "sensor.synthetic_retained_range"}}
+    entry = SimpleNamespace(entry_id="synthetic", options=options,
+        runtime_data=SimpleNamespace(coordinator=SimpleNamespace(options=options)))
+    hass.config_entries = SimpleNamespace(async_entries=lambda _domain: [entry])
+    before = D.settings_snapshot(hass)
+    assert before["entries"][0]["effective_settings"]["measurement_toolkit"]["scanner_identity_recovery"] == full["scanner_identity_recovery"]
+    recovery["aa:bb:cc:dd:ee:00"]["entity_id"] = "sensor.synthetic_different_range"
+    after = D.settings_snapshot(hass)
+    assert before["entries"][0]["effective_settings_signature"] != after["entries"][0]["effective_settings_signature"]
+    assert "excluded-secret" not in json.dumps(full) and "excluded-secret" not in json.dumps(after)
 
 
 def test_recent_inventory_cap_preserves_groups_and_members(hass, monkeypatch):

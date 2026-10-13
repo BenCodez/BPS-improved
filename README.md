@@ -848,9 +848,13 @@ performance health appear when available. Profiles and quality metadata do not
 become BPS coordinates or certified accuracy. Captures prioritize tracked
 devices; scanner calibration data is requested separately by scanner address.
 Direct debug exports share a byte/count budget across entries and report omitted
-data. Automatic recent-history contexts retain compact radio settings and
-deterministic model/settings signatures; full descriptive profiles stay in the
-live report. The history is recent runtime context, not a recorded replay. These reads
+data. Rich profile descriptions also share a UTF-8 byte budget across entries
+and configured/effective settings. Omitted text fields have explicit counts and
+a signature; profile identities, numeric settings and initial descriptions stay
+available. Automatic recent-history contexts retain compact radio settings and
+deterministic model/settings signatures. Scanner identity recovery mappings
+explain retained HA entity IDs in both contexts. The history is recent runtime
+context, not a recorded replay. These reads
 stay local and do not require HTTP requests or installing a particular Bermuda
 fork. Keep one automatic calibration system active while validating changes;
 moving a correction into Bermuda requires deliberately updating the relevant

@@ -12,6 +12,8 @@ from homeassistant.helpers import entity_registry as er
 
 MAX_ENTITIES = 4096
 MAX_ADVERTS = 2048
+MAX_PROFILE_METADATA_BYTES = 128 * 1024
+PROFILE_TEXT_FIELDS = ("hardware_type", "manufacturer", "model", "antenna", "notes")
 SETTING_DEFAULTS = {
     "ref_power": "DEFAULT_REF_POWER", "attenuation": "DEFAULT_ATTENUATION",
     "smoothing_samples": "DEFAULT_SMOOTHING_SAMPLES", "max_velocity": "DEFAULT_MAX_VELOCITY",
@@ -46,8 +48,13 @@ def timestamp(value):
         return None
 
 
-def settings(values, *, compact=False):
+def settings(values, *, compact=False, metadata_budget=None):
     values = values if isinstance(values, Mapping) else {}
+    if not compact and metadata_budget is not None:
+        view_quota = metadata_budget["remaining"] // max(1, metadata_budget.get("views_remaining", 1))
+        metadata_budget["views_remaining"] = max(0, metadata_budget.get("views_remaining", 1) - 1)
+    else:
+        view_quota = MAX_PROFILE_METADATA_BYTES
     result = {key: scalar(values[key]) for key in SETTING_DEFAULTS if key in values}
     offsets = values.get("rssi_offsets")
     if isinstance(offsets, Mapping):
@@ -70,12 +77,40 @@ def settings(values, *, compact=False):
             "distance_accuracy_m", "reference_power_verified")
         if compact:
             profile_fields = ("reference_power", "attenuation", "rssi_offset", "reference_power_verified")
-        for namespace in ("receiver_profiles", "beacon_profiles", "scanner_bindings"):
+        if not compact and metadata_budget is None:
+            metadata_budget = {"remaining": MAX_PROFILE_METADATA_BYTES}
+        omitted, omitted_fields, metadata_bytes = {}, 0, 0
+        signature = hashlib.sha256()
+        for namespace in ("receiver_profiles", "beacon_profiles", "scanner_bindings", "scanner_identity_recovery"):
             rows = toolkit.get(namespace)
             if isinstance(rows, Mapping):
-                keys = ("device_registry_id",) if namespace == "scanner_bindings" else profile_fields
-                allowed[namespace] = {public_id(identity): {key: detached(row[key]) for key in keys if key in row}
-                    for identity, row in list(rows.items())[:128] if isinstance(identity, str) and isinstance(row, Mapping)}
+                keys = ("device_registry_id",) if namespace == "scanner_bindings" else (
+                    ("entity_id",) if namespace == "scanner_identity_recovery" else profile_fields)
+                allowed[namespace] = {}
+                for identity, row in sorted((identity, row) for identity, row in list(rows.items())[:128]
+                                           if isinstance(identity, str) and isinstance(row, Mapping)):
+                    identity = public_id(identity)
+                    profile = {key: detached(row[key]) for key in keys if key in row}
+                    if not compact and namespace in ("receiver_profiles", "beacon_profiles"):
+                        # Sign the allowlisted complete profile, including omitted
+                        # metadata. Numeric fields and identity always remain.
+                        signature.update(json.dumps([namespace, identity, profile], sort_keys=True,
+                            ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode())
+                        metadata = {key: profile[key] for key in PROFILE_TEXT_FIELDS if key in profile}
+                        size = len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode()) if metadata else 0
+                        if size <= min(metadata_budget["remaining"], view_quota - metadata_bytes):
+                            metadata_budget["remaining"] -= size
+                            metadata_bytes += size
+                        else:
+                            omitted[namespace] = omitted.get(namespace, 0) + 1
+                            omitted_fields += len(metadata)
+                            profile = {key: value for key, value in profile.items() if key not in PROFILE_TEXT_FIELDS}
+                    allowed[namespace][identity] = profile
+        if omitted:
+            allowed["profile_metadata_export"] = {"budget_bytes": MAX_PROFILE_METADATA_BYTES,
+                "view_budget_bytes": view_quota, "included_bytes": metadata_bytes,
+                "omitted_profiles": omitted, "omitted_fields": omitted_fields,
+                "signature": signature.hexdigest(), "guide": "Rich metadata shares a UTF-8 byte budget across report entries and configured/effective settings. Omitted text fields are excluded whole; profile identities and numeric fields remain."}
         for namespace in ("filters", "receiver_limits"):
             rows = toolkit.get(namespace)
             if isinstance(rows, Mapping):
@@ -235,16 +270,18 @@ def snapshot(hass, now):
         except (KeyError, AttributeError):
             pass
     mono = time.monotonic()
+    metadata_budget = {"remaining": MAX_PROFILE_METADATA_BYTES,
+        "views_remaining": sum(1 + (_coordinator(hass, entry) is not None) for entry in entries[:32])}
     for entry in entries[:32]:
         coordinator = _coordinator(hass, entry)
         row = {"entry_id": entry.entry_id, "title": scalar(entry.title),
                "state": scalar(getattr(entry, "state", None)),
-               "configured_settings": settings(entry.options),
+               "configured_settings": settings(entry.options, metadata_budget=metadata_budget),
                "runtime_available": coordinator is not None, "toolkit": toolkit_snapshot(coordinator)}
         result["entries"].append(row)
         if coordinator is None:
             continue
-        row.update(effective_settings=settings(getattr(coordinator, "options", {})),
+        row.update(effective_settings=settings(getattr(coordinator, "options", {}), metadata_budget=metadata_budget),
                    sensor_update_interval_s=scalar(getattr(coordinator, "sensor_interval", None)),
                    last_update_success=scalar(getattr(coordinator, "last_update_success", None)))
         if entry.entry_id in direct.snapshots:

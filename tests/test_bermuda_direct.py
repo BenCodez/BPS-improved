@@ -488,3 +488,54 @@ def test_beacon_debug_reads_direct_measurement_and_deduplicates_legacy_aliases(h
     assert rows == [{"device": "tag", "receivers": [{"scanner": "old_station", "distance": 6., "unit": "m"}]}]
     payloads["entry"]["devices"]["synthetic-tracker"]["scanners"][MAC].update(status="stale", filtered_distance=None)
     assert bps._beacon_links(hass) == [{"device": "tag", "receivers": []}]
+
+
+@pytest.mark.parametrize("alias", ["both_disabled", "current_only", "renamed_current"])
+def test_beacon_debug_enumerates_disabled_direct_anchors_without_ha_states(hass, monkeypatch, alias):
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    states.clear()
+    for entry in entries.values(): entry.disabled_by = "user"
+    displayed = "old_station"
+    if alias == "current_only":
+        del entries[old]
+        displayed = "current_station"
+    elif alias == "renamed_current":
+        entry = entries.pop(new)
+        entry.entity_id = "sensor.synthetic_renamed_distance"
+        entries[entry.entity_id] = entry
+    before = len(calls)
+    assert bps._beacon_links(hass) == [{"device": "tag", "receivers": [
+        {"scanner": displayed, "distance": 6., "unit": "m"}]}]
+    assert len(calls) == before + 1
+    # A covered stale pair retains the proved beacon, with no live receivers.
+    payloads["entry"]["devices"]["synthetic-tracker"]["scanners"][MAC].update(status="stale", filtered_distance=None)
+    assert bps._beacon_links(hass) == [{"device": "tag", "receivers": []}]
+    payloads["entry"]["devices"]["synthetic-tracker"]["scanners"].clear()
+    assert bps._beacon_links(hass) == [{"device": "tag", "receivers": []}]
+
+
+def test_beacon_debug_disabled_anchors_do_not_create_unsupported_legacy_readings(hass, monkeypatch):
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    for entry in entries.values(): entry.disabled_by = "user"
+    states.clear()
+    payloads["entry"] = {"version": 99}
+    assert bps._beacon_links(hass) == []
+    # The same unsupported API retains the enabled legacy source and display.
+    entries[new].disabled_by = None
+    states[new] = NS(entity_id=new, state="4", attributes={"unit_of_measurement": "m"}, last_updated=timestamp(998.))
+    assert bps._beacon_links(hass) == [{"device": "tag", "receivers": [
+        {"scanner": "current_station", "distance": 4., "unit": "m"}]}]
+
+
+def test_beacon_debug_disabled_direct_aliases_preserve_multi_entry_ambiguity(hass, monkeypatch):
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    configs = hass.config_entries.async_entries("bermuda") + [NS(entry_id="second", state="loaded")]
+    hass.config_entries.async_entries = lambda _domain: configs
+    payloads["second"] = snapshot(entry="second")
+    add("sensor.other_distance_to_old_station", None)
+    add("sensor.other_distance_to_current_station", None)
+    for eid, entry in entries.items():
+        entry.disabled_by = "user"
+        if eid.startswith("sensor.other_"): entry.config_entry_id = "second"
+    states.clear()
+    assert bps._beacon_links(hass) == [{"device": "other", "receivers": []}, {"device": "tag", "receivers": []}]

@@ -1058,10 +1058,21 @@ def _beacon_links(hass):
     beacons = {}  # device -> [{scanner, distance, unit}]
     sources, seen = ReceiverSources(hass), set()
     allowed = set(_bermuda_distance_sensor_ids(hass))
-    for st in hass.states.async_all("sensor"):
-        eid = st.entity_id
-        if eid not in allowed:
+    candidates = [(st.entity_id, st) for st in hass.states.async_all("sensor") if st.entity_id in allowed]
+    included = {eid for eid, _state in candidates}
+    direct_trackers = sources.direct_trackers()
+    for (device, owner), proofs in sources.direct_tracker_proofs.items():
+        if device not in direct_trackers or owner not in sources.direct.snapshots:
             continue
+        # A disabled registry anchor still proves the existing BPS tracker and
+        # receiver keys. Never invent display slugs from API names, or expose
+        # disabled legacy states as readings when the direct API is absent.
+        beacons.setdefault(device, [])
+        for eid, _uid, _identity in proofs:
+            if eid not in included:
+                candidates.append((eid, None))
+                included.add(eid)
+    for eid, st in candidates:
         device_part, slug = eid.split("_distance_to_", 1)
         device = device_part[len("sensor."):] if device_part.startswith("sensor.") else device_part
         beacons.setdefault(device, [])
@@ -1071,6 +1082,8 @@ def _beacon_links(hass):
         is_direct = provenance.get("path") == "direct"
         identity = (device, binding["identity"] or slug, provenance.get("device_id") if is_direct else sources.tracker_ids.get(eid))
         if sources.registry is not None and ((not is_direct and selected != eid) or chosen is None or identity in seen):
+            continue
+        if st is None and not is_direct:
             continue
         seen.add(identity)
         if is_direct:
