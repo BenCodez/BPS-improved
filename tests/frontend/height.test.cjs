@@ -134,6 +134,26 @@ test('preview preserves prior height; confirmation stages common-floor metres an
     assert.equal(p.api.snapshot().confirmed.station_offset_m, .5);
 });
 
+test('late automatic stop accepts fresh bounded reference and station samples but rejects stale captures', () => {
+    for (const delay of [1, 250, 12000]) {
+        const p = ui();
+        const automaticCapture = (button, value) => {
+            p.click(button); p.emit(value); p.advance(30000); p.emit(value);
+            const timer = [...p.timers.values()].find(t => t.delay === 45000);
+            assert.ok(timer); p.advance(15000+delay); timer.callback();
+        };
+        automaticCapture('heightBaseCapture', 100);
+        assert.equal(p.api.snapshot().baseline.sample_count, 2);
+        p.el('heightReceiver').value = '0'; automaticCapture('heightStationCapture', 101);
+        assert.equal(p.el('heightConfirm').disabled, false); p.click('heightConfirm');
+        assert.equal(p.staged[0].value, 3);
+    }
+    const p = ui(); p.click('heightBaseCapture'); p.emit(100); p.advance(30000); p.emit(100);
+    const timer = [...p.timers.values()].find(t => t.delay === 45000);
+    p.advance(35001); timer.callback();
+    assert.equal(p.api.snapshot().baseline, null); assert.match(p.el('heightStatus').textContent, /stale/);
+});
+
 test('selected feet display converts to metres at confirmation', () => {
     const p = ui(); p.el('heightUnit').value = 'ft'; p.el('heightBase').value = '5'; p.el('heightOffset').value = '2';
     p.base(); p.station(100); assert.match(p.el('heightStatus').textContent, /7.001 ft \(saved as 2.134 m\)/);
@@ -167,7 +187,7 @@ test('browser missing vertical accuracy, weak accuracy, permission denial and ea
     p.click('heightBaseCapture'); [...p.watchers.values()][0].failed({message: 'denied'});
     assert.equal(p.watchers.size, 0); assert.equal(p.timers.size, 0); assert.match(p.el('heightStatus').textContent, /denied/);
     p.click('heightBaseCapture'); p.emit(); p.click('heightStop'); assert.equal(p.api.snapshot().baseline, null);
-    assert.match(p.el('heightStatus').textContent, /30–45 seconds/);
+    assert.match(p.el('heightStatus').textContent, /at least 30 seconds/);
 });
 
 test('barometer discovery never selects a family phone; exact pressure source is used without browser permission', async () => {

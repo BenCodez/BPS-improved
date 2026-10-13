@@ -35,7 +35,7 @@ receiver-above-phone offset`. The exact selected phone pressure entity or this
 browser supplies both captures; sources never mix. Pressure delta uses
 `44330 × (1 − (station_pressure / reference_pressure)^0.1903)` metres; browser
 delta subtracts the two altitudes so their common datum cancels. Heights are
-saved in metres even when the inputs use feet; the preview reports metres. This survey changes no
+saved in metres even when the inputs use feet. This survey changes no
 radio correction or solver setting. Recalibrate after changing mount heights.
 
 Each capture requires at least two distinct fresh measurements spanning 20

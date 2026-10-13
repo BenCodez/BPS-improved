@@ -174,7 +174,9 @@
             release(); capture = null;
             try {
                 if (!current(active.guard)) throw new Error('Floor/source changed. Recapture the reference.');
-                if (!number(now()-active.started, 30000, CAPTURE_MS)) throw new Error('Capture for 30–45 seconds while stationary.');
+                // Samples remain bounded to the 45-second capture window;
+                // a browser timer may deliver this callback after its deadline.
+                if (!number(now()-active.started, 30000, Number.MAX_SAFE_INTEGER)) throw new Error('Capture for at least 30 seconds while stationary.');
                 const result = active.samples.result(now());
                 if (active.kind === 'base') {
                     if (result.method === 'gps' && Math.max(result.reported_accuracy_m, result.spread_m) > 1)
