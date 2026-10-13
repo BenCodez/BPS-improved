@@ -1,12 +1,15 @@
 """Mixed calibration service rows require positive, current owner/source proof."""
 import asyncio
 import copy
+import math
+import sys
 from types import SimpleNamespace as NS
 
 import pytest
 
 import bps
 from bps import calibration as C
+from bps import bermuda_calibration as B
 from test_bermuda_direct import MAC, OTHER, calibration_setup
 
 LEGACY_A = "aa:bb:cc:77:88:01"
@@ -142,3 +145,73 @@ def test_fully_legacy_service_response_is_returned_unchanged_without_owner_proof
     service[UNKNOWN] = row(UNKNOWN, "Unknown", {MAC: advert(MAC)})
     service["legacy_scalar"] = 42
     assert asyncio.run(C._dump_devices(hass)) is service
+
+
+@pytest.mark.parametrize("direct_model", ["missing", "available"])
+def test_runtime_preview_cannot_borrow_legacy_model_for_direct_receiver(hass, monkeypatch, direct_model):
+    payloads, cal, legacy, entries, service = mixed(hass, monkeypatch)
+    if direct_model == "missing":
+        for device in payloads["entry"]["devices"].values():
+            device["scanners"].pop(MAC, None)
+    cross_owner = {**advert(MAC), "conf_attenuation": 9., "conf_rssi_offset": -99., "conf_ref_power": -10.}
+    legacy.runtime_data = NS(coordinator=NS(devices={LEGACY_A: NS(
+        _is_scanner=True, address=LEGACY_A, name="Legacy A", adverts={MAC: NS(**cross_owner)})}, options={}))
+    layout = copy.deepcopy(hass.data["bps"]["layout"])
+    source = B.runtime_context(hass, layout, "Ground")
+    model = source["receivers"]["old_station"]
+    preview = B.build_preview(layout, "Ground", None, source)["rows"][0]
+    assert model["entry_id"] == "entry" and model["scanner_mac"] == MAC
+    if direct_model == "missing":
+        assert (model["attenuation"], model["rssi_offset_db"], model["reference_power_dbm"]) == (None, None, None)
+        assert not preview["transfer_current_eligible"]
+        assert "effective_bermuda_model_unavailable" in preview["transfer_current_reasons"]
+        assert preview["transfer_current_offset_db"] is None
+    else:
+        assert (model["attenuation"], model["rssi_offset_db"], model["reference_power_dbm"]) == (2., -3., -60.)
+        assert model["source_path"] == "direct"
+        assert preview["transfer_current_eligible"]
+        assert preview["transfer_current_offset_db"] == pytest.approx(-3. - 20. * math.log10(2.))
+    legacy.runtime_data.coordinator.devices[LEGACY_A].adverts.clear()
+    assert B.runtime_context(hass, layout, "Ground")["receivers"]["old_station"] == model
+
+
+@pytest.mark.parametrize("api", ["mixed", "legacy_only"])
+def test_runtime_preview_keeps_legacy_owned_options_and_model(api, hass, monkeypatch):
+    payloads, cal, legacy, entries, service = mixed(hass, monkeypatch)
+    if api == "legacy_only":
+        payloads["entry"] = {"version": 99}
+    live = {address: NS(_is_scanner=True, address=address, name=value["name"],
+                       adverts={key: NS(**ad) for key, ad in value["adverts"].items()})
+            for address, value in service.items()}
+    legacy.runtime_data = NS(coordinator=NS(devices=live, options={
+        "attenuation": 4., "ref_power": -45., "rssi_offsets": {LEGACY_A: -9., LEGACY_B: -8.}}))
+    layout = {"floor": [{"name": "Ground", "scale": 10., "receivers": [{
+        "entity_id": "legacy_0", "scanner_mac": LEGACY_A, "scanner_config_entry_id": "legacy",
+        "correction": 2., "cords": {"x": 0., "y": 0.}}]}]}
+    source = B.runtime_context(hass, layout, "Ground")
+    model = source["receivers"]["legacy_0"]
+    assert (model["attenuation"], model["rssi_offset_db"], model["reference_power_dbm"]) == (4., -9., -45.)
+    assert model["entry_id"] == "legacy" and model["scanner_mac"] == LEGACY_A
+    preview = B.build_preview(layout, "Ground", None, source)["rows"][0]
+    assert preview["transfer_current_eligible"]
+    assert preview["transfer_current_offset_db"] == pytest.approx(-9. - 40. * math.log10(2.))
+
+
+def test_runtime_preview_scanner_capture_failure_retains_owned_legacy_model(hass, monkeypatch):
+    data, payloads, cal = calibration_setup(hass, monkeypatch)
+    def getter(_hass, **kwargs):
+        if kwargs.get("addresses") is not None:
+            raise RuntimeError("Synthetic scanner capture failure")
+        return copy.deepcopy(payloads["entry"])
+    monkeypatch.setitem(sys.modules, "custom_components.bermuda.api", NS(async_get_advert_snapshot=getter))
+    coordinator = hass.config_entries.async_entries("bermuda")[0].runtime_data.coordinator
+    coordinator.devices = {MAC: NS(_is_scanner=True, address=MAC, name="Current station",
+                                   adverts={OTHER: NS(**advert(OTHER))}),
+                           OTHER: NS(_is_scanner=True, address=OTHER, name="Other station",
+                                     adverts={MAC: NS(**advert(MAC))})}
+    coordinator.options = {"attenuation": 4., "ref_power": -45., "rssi_offsets": {MAC: -9.}}
+    source = B.runtime_context(hass, data, "Ground")
+    model = source["receivers"]["old_station"]
+    assert (model["attenuation"], model["rssi_offset_db"], model["reference_power_dbm"]) == (4., -9., -45.)
+    assert model.get("source_path") is None
+    assert B.build_preview(data, "Ground", None, source)["rows"][0]["transfer_current_eligible"]

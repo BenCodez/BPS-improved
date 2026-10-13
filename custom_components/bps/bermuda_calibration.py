@@ -120,7 +120,7 @@ def runtime_context(hass, coords, floor_name):
             options_by_mac[address] = getattr(coordinator, "options", {})
             offset_keys[address] = original_address
     if direct.snapshots:
-        devices = direct.dump_devices(devices)
+        devices = direct.calibration_dump(hass, devices)
         for address, row in devices.items():
             owner = row.get("_bps_config_entry_id")
             owners.setdefault(address, set()).add(owner)
