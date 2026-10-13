@@ -25,6 +25,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let availableBeaconKeys = [];
     let outdoorFloorSignature = '';
     let gpsUI = null;
+    let truthUI = null;
     let heightUI = null;
 
     // --- API auth token (see bps-panel.js) ---------------------------------
@@ -831,6 +832,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         function startTrackfunc(){
             stoptrackstat = false;
             pollTrackActive = true;
+            truthUI?.sync();
             tracePointsByDevice.clear(); // each session traces from its own start
             lastTracks.clear();
             focusedDevice = null;
@@ -846,6 +848,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (stoptrackstat) {
                     clearInterval(interval);
                     pollTrackActive = false;
+                    truthUI?.sync();
                     stoptrackstat = false;
                     lastTracks.clear();
                     focusedDevice = null;
@@ -2965,6 +2968,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // last tracked device is removed - that must not blank the record
             // you were looking at.
             if (follow) historyFollowDevice(activeDevice);
+            truthUI?.sync();
         }
 
         // Start/stop button visibility follows whether anything is tracked (but
@@ -6157,7 +6161,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // Save data
-    saveButton.addEventListener('click', async () => {
+    async function saveFloorPlan() {
         let saveresult = await savedata();
         if(saveresult){
             tmpfinalcords = finalcords;
@@ -6171,6 +6175,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             pollCalibration();
             if (!scannerLinkingLoading) loadScannerLinking();
         }
+        return saveresult;
+    }
+    saveButton.addEventListener('click', saveFloorPlan);
+    document.getElementById('gpsSaveAlignment')?.addEventListener('click', async event => {
+        const button = event.currentTarget;
+        if (button.disabled) return;
+        button.disabled = true;
+        try {await saveFloorPlan(); gpsUI?.refresh();}
+        finally {button.disabled = false;}
     });
 
     // =================================================================
@@ -6529,12 +6542,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         validate() {
             if (savebuttondiv.contains(saveButton)) throw new Error('Save Floor Plan before a known-position snapshot.');
         },
-        pick(done, cancelled) {
+        pick(done, cancelled, returnToDebugging = true) {
             if (!mapReady()) throw new Error('Open a saved floor map before picking the dog’s location.');
             if (savebuttondiv.contains(saveButton)) throw new Error('Save Floor Plan before picking the dog’s actual location.');
             if (anyLayoutToolActive() || adjustPreview || dragReceiverRef) throw new Error('Finish or cancel the map editing tool first.');
             cancelSnapshotMapPick(); panState = null; clickCandidate = null; clickDeviceCandidate = null; clickLinkCandidate = null;
-            const cleanup = () => {canvas.removeEventListener('click', pick); snapshotMapPick = null;};
+            if (historyBar) historyBar.style.display = 'none';
+            const cleanup = () => {
+                canvas.removeEventListener('click', pick); snapshotMapPick = null;
+                if (historyBar) historyBar.style.display = historyOn() ? '' : 'none';
+            };
             const pick = event => {
                 if (event.button !== undefined && event.button !== 0) return;
                 const floor = (finalcords.floor || []).find(f => sameFloorName(f.name, SelMapName));
@@ -6544,7 +6561,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const point = zoneMousePos(event);
                 cleanup(); snapshotMapMarker = {floor: floor.name, x_m: point.x / floor.scale, y_m: point.y / floor.scale};
                 done(snapshotMapMarker); redrawAll();
-                const debug = [...tabButtons].find(b => b.dataset.tab === 'debugging'); debug?.click();
+                if (returnToDebugging) {
+                    const debug = [...tabButtons].find(b => b.dataset.tab === 'debugging'); debug?.click();
+                }
             };
             snapshotMapPick = {cancel() {cleanup(); cancelled();}};
             canvas.addEventListener('click', pick);
@@ -7268,10 +7287,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // GPS uses the existing receiver placement/identity path; it only stages
     // map pixels after the user confirms a guarded preview.
+    function gpsEditorContext() {
+        return JSON.stringify([SelMapName, mapname.value, img.src, canvas.width, canvas.height,
+            currentFloor() && {...currentFloor(), receivers: (currentFloor().receivers || []).map(rec => JSON.parse(receiverPlacementSignature(rec)))}]);
+    }
     if (globalThis.BPSGPS) gpsUI = globalThis.BPSGPS.init({
         getFloor: currentFloor,
-        getContext: () => JSON.stringify([SelMapName, mapname.value, img.src, canvas.width, canvas.height,
-            currentFloor() && {...currentFloor(), receivers: (currentFloor().receivers || []).map(rec => JSON.parse(receiverPlacementSignature(rec)))}]),
+        getContext: gpsEditorContext,
         getBounds: () => ({width: canvas.width, height: canvas.height}),
         fetch: bpsFetch, redraw: () => {if (mapReady()) redrawAll();},
         stageChange: () => savebuttondiv.appendChild(saveButton),
@@ -7279,13 +7301,36 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!mapReady() || anyLayoutToolActive() || adjustPreview || dragReceiverRef) throw new Error('Open a floor and finish or cancel the map editing tool first.');
             cancelSnapshotMapPick(); panState = null; clickCandidate = null; clickDeviceCandidate = null; clickLinkCandidate = null;
             let owner;
-            const cleanup = () => {canvas.removeEventListener('click', pick); if (snapshotMapPick === owner) snapshotMapPick = null;};
+            if (historyBar) historyBar.style.display = 'none';
+            const cleanup = () => {
+                canvas.removeEventListener('click', pick);
+                if (snapshotMapPick === owner) snapshotMapPick = null;
+                if (historyBar) historyBar.style.display = historyOn() ? '' : 'none';
+            };
             const pick = event => {
                 if (event.button !== undefined && event.button !== 0) return;
                 const point = zoneMousePos(event); cleanup(); done(point);
+                [...tabButtons].find(b => b.dataset.tab === 'alignment')?.click();
             };
             owner = {cancel: cleanup}; snapshotMapPick = owner; canvas.addEventListener('click', pick);
+            [...tabButtons].find(b => b.dataset.tab === 'map')?.click();
+            bpsToast('Click the map point matching your GPS coordinates.');
             return cleanup;
+        },
+        surveyCanStart() {
+            if (savebuttondiv.contains(saveButton)) throw new Error('Save Floor Plan before starting the phone survey.');
+            if (!mapReady() || anyLayoutToolActive()) throw new Error('Open a saved map and finish the map editing tool first.');
+            return true;
+        },
+        surveySaved(candidate, response, uiContext) {
+            // Merge only the confirmed coordinate change; retain unrelated drafts.
+            if (uiContext !== gpsEditorContext()) throw new Error('Position saved; newer map edits were retained. Save or discard those edits, then reload the floor.');
+            const floor = (finalcords.floor || []).find(f => f.name === candidate.floor);
+            const rec = floor?.receivers?.find(r => r.entity_id === candidate.receiver);
+            if (!rec || !response.position) throw new Error('Position saved. Reload the floor to see the updated receiver.');
+            rec.cords = {...rec.cords, x: response.position.x, y: response.position.y};
+            gpsUI?.refresh();
+            if (mapReady()) redrawAll();
         },
         getTarget(value) {
             const floor = currentFloor();
@@ -7335,6 +7380,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         },
     });
 
+    if (globalThis.BPSGroundTruth) truthUI = globalThis.BPSGroundTruth.init(bpsFetch, {
+        getTarget: () => pollTrackActive ? activeDevice : null,
+        validate() {
+            snapshotLocationTools.validate();
+            if (!pollTrackActive) throw new Error('Start live tracking before marking an actual location.');
+            if (historyOn() && !historyState.live) throw new Error('Return the position history to Live before marking a location.');
+        },
+        pick: (done, cancelled) => snapshotLocationTools.pick(done, cancelled, false),
+        clearPoint: () => snapshotLocationTools.clearPoint(),
+        confirmClear: () => bpsConfirm('Clear every saved actual-location mark and its BLE snapshot?',
+            {confirmText: 'Clear marks', danger: true}),
+    });
     if (globalThis.BPSBermudaCalibration) globalThis.BPSBermudaCalibration.init(bpsFetch);
     if (globalThis.BPSDiagnostics) globalThis.BPSDiagnostics.init(bpsFetch, () => {
         const keys = ['outdoor_tracking', 'tracker_groups', 'tracker_height', 'tracker_heights', 'tracker_hardware',

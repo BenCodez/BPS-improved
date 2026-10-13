@@ -1,6 +1,6 @@
 # GPS map alignment and receiver placement
 
-Open **Map & Setup → GPS map alignment & receiver placement** on a saved floor.
+Select a saved floor in **Map & Setup**, then open the separate **Map alignment** tab.
 This optional tool aligns your existing property image with real coordinates.
 It uses no map tile service and changes no receiver calibration automatically.
 
@@ -19,8 +19,7 @@ It uses no map tile service and changes no receiver calibration automatically.
 4. For GPS captured from your phone, press **Load phone locations** and explicitly
    choose your own Companion App `device_tracker` or `person` entity, if desired.
    Leave **Browser only** to use this device's browser. Press **Capture stationary
-   GPS** while standing at the known anchor or receiver. This button is the only
-   action that requests browser location permission. Browser location generally
+   GPS** while standing at the known anchor or receiver. This button and the opt-in automatic survey request browser location permission. Browser location generally
    requires HTTPS and the phone/browser's location permission.
 5. Stay still for 30–60 seconds. Capture stops after 45 seconds, or you can press
    **Stop capture** after 30 seconds. A source must provide distinct fresh fixes
@@ -35,7 +34,7 @@ It uses no map tile service and changes no receiver calibration automatically.
    receiver position**, and inspect the cyan dot and accuracy circle. Press
    **Confirm receiver position** to stage the position. For a new station, press
    the receiver tool's **Save** to complete its normal identity checks.
-7. Press **Save Floor Plan** to persist anchors and staged receiver positions.
+7. Press **Save alignment** in this tab (or **Save Floor Plan** in Map & Setup) to persist anchors and staged receiver positions.
 
 Automatic source preference compares only the browser and your selected HA
 entity. HA freshness uses `last_updated`, which is the state publication time;
@@ -64,3 +63,36 @@ preview. Anchors persist in private Home Assistant `.storage` only when the
 floor plan is saved. Full local diagnostic downloads include saved/staged
 anchors and the chosen capture's source, age, sample count, reported accuracy
 and spread; inspect these private details before sharing a download.
+
+
+## Semi-automated receiver survey
+
+After saving at least two alignment anchors, open **Automatic phone receiver survey**.
+Load the phones, select your actual Bermuda BLE phone tracker, and optionally
+select your Companion App GPS entity. **Start auto survey** watches the browser
+GPS and the selected HA location source while this page remains open and visible.
+Walk to a receiver and hold the phone still nearby. Fresh Bermuda ranges of at
+most 1 metre identify the station; they are independent of GPS accuracy.
+
+BPS collects distinct GPS fixes for at least 30 seconds, averages the eligible
+stationary source and records the observed spread. It retains conservative GPS
+and map-anchor accuracy rather than claiming repeated samples guarantee 1 metre.
+Two simultaneously qualifying receivers are ambiguous in automatic mode. For co-located stations, select the intended placed receiver in the existing Receiver / anchor point menu before starting; only that station’s own fresh range can qualify it. Stale ranges, changed hardware identities, changed alignment or a
+capture interrupted by leaving the page do not qualify.
+
+Each candidate shows a proposed map position and accuracy circle. Review it and
+press **Verify and save** to update only that receiver's coordinates. Other saved
+settings and radio calibration are retained. Pending candidates remain in private
+Home Assistant storage so you can verify several stations after a walk.
+
+The optional **Request fresh phone GPS** toggle uses your explicitly selected
+Companion App notification service to send `request_location_update`, at most once
+per minute during the survey. Delivery is a request, not confirmation of a GPS
+fix. The phone must permit location access; background updates depend on its OS
+and Companion App permissions. Stop the survey when finished.
+
+For desktop alignment, **Pick map point** takes you to the map and returns to
+alignment after clicking. Enter each point's latitude and longitude separately, or paste a coordinate pair into Latitude;
+accuracy can be 0 for surveyed coordinates or an estimate such as 2 metres.
+Validation identifies the invalid field rather than reporting an accuracy error
+for invalid latitude/longitude.

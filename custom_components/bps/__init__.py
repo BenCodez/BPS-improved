@@ -62,6 +62,8 @@ from .tracker_groups import fuse_groups, normalize_groups, GROUP_MAX_SPEED_MS, G
 from .group_receiver_guard import receiver_constraints, constrain_group
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
+from .ground_truth import BPSGroundTruthAPI
+from .phone_survey import BPSPhoneSurveyAPI
 from .receiver_matching import inventory as receiver_inventory
 from .receiver_sources import ReceiverSources
 from .gps_locations import BPSGPSLocationsAPI, validate_georeference
@@ -2638,6 +2640,8 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSTrackerTuneAPI())
             hass.http.register_view(BPSHistoryAPI(hass))
             hass.http.register_view(BPSDiagnosticsAPI(_diagnostic_snapshot, _diagnostic_inventory, _diagnostic_report_snapshot))
+            hass.http.register_view(BPSGroundTruthAPI(_diagnostic_report_snapshot))
+            hass.http.register_view(BPSPhoneSurveyAPI(_diagnostic_snapshot, _diagnostic_inventory))
             hass.data["bps_views_registered"] = True
 
         config_path = hass.config.path()

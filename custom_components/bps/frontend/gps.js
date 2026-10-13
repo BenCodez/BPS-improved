@@ -8,6 +8,13 @@
     const median = xs => {const a = [...xs].sort((x, y) => x - y), m = Math.floor(a.length / 2);
         return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;};
     const radians = degrees => degrees * Math.PI / 180;
+    function parseCoordinates(text) {
+        if (typeof text !== 'string' || text.length > 100) return null;
+        const match = text.trim().match(/^([+-]?\d+(?:\.\d+)?)\s*[,;\s]\s*([+-]?\d+(?:\.\d+)?)$/);
+        if (!match) return null;
+        const p = {latitude: Number(match[1]), longitude: Number(match[2])};
+        return validGPS(p) ? p : null;
+    }
     function local(p, origin) {
         if (!validGPS(p) || !validGPS(origin)) throw new Error('Use finite latitude (−85 to 85) and longitude (−180 to 180).');
         const east = radians(((p.longitude - origin.longitude + 540) % 360) - 180) * EARTH_M * Math.cos(radians(origin.latitude));
@@ -126,6 +133,164 @@
         }, result: now => choose([...sources.values()], now), count: () => [...sources.values()].reduce((s, p) => s+p.length, 0)};
     }
 
+    function surveyController(hooks, environment = {}) {
+        const doc = environment.document || root.document, win = environment.window || root.window;
+        const geo = environment.geolocation || root.navigator?.geolocation;
+        const now = environment.now || (() => Date.now());
+        const later = environment.setTimeout || root.setTimeout, clear = environment.clearTimeout || root.clearTimeout;
+        const el = id => doc.getElementById(id);
+        if (!el('gpsSurveyStart')) return null;
+        let active = null, generation = 0, watch = null, timer = null, loading = null;
+        let candidates = [], samples = [], verifying = false;
+        const status = text => {el('gpsSurveyStatus').textContent = text;};
+        const signature = () => hooks.getContext();
+        const valid = g => g === generation && active && active.context === signature() && !doc.hidden;
+        const json = async (body, keepalive = false) => {
+            const response = await hooks.fetch('/api/bps/phone_survey', body ? {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body), keepalive} : undefined);
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || 'Phone survey is unavailable.');
+            return data;
+        };
+        function render() {
+            el('gpsSurveyStart').disabled = !!active; el('gpsSurveyStop').disabled = !active;
+            el('gpsSurveyCandidates').replaceChildren();
+            candidates.filter(c => c.floor === hooks.getFloor()?.name).forEach(c => {
+                const row = doc.createElement('div'), details = doc.createElement('p');
+                const gps = c.gps || {}, position = c.position || {};
+                details.textContent = `${c.receiver}: averaged ${gps.sample_count || 0} GPS fixes · reported accuracy ${Number(gps.reported_accuracy_m).toFixed(1)} m · spread ${Number(gps.spread_m).toFixed(1)} m · map uncertainty ${Number(c.map_accuracy_m).toFixed(1)} m · ${c.status === 'verified' ? 'verified and saved' : 'awaiting verification'}.`;
+                row.appendChild(details);
+                if (c.status !== 'verified') {
+                    const verify = doc.createElement('button'); verify.type = 'button';
+                    verify.className = 'bps-btn bps-btn-primary'; verify.textContent = `Verify and save ${c.receiver}`;
+                    verify.disabled = verifying;
+                    verify.addEventListener('click', async () => {
+                        if (verifying) return;
+                        const bounds = hooks.getBounds();
+                        if (!number(position.x, 0, bounds.width) || !number(position.y, 0, bounds.height)) {
+                            status('GPS candidate is outside the current map. Review saved anchors before verifying.'); return;
+                        }
+                        try {if (hooks.surveyCanStart?.() === false) {status('Save or discard floor edits before verifying a candidate.'); return;}}
+                        catch (error) {status(error.message); return;}
+                        verifying = true; render();
+                        const capturedUIContext = hooks.getContext();
+                        // Stop collection before committing a saved map change.
+                        stop('Verifying receiver position.');
+                        try {
+                            const result = await json({action: 'verify', candidate_id: c.id});
+                            candidates = candidates.map(row => row.id === c.id ? result.candidate : row);
+                            await hooks.surveySaved?.(result.candidate, result, capturedUIContext);
+                            status(result.warning || `${c.receiver} position verified and saved.`);
+                        } catch (error) {status(error.message);}
+                        finally {verifying = false; render(); hooks.redraw();}
+                    }); row.appendChild(verify);
+                    const remove = doc.createElement('button'); remove.type = 'button'; remove.textContent = 'Discard candidate';
+                    remove.className = 'bps-btn bps-btn-outline';
+                    remove.addEventListener('click', async () => {
+                        try {await json({action: 'remove', candidate_id: c.id}); candidates = candidates.filter(row => row.id !== c.id); render();}
+                        catch (error) {status(error.message);}
+                    }); row.appendChild(remove);
+                    details.textContent += ` Proposed map position ${Number(position.x).toFixed(1)}, ${Number(position.y).toFixed(1)} px. Check it against the real receiver before verifying.`;
+                }
+                el('gpsSurveyCandidates').appendChild(row);
+            });
+        }
+        function stop(reason = 'Auto survey stopped. Saved candidates remain available for verification.') {
+            const token = active?.session;
+            generation++; active = null; samples = [];
+            if (watch !== null) geo?.clearWatch(watch);
+            if (timer !== null) clear(timer);
+            watch = timer = null;
+            if (token) json({action: 'stop', session: token}, true).catch(() => {});
+            status(reason); render();
+        }
+        function selectRows(id, rows, blankText) {
+            const select = el(id), selected = select.value; select.replaceChildren();
+            const blank = doc.createElement('option'); blank.value = ''; blank.textContent = blankText; select.appendChild(blank);
+            rows.forEach(r => {if (typeof r.key !== 'string') return; const option = doc.createElement('option');
+                option.value = r.key; option.textContent = r.name || r.key; select.appendChild(option);});
+            if (rows.some(r => r.key === selected)) select.value = selected;
+            else select.value = '';
+        }
+        async function load() {
+            if (loading) return loading;
+            loading = (async () => {
+                try {const data = await json(); selectRows('gpsSurveyPhone', data.trackers || [], 'Select your BLE phone tracker');
+                    selectRows('gpsSurveyNotify', data.notify_services || [], 'Select your phone Mobile App service');
+                    candidates = Array.isArray(data.candidates) ? data.candidates.slice(0, 32) : []; render(); hooks.redraw();}
+                catch (error) {status(error.message);}
+                finally {loading = null;}
+            })();
+            return loading;
+        }
+        async function poll(g) {
+            if (!valid(g)) {if (active) stop('Floor changed or page hidden. Auto survey stopped.'); return;}
+            try {
+                const batch = samples.filter(p => observation(p, 'browser', now()));
+                const data = await json({action: 'poll', session: active.session, browser_samples: batch});
+                if (!valid(g)) return;
+                if (data.candidate) {candidates = candidates.filter(c => !(c.floor === data.candidate.floor && c.receiver === data.candidate.receiver && c.phone === data.candidate.phone)); candidates.push(data.candidate); render(); hooks.redraw();}
+                let text = data.status || 'Auto survey active.';
+                if (data.capturing) text += ` ${Math.floor(data.elapsed_s)} s · ${data.sample_count} distinct fixes.`;
+                if (data.gps_request?.status === 'requested') text += ' Phone GPS update requested; response is not yet known.';
+                if (data.gps_request?.status === 'request_failed') text += ' Phone GPS request failed; capture can use browser GPS.';
+                status(text);
+            } catch (error) {if (valid(g)) {stop(error.message); return;}}
+            if (valid(g)) timer = later(() => {timer = null; poll(g);}, 2000);
+        }
+        async function start() {
+            if (active || doc.hidden) return;
+            try {if (!hooks.getFloor() || hooks.surveyCanStart?.() === false) {status('Save or discard floor edits, including anchors, before starting auto survey.'); return;}}
+            catch (error) {status(error.message); return;}
+            const phone = el('gpsSurveyPhone').value;
+            if (!phone) {status('Select your own Bermuda BLE phone tracker first.'); return;}
+            hooks.surveyStarting?.();
+            const g = ++generation, ctx = signature(), name = hooks.getFloor().name;
+            // Reserve the local operation before awaiting start to prevent
+            // double-clicks or an old start response reviving a stopped survey.
+            active = {session: null, context: ctx}; samples = []; render();
+            try {
+                const result = await json({action: 'start', floor: name, phone,
+                    gps_entity: el('gpsPhone').value || '', browser_time_ms: now(),
+                    receiver: el('gpsReceiver').value !== '' && el('gpsReceiver').value !== 'draft'
+                        ? hooks.getFloor().receivers?.[Number(el('gpsReceiver').value)]?.entity_id || '' : '',
+                    request_gps: !!el('gpsSurveyRequestGPS').checked, notify_service: el('gpsSurveyNotify').value || ''});
+                if (!valid(g)) {json({action: 'stop', session: result.session}, true).catch(() => {}); return;}
+                active.session = result.session;
+                if (geo) {
+                    try {watch = geo.watchPosition(position => {
+                        if (!valid(g)) return;
+                        const p = observation({latitude: position.coords.latitude, longitude: position.coords.longitude,
+                            accuracy_m: position.coords.accuracy, timestamp: position.timestamp}, 'browser', now());
+                        if (p && !samples.some(s => s.timestamp === p.timestamp)) {
+                            samples = samples.filter(s => now()-s.timestamp <= MAX_AGE_MS); samples.push(p);
+                            samples = samples.slice(-MAX_SAMPLES);
+                        }
+                    }, () => {if (valid(g)) status('Browser GPS unavailable. Selected HA phone location may still supply fixes.');},
+                    {enableHighAccuracy: true, maximumAge: 0, timeout: 15000});}
+                    catch {status('Browser GPS unavailable. Selected HA location may still supply fixes.');}
+                }
+                await poll(g);
+            } catch (error) {if (valid(g)) stop(error.message);}
+        }
+        el('gpsSurveyRefresh').addEventListener('click', load);
+        el('gpsSurveyStart').addEventListener('click', start);
+        el('gpsSurveyStop').addEventListener('click', () => stop());
+        ['gpsSurveyPhone', 'gpsPhone', 'gpsReceiver', 'gpsSurveyNotify', 'gpsSurveyRequestGPS'].forEach(id =>
+            el(id).addEventListener('change', () => {if (id === 'gpsPhone') hooks.surveySourceChanged?.();
+                if (active) stop('Phone source, selected receiver or GPS request option changed. Start auto survey again.');}));
+        doc.addEventListener?.('visibilitychange', () => {if (doc.hidden && active) stop('Page hidden. Auto survey stopped.');});
+        win.addEventListener('pagehide', () => stop()); win.addEventListener('beforeunload', () => stop());
+        status('Auto survey is off. Averaged GPS candidates require verification before a receiver moves.'); render();
+        return {load, stop, refresh() {if (active && active.context !== signature()) stop('Floor or layout changed. Auto survey stopped.'); render();},
+            draw(ctx, zoom = 1) {for (const c of candidates) {
+                if (c.floor !== hooks.getFloor()?.name || c.status === 'verified') continue;
+                const p = c.position; if (!p || !number(p.x, 0, 1e6) || !number(p.y, 0, 1e6)) continue;
+                ctx.save(); ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2/zoom;
+                ctx.beginPath(); ctx.arc(p.x, p.y, 8/zoom, 0, Math.PI*2); ctx.stroke(); ctx.restore();
+            }}, snapshot: () => ({active: !!active, candidate_count: candidates.length, status: el('gpsSurveyStatus').textContent})};
+    }
+
     function init(hooks, environment = {}) {
         const doc = environment.document || root.document, win = environment.window || root.window;
         const geo = environment.geolocation || root.navigator?.geolocation;
@@ -138,6 +303,8 @@
         let watch = null, timer = null, poll = null, picked = null, lastContext = null, lastChosen = null;
         let message = 'GPS is optional. Align the map with at least two known points.';
         let locationsRequest = 0;
+        let locationsFlight = null;
+        let survey = null;
         const status = text => {message = text; el('gpsStatus').textContent = text;};
         const context = () => hooks.getContext();
         const guard = () => ({floor: hooks.getFloor(), context: context(), generation});
@@ -149,6 +316,7 @@
             watch = timer = poll = null;
         }
         function cancel(reason = 'GPS capture cancelled.') {
+            survey?.stop();
             generation++; release(); capture = null; fix = preview = anchorPoint = anchorGuard = null;
             picked?.(); picked = null;
             el('gpsCapture').disabled = false; el('gpsStop').disabled = true;
@@ -196,9 +364,14 @@
             });
             const draft = doc.createElement('option'); draft.value = 'draft'; draft.textContent = 'Current Place Receiver picker'; el('gpsReceiver').appendChild(draft);
             if ([...el('gpsReceiver').options].some(o => o.value === previous)) el('gpsReceiver').value = previous;
-            fitStatus(); updateButtons();
+            fitStatus(); updateButtons(); survey?.refresh();
         }
-        async function loadLocations(g = null) {
+        function loadLocations(g = null) {
+            if (locationsFlight) return locationsFlight;
+            locationsFlight = readLocations(g).finally(() => {locationsFlight = null;});
+            return locationsFlight;
+        }
+        async function readLocations(g = null) {
             const requestId = ++locationsRequest;
             const requestedAt = now();
             try {
@@ -281,7 +454,9 @@
             if (!hooks.getFloor()) {status('Select a saved floor first.'); return;}
             try {
                 picked?.(); let g;
-                picked = hooks.pickMapPoint(point => {picked = null; if (current(g)) setAnchor(point);});
+                picked = hooks.pickMapPoint(point => {picked = null;
+                    if (current(g)) {setAnchor(point); status('Map point selected. Enter its latitude, longitude and accuracy, then add the anchor.');}
+                    else status('Floor or layout changed while selecting the point. Select its map point again.');});
                 g = guard();
                 status('Click a known point on the map.');
             } catch (error) {status(error.message);}
@@ -298,16 +473,25 @@
         el('gpsAddAnchor').addEventListener('click', () => {
             try {
                 if (!anchorPoint || !current(anchorGuard)) throw new Error('Select a known map point first.');
-                const input = id => {const e = el(id); if (e.value.trim() === '' || e.validity?.badInput) throw new Error('Enter GPS latitude, longitude and accuracy.'); return Number(e.value);};
-                const anchor = {...anchorPoint, latitude: input('gpsLatitude'), longitude: input('gpsLongitude'),
-                    accuracy_m: input('gpsAccuracy'), label: el('gpsAnchorLabel').value.trim().slice(0, 80)};
-                if (!validGPS(anchor) || !number(anchor.accuracy_m, 0, 1000)) throw new Error('Enter valid GPS and accuracy between 0 and 1000 metres.');
+                const input = (id, label, min, max) => {const e = el(id);
+                    if (e.value.trim() === '' || e.validity?.badInput) throw new Error(`Enter GPS ${label}.`);
+                    const value = Number(e.value);
+                    if (!number(value, min, max)) throw new Error(`Enter valid GPS ${label} between ${min} and ${max}.`);
+                    return value;};
+                const anchor = {...anchorPoint, latitude: input('gpsLatitude', 'latitude', -85, 85), longitude: input('gpsLongitude', 'longitude', -180, 180),
+                    accuracy_m: input('gpsAccuracy', 'accuracy in metres', 0, 1000), label: el('gpsAnchorLabel').value.trim().slice(0, 80)};
                 const floor = hooks.getFloor(), anchors = [...(floor.georeference?.anchors || []), anchor];
                 if (anchors.length > MAX_ANCHORS) throw new Error('Use at most 12 anchors.');
                 if (anchors.length >= 2) fit(anchors);
                 floor.georeference = {version: 1, anchors}; lastContext = context(); hooks.stageChange();
                 cancel('GPS anchor staged. Save Floor Plan to persist.'); refresh();
             } catch (error) {status(error.message);}
+        });
+        el('gpsLatitude').addEventListener('paste', event => {
+            const point = parseCoordinates(event.clipboardData?.getData('text'));
+            if (!point) return;
+            event.preventDefault(); el('gpsLatitude').value = String(point.latitude); el('gpsLongitude').value = String(point.longitude);
+            status('Latitude and longitude filled. Enter anchor accuracy, then add the anchor.');
         });
         el('gpsPreview').addEventListener('click', () => {
             try {
@@ -334,22 +518,26 @@
         el('gpsRefreshPhones').addEventListener('click', () => loadLocations());
         el('gpsCapture').addEventListener('click', start); el('gpsStop').addEventListener('click', stop);
         el('gpsCancel').addEventListener('click', () => cancel());
-        win.addEventListener('pagehide', () => cancel()); win.addEventListener('beforeunload', release);
+        survey = surveyController({...hooks, surveyStarting: () => cancel('Starting auto survey.'),
+            surveySourceChanged: () => cancel('Phone source changed. Capture again.')}, environment);
+        win.addEventListener('pagehide', () => cancel()); win.addEventListener('beforeunload', () => {release(); survey?.stop();});
         refresh();
         return {refresh, cancel, draw(ctx, zoom = 1) {
+            survey?.draw(ctx, zoom);
             if (!preview || !current(preview.guard)) return;
             ctx.save(); ctx.strokeStyle = '#06b6d4'; ctx.fillStyle = 'rgba(6,182,212,0.12)'; ctx.lineWidth = 2/zoom;
             ctx.beginPath(); ctx.arc(preview.x, preview.y, preview.radius_px, 0, Math.PI*2); ctx.fill(); ctx.stroke();
             ctx.fillStyle = '#06b6d4'; ctx.beginPath(); ctx.arc(preview.x, preview.y, 5/zoom, 0, Math.PI*2); ctx.fill(); ctx.restore();
         }, snapshot() {
-            if (!lastChosen) return {active: !!capture, status: message};
+            if (!lastChosen) return {active: !!capture, status: message, auto_survey: survey?.snapshot()};
             return {active: !!capture, status: message, usable_for_placement: !!fix && current(fix.guard) && now()-fix.timestamp <= MAX_AGE_MS,
                 chosen_gps: {...lastChosen, age_s: (now()-lastChosen.timestamp)/1000,
                 stale: now()-lastChosen.timestamp > MAX_AGE_MS},
-                preview: preview ? {x: preview.x, y: preview.y, accuracy_m: preview.accuracy_m, receiver: preview.target.label} : null};
+                preview: preview ? {x: preview.x, y: preview.y, accuracy_m: preview.accuracy_m, receiver: preview.target.label} : null,
+                auto_survey: survey?.snapshot()};
         }};
     }
-    const api = {fit, local, fromLocal, project, observation, summarize, choose, collector, init};
+    const api = {fit, local, fromLocal, project, observation, summarize, choose, collector, parseCoordinates, surveyController, init};
     root.BPSGPS = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

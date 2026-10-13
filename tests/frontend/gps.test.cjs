@@ -117,7 +117,7 @@ function ui() {
         const events = new Map();
         return {value: '', children: [], disabled: false, validity: {}, textContent: '',
             get options() {return this.children;}, appendChild(e) {this.children.push(e);}, replaceChildren(...rows) {this.children = rows;},
-            addEventListener(name, f) {events.set(name, f);}, fire(name) {return events.get(name)?.();}};
+            addEventListener(name, f) {events.set(name, f);}, fire(name, event) {return events.get(name)?.(event);}};
     }
     const document = {getElementById(id) {if (!ids.has(id)) ids.set(id, element()); return ids.get(id);}, createElement: element};
     document.getElementById('gpsPhone').value = '';
@@ -142,7 +142,7 @@ function ui() {
         clock: ms => {clock += ms;}, currentTime: () => clock, tick: async () => {for (const cb of [...intervals.values()]) await cb();},
         replaceFloor: () => {floor = {...floor, name: 'Other synthetic floor'};}, editFloor: () => {floor.receivers[0].cords.x += 1;},
         changeTarget: () => {targetRevision++;}, point: p => pointCallback?.(p), unload: () => windowEvents.get('pagehide')(),
-        response: rows => {response = {locations: rows};}, defer: promise => {deferred = promise;}};
+        response: rows => {response = {locations: rows};}, defer: promise => {deferred = promise;}, floor: () => floor};
 }
 
 test('browser permissions start only on explicit capture and stop clears watches/timers', () => {
@@ -223,4 +223,42 @@ test('manual anchor staging is bounded and independent of floor scale/receiver p
     p.click('gpsAddAnchor'); assert.match(p.el('gpsStatus').textContent, /staged/); assert.equal(p.staged.length, 0);
     p.click('gpsPickPoint'); p.point({x: 20, y: 20}); p.el('gpsLatitude').value = ''; p.click('gpsAddAnchor');
     assert.match(p.el('gpsStatus').textContent, /Enter GPS/);
+});
+
+for (const accuracy of [0, 2]) test(`desktop map-point picker accepts anchor accuracy ${accuracy}`, () => {
+    const p = ui(), location = at(10, 10);
+    p.click('gpsPickPoint'); p.point({x: 400, y: 350});
+    assert.match(p.el('gpsMapPoint').textContent, /400.0, 350.0/);
+    p.el('gpsLatitude').value = String(location.latitude); p.el('gpsLongitude').value = String(location.longitude);
+    p.el('gpsAccuracy').value = String(accuracy); p.el('gpsAnchorLabel').value = 'Synthetic measured corner';
+    p.click('gpsAddAnchor');
+    assert.match(p.el('gpsStatus').textContent, /anchor staged/);
+    assert.equal(p.floor().georeference.anchors.length, 4);
+    assert.equal(p.floor().georeference.anchors[3].accuracy_m, accuracy);
+    assert.deepEqual(p.floor().receivers[0].cords, {x: 100, y: 100});
+});
+
+test('desktop anchor errors identify the invalid coordinate field rather than blaming valid accuracy', () => {
+    const p = ui(); p.click('gpsPickPoint'); p.point({x: 400, y: 350});
+    p.el('gpsLatitude').value = '100'; p.el('gpsLongitude').value = '20'; p.el('gpsAccuracy').value = '2';
+    p.click('gpsAddAnchor'); assert.match(p.el('gpsStatus').textContent, /latitude between -85 and 85/);
+    p.el('gpsLatitude').value = '10'; p.el('gpsLongitude').value = '200';
+    p.click('gpsAddAnchor'); assert.match(p.el('gpsStatus').textContent, /longitude between -180 and 180/);
+    p.el('gpsLongitude').value = '20'; p.el('gpsAccuracy').value = '-1';
+    p.click('gpsAddAnchor'); assert.match(p.el('gpsStatus').textContent, /accuracy in metres between 0 and 1000/);
+});
+
+test('desktop coordinate-pair paste fills latitude and longitude safely', () => {
+    const p = ui(); let prevented = false;
+    p.el('gpsLatitude').fire('paste', {clipboardData: {getData: () => '10.12345, -20.54321'}, preventDefault: () => {prevented = true;}});
+    assert.equal(prevented, true); assert.equal(p.el('gpsLatitude').value, '10.12345'); assert.equal(p.el('gpsLongitude').value, '-20.54321');
+    assert.equal(gps.parseCoordinates('javascript:alert(1)'), null); assert.equal(gps.parseCoordinates('100, 20'), null);
+});
+
+test('manual HA polling remains single-flight while an earlier GPS response is pending', async () => {
+    const p = ui(); let resolve; p.el('gpsPhone').value = 'device_tracker.synthetic_phone';
+    p.defer(new Promise(r => {resolve = r;})); p.click('gpsCapture');
+    await p.tick(); await p.tick(); assert.equal(p.requests.length, 1);
+    resolve({ok: true, json: async () => ({locations: []})}); await new Promise(r => setImmediate(r));
+    p.click('gpsCancel'); assert.equal(p.intervals.size, 0);
 });
