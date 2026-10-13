@@ -9,6 +9,10 @@ maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hog
 
 Quick list of changes in this fork:
 
+- Optional [GPS map alignment and receiver placement](docs/gps-map-setup.md)
+  uses known property anchors and stationary browser/selected phone observations,
+  with explicit preview, conservative accuracy and normal floor-plan saving.
+
 - A known-position snapshot captures all current BLE diagnostics while marking
   where a dog actually is. Group markers compare both member beacons and the
   group, rank current range disagreements, and report stale/missing readings,

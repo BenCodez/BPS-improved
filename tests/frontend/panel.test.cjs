@@ -6,10 +6,11 @@ const vm = require('node:vm');
 const directory = join(__dirname, '../../custom_components/bps/frontend');
 const plain = x => JSON.parse(JSON.stringify(x));
 
-async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false, matching = null) {
+async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false, matching = null, gpsEnabled = false) {
     const ids = new Map(), listeners = new Map(), requests = [], intervals = [], canvasCalls = [];
     const network = {cords: [], cordsStatus: 200, failCords: false, calibration: {}, matching, matchingRequest: null};
     let clock = Date.now();
+    const gpsWatchers = new Map(); let gpsWatchId = 0;
     class ClockDate extends Date {static now() {return clock;}}
     const context = new Proxy({}, {get: (obj, key) => key === 'setLineDash' ? dash => canvasCalls.push(['dash', ...dash])
         : ['beginPath', 'moveTo', 'lineTo', 'closePath', 'fill', 'stroke'].includes(key) ? (...args) => canvasCalls.push([key, ...args, ...(key === 'stroke' ? [obj.strokeStyle, obj.lineWidth] : [])])
@@ -46,6 +47,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     const window = {location: {origin: 'https://home.test'}, scrollX: 0, scrollY: 0, innerHeight: 1000,
         addEventListener: (name, cb) => listeners.set(`window:${name}`, cb)}; window.parent = window;
     const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date: ClockDate, URL, FormData, Response, TextEncoder,
+        navigator: {geolocation: {watchPosition(done) {gpsWatchers.set(++gpsWatchId, done); return gpsWatchId;}, clearWatch(id) {gpsWatchers.delete(id);}}},
         Image: class {constructor() {this.naturalWidth = iconsLoaded ? 24 : 0; this.complete = iconsLoaded;}}, setTimeout: () => 1, clearTimeout() {}, setInterval: (cb, ms) => {intervals.push({cb, ms}); return intervals.length;}, clearInterval() {},
         requestAnimationFrame: () => 1, localStorage: {getItem: () => null, setItem() {}},
         fetch: async (url, options) => {
@@ -63,12 +65,13 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         }});
     vm.runInContext(readFileSync(join(directory, 'outdoor.js'), 'utf8'), sandbox);
     vm.runInContext(readFileSync(join(directory, 'diagnostics.js'), 'utf8'), sandbox);
+    if (gpsEnabled) vm.runInContext(readFileSync(join(directory, 'gps.js'), 'utf8'), sandbox);
     // Expose closures only in the VM so production keeps its private state.
     const code = readFileSync(join(directory, 'script.js'), 'utf8').replace('    // With a single configured floor', `
         globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons, redrawAll,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
-            tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt, addDeviceButton, saveReceiver,
+            gps: () => gpsUI, tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt, addDeviceButton, saveReceiver,
             setCalibration: results => {calibLastResults=results;},
             zoom: value => {view.zoom=value;}, receiverIconSize, hitReceiverAt, tintCache: () => beaconTintCache};
     // With a single configured floor`);
@@ -78,7 +81,8 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     await ready;
     await new Promise(resolve => setImmediate(resolve));
     return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests, intervals, canvasCalls, network, document, listeners,
-        setClock: now => {clock = now;}};
+        setClock: now => {clock = now;}, clock: () => clock, gpsWatchers,
+        emitGPS: (coordinates, accuracy = 1) => {for (const callback of gpsWatchers.values()) callback({coords: {...coordinates, accuracy}, timestamp: clock});}};
 }
 const layout = () => ({floor: [{name: 'Property', scale: 20, zones: [], receivers: []}]});
 const points = [{x: 100, y: 100}, {x: 200, y: 100}, {x: 200, y: 200}, {x: 100, y: 200}];
@@ -1506,4 +1510,56 @@ test('Place Receiver inventory failures preserve the draft and a fresh retry can
         await p.el('saveToolBtn').fire('click');
         assert.equal(p.hooks.layout().floor[0].receivers[0].height, 2);
     }
+});
+
+function gpsFixture() {
+    const geo = require('../../custom_components/bps/frontend/gps.js');
+    const origin = {latitude: 10, longitude: 20};
+    const at = (x, y) => geo.fromLocal({x, y}, origin);
+    const source = layout(); source.floor[0].georeference = {version: 1, anchors:
+        [[0, 0], [30, 0], [0, 30]].map(([x, y]) => ({...at(x, y), x: 200+x*20, y: 150+y*20, accuracy_m: 1, label: 'Synthetic anchor'}))};
+    return {source, at};
+}
+async function capturePanelGPS(p, fix) {
+    await p.el('gpsCapture').fire('click'); p.emitGPS(fix);
+    p.setClock(p.clock()+30000); p.emitGPS(fix); await p.el('gpsStop').fire('click');
+}
+test('GPS integration stages existing receiver only on confirmation and Save persists anchors without calibration/scale changes', async () => {
+    const {source, at} = gpsFixture(); source.floor[0].receivers = [{entity_id: 'synthetic_station', cords: {x: 10, y: 20}, correction: 1.25, height: 2}];
+    const p = await panel(source, [], false, null, true); p.hooks.select('Property'); p.hooks.gps().refresh();
+    assert.equal(p.gpsWatchers.size, 0); await capturePanelGPS(p, at(5, 5));
+    p.el('gpsReceiver').value = '0'; await p.el('gpsPreview').fire('click');
+    assert.equal(p.hooks.layout().floor[0].receivers[0].cords.x, 10);
+    assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    await p.el('gpsConfirm').fire('click');
+    const receiver = p.hooks.layout().floor[0].receivers[0];
+    assert.ok(Math.abs(receiver.cords.x-300) < 1e-6); assert.ok(Math.abs(receiver.cords.y-250) < 1e-6);
+    assert.equal(receiver.correction, 1.25); assert.equal(receiver.height, 2); assert.equal(p.hooks.layout().floor[0].scale, 20);
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].georeference, source.floor[0].georeference);
+    assert.equal(saved.floor[0].scale, 20); assert.equal(saved.floor[0].receivers[0].correction, 1.25);
+});
+test('GPS new receiver staging shares existing picker validation and never bypasses fresh identity binding', async () => {
+    const {source, at} = gpsFixture(); const p = await panel(source, [], false, matchingFixture(), true);
+    await beginPlacement(p); p.hooks.gps().refresh(); await capturePanelGPS(p, at(5, 5));
+    p.el('gpsReceiver').value = 'draft'; await p.el('gpsPreview').fire('click'); await p.el('gpsConfirm').fire('click');
+    assert.equal(p.hooks.layout().floor[0].receivers.length, 0, 'GPS stages the existing picker marker only');
+    assert.equal(p.el('receiverName').value, 'workshop_112233');
+    await p.el('saveToolBtn').fire('click');
+    const receiver = p.hooks.layout().floor[0].receivers[0];
+    assert.ok(Math.abs(receiver.cords.x-300) < 1e-6); assert.ok(Math.abs(receiver.cords.y-250) < 1e-6);
+    assert.equal(receiver.scanner_mac, matchingFixture().options[0].scanner_mac);
+    assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+});
+test('GPS preview refuses deleted/replaced receiver and changed picker inputs', async () => {
+    const {source, at} = gpsFixture(); source.floor[0].receivers = [{entity_id: 'synthetic_station', cords: {x: 10, y: 20}}];
+    const p = await panel(source, [], false, matchingFixture(), true); p.hooks.select('Property'); p.hooks.gps().refresh();
+    await capturePanelGPS(p, at(5, 5)); p.el('gpsReceiver').value = '0'; await p.el('gpsPreview').fire('click');
+    p.hooks.layout().floor[0].receivers[0] = plain(p.hooks.layout().floor[0].receivers[0]);
+    await p.el('gpsConfirm').fire('click'); assert.equal(p.hooks.layout().floor[0].receivers[0].cords.x, 10);
+    await beginPlacement(p); p.hooks.gps().refresh(); await capturePanelGPS(p, at(5, 5));
+    p.el('gpsReceiver').value = 'draft'; await p.el('gpsPreview').fire('click'); p.el('receiverName').value = 'atrium_445566';
+    await p.el('gpsConfirm').fire('click'); assert.match(p.el('gpsStatus').textContent, /changed/);
+    await p.el('saveToolBtn').fire('click'); assert.equal(p.hooks.layout().floor[0].receivers[1].cords.x, 400);
 });

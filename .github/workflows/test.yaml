@@ -37,5 +37,6 @@ jobs:
           node --check custom_components/bps/frontend/bps-map-card.js
           node --check custom_components/bps/frontend/outdoor.js
           node --check custom_components/bps/frontend/diagnostics.js
+          node --check custom_components/bps/frontend/gps.js
       - name: Run frontend tests
         run: node --test tests/frontend/*.test.cjs

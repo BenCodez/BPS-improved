@@ -57,6 +57,7 @@ class BpsPanel extends HTMLElement {
     const iframe = document.createElement("iframe");
     iframe.src = "/bps/index.html";
     iframe.setAttribute("title", "BPS");
+    iframe.setAttribute("allow", "geolocation 'self'");
     iframe.style.border = "0";
     iframe.style.width = "100%";
     iframe.style.height = "100%";

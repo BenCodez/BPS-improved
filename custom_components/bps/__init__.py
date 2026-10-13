@@ -63,6 +63,7 @@ from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
 from .receiver_matching import inventory as receiver_inventory
 from .receiver_sources import ReceiverSources
+from .gps_locations import BPSGPSLocationsAPI, validate_georeference
 from . import bermuda_diagnostics
 from . import recent_tracking
 
@@ -2529,6 +2530,7 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSAdjustZonesAPI())
             hass.http.register_view(BPSReceiverStatusAPI())
             hass.http.register_view(BPSScannerLinkingAPI())
+            hass.http.register_view(BPSGPSLocationsAPI())
             hass.http.register_view(BPSCordsAPI(hass))
             hass.http.register_view(BPSCalibrationAPI(_calibration_tracking_check))
             hass.http.register_view(BPSSelfTestAPI(hass))
@@ -2832,7 +2834,7 @@ class BPSSaveAPIText(HomeAssistantView):
             # edited placements so a re-linked/added receiver starts matching
             # on the next dump instead of after the next window/solve cycle.
             refresh_receivers_from_coords(hass, coordinates)
-            _LOGGER.info(f"Saved coordinates to bpsdata: {coordinates}")
+            _LOGGER.info("Saved BPS floor layout")
             return web.Response(status=200, text="Coordinates saved successfully")
 
         except Exception as e:
@@ -2850,6 +2852,9 @@ class BPSSaveAPIText(HomeAssistantView):
         write+delete). The layout goes to the Store (atomic); only the map
         images live under maps_path.
         """
+        error = await hass.async_add_executor_job(validate_georeference, coords_obj)
+        if error:
+            return web.Response(status=400, text=error)
         error = await hass.async_add_executor_job(validate_outdoor_layout, coords_obj)
         if error:
             return web.Response(status=400, text=error)
@@ -3104,7 +3109,7 @@ def _diagnostic_snapshot(hass, targets, now):
         "target_members": members, "defaults": {"tracker_height_m": TRACKER_HEIGHT_M,
         "reading_max_age_s": READING_MAX_AGE_SECS, "position_timeout_s": STALE_POSITION_SECS}}
     context["layout"]["floor"] = [{key: copy.deepcopy(floor[key]) for key in (
-        "name", "scale", "receivers", "zones", "subzones", "environment") if key in floor} for floor in floors]
+        "name", "scale", "receivers", "zones", "subzones", "environment", "georeference") if key in floor} for floor in floors]
     cal = hass.data.get(DOMAIN, {}).get("calibration", {})
     context["calibration"] = {key: copy.deepcopy(cal.get(key)) for key in (
         "mode", "floor", "results", "applied", "last_solved_at")}
