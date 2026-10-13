@@ -101,6 +101,7 @@
             }
         }
         let status = {active: false, available: false}, timer = null, busy = false, cancelPick = null, cancelRecordingPick = null;
+        const idleWaiters = [];
         function invalidateSnapshotLocation(clearCoordinates) {
             if (cancelPick) {cancelPick(); cancelPick = null;}
             if (clearCoordinates) {
@@ -165,7 +166,7 @@
             if (busy) return;
             busy = true; controls();
             try {await action();} catch (error) {el('Status').textContent = error.message;}
-            finally {busy = false; controls();}
+            finally {busy = false; controls(); idleWaiters.splice(0).forEach(resolve => resolve());}
         }
         el('Refresh').addEventListener('click', () => run(refresh));
         if (el('SnapshotCapture')) {
@@ -220,8 +221,11 @@
             const target = el('Target').value;
             try {
                 if (!locationTools.pick) throw new Error('Map picking is unavailable. Open a saved floor map first.');
-                cancelRecordingPick = locationTools.pick(point => {
+                cancelRecordingPick = locationTools.pick(async point => {
                     cancelRecordingPick = null;
+                    // A map click remains available during the periodic status
+                    // refresh. Preserve that annotation until the request ends.
+                    if (busy) await new Promise(resolve => idleWaiters.push(resolve));
                     if (!status.active || el('Target').value !== target) {locationTools.clearPoint?.(); return;}
                     el('Floor').value = point.floor;
                     el('X').value = point.x_m.toFixed(3); el('Y').value = point.y_m.toFixed(3);

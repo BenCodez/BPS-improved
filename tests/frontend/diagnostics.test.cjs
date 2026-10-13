@@ -178,6 +178,22 @@ test('recording map click annotates directly and clear removes the dot', async (
     assert.equal(JSON.parse(p.requests.at(-1).options.body).kind, 'clear_position');
 });
 
+test('map annotation waits for an in-flight recording refresh and rechecks recording state', async () => {
+    for (const remainsActive of [true, false]) {
+        let done, release;
+        const p = panel(undefined, {pick(callback) {done=callback; return () => {};}});
+        await p.el('Refresh').fire(); await p.el('Start').fire(); await p.el('Pick').fire();
+        p.network.pending=new Promise(resolve=>{release=resolve;});
+        p.timers.values().next().value.cb();
+        const action=done({floor:'Yard',x_m:4,y_m:5});
+        assert.equal(p.requests.filter(r=>r.options&&JSON.parse(r.options.body).action==='annotate').length,0);
+        p.network.status.active=remainsActive; p.network.pending=null; release(); await action;
+        const annotations=p.requests.filter(r=>r.options&&JSON.parse(r.options.body).action==='annotate');
+        assert.equal(annotations.length,remainsActive?1:0);
+        if(remainsActive) assert.equal(JSON.parse(annotations[0].options.body).x_m,4);
+    }
+});
+
 test('stopping or failed map selection never records a false known position', async () => {
     let callback, cancellations = 0;
     const p = panel(undefined, {pick(done, cancel) {callback = done; return () => {cancellations++; cancel();};}});
