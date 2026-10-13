@@ -1,10 +1,10 @@
 {
     "domain": "bps",
     "name": "BLE Positioning System",
-    "codeowners": ["@maxi1134"],
+    "codeowners": ["@BenCodez", "@maxi1134"],
     "config_flow": true,
     "dependencies": ["http", "panel_custom"],
-    "documentation": "https://github.com/maxi1134/BPS-improved",
+    "documentation": "https://github.com/BenCodez/BPS-improved",
     "integration_type": "device",
     "iot_class": "calculated",
     "issue_tracker": "https://github.com/maxi1134/BPS-improved/issues",

@@ -15,13 +15,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
 
       - name: Create bps.zip
-        run: |
-          cd custom_components/bps
-          zip -r "${{ github.workspace }}/bps.zip" . -x '*/__pycache__/*' '__pycache__/*'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python3 scripts/build_release.py "$RELEASE_TAG" "$RUNNER_TEMP/bps.zip"
 
       - name: Upload bps.zip to release
         uses: softprops/action-gh-release@v2
         with:
-          files: bps.zip
+          files: ${{ runner.temp }}/bps.zip
+          fail_on_unmatched_files: true

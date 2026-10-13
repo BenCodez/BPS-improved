@@ -193,6 +193,28 @@ updates manually until you can switch the HACS source while retaining the BPS
 entry. Compatibility is covered by automated tests, but replacement on a live
 Home Assistant installation still needs verification.
 
+### Release update notifications
+
+HACS provides the Home Assistant update entity for this fork. Register and download
+**BenCodez/BPS-improved**, select a numbered release rather than `main`, and restart
+Home Assistant. Releases appear after HACS refreshes its repository information;
+use the repository's **Update information** action to check sooner.
+
+If HACS shows a newer release but Home Assistant's **Settings → System → Updates**
+does not, check **Settings → Devices & services → Entities**, filter by **HACS** and
+the `update` domain, and enable this repository's update entity if disabled. A
+manual file replacement does not register the fork with HACS or create its update
+entity. If no update entity exists, reload the HACS integration or restart Home
+Assistant. Keep your existing BPS integration configuration when switching packages.
+
+For maintainers: publish a new, higher numeric version tag such as `1.2.2` or
+`v1.2.2`, targeting the commit containing the release workflow. Wait for the
+**Release** action to attach `bps.zip`; the ZIP's manifest version is stamped from
+the tag and verified. The component domain remains `bps`. Draft releases do not
+trigger packaging. Prereleases such as `v1.2.2-beta.1` require beta releases enabled
+in HACS; use a normal release for standard update notifications. Publishing a
+release does not push an immediate notification to Home Assistant.
+
 ### SciPy dependency
 
 This integration depends on SciPy, which requires native binary support.
