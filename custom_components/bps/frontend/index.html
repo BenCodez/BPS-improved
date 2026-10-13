@@ -66,6 +66,31 @@
                             </div>
                             <p class="bps-hint">Building/tree/fence tools enable Outdoor Tracking. Save Floor Plan to keep changes.</p>
                             <div class="bps-btnrow" id="savebuttondiv"></div>
+                            <details id="heightSurvey">
+                                <summary>Phone receiver height survey (optional)</summary>
+                                <p class="bps-hint">Use one common floor/property level for receiver and tracker heights. Enter the known phone height above that level, capture a reference, then visit each receiver within 15 minutes. Recapture the reference for a later visit.</p>
+                                <button type="button" id="heightLoad" class="bps-btn bps-btn-outline">Check phone barometers</button>
+                                <label class="bps-label" for="heightSource">Your phone height source</label>
+                                <select id="heightSource" class="bps-input"><option value="browser">Browser altitude (requires vertical accuracy)</option></select>
+                                <p class="bps-hint">Prefer your own Companion App pressure sensor when available; select it explicitly. Browser altitude requires location permission and finite vertical accuracy. If neither is usable, set mount height manually in Receiver properties.</p>
+                                <label class="bps-label" for="heightUnit">Height / offset units</label>
+                                <select id="heightUnit" class="bps-input"><option value="m">Metres</option><option value="ft">Feet</option></select>
+                                <label class="bps-label" for="heightBase">Known reference phone height above common floor</label>
+                                <input id="heightBase" type="number" min="0" max="32.8084" step="any" class="bps-input" placeholder="Measure the phone height first">
+                                <button type="button" id="heightBaseCapture" class="bps-btn bps-btn-outline">Capture common-floor reference</button>
+                                <label class="bps-label" for="heightReceiver">Placed receiver</label>
+                                <select id="heightReceiver" class="bps-input"></select>
+                                <label class="bps-label" for="heightOffset">Receiver above phone at station (signed; 0 if level)</label>
+                                <input id="heightOffset" type="number" min="-32.8084" max="32.8084" step="any" class="bps-input" placeholder="Positive above phone, negative below">
+                                <div class="bps-btnrow">
+                                    <button type="button" id="heightStationCapture" class="bps-btn bps-btn-outline" disabled>Capture receiver height</button>
+                                    <button type="button" id="heightStop" class="bps-btn bps-btn-outline" disabled>Stop capture</button>
+                                    <button type="button" id="heightCancel" class="bps-btn bps-btn-outline">Cancel survey</button>
+                                </div>
+                                <button type="button" id="heightConfirm" class="bps-btn bps-btn-primary" disabled>Confirm receiver height</button>
+                                <p id="heightStatus" class="bps-hint" role="status"></p>
+                                <p class="bps-hint">Keep the phone still for 30–45 seconds per capture. Pressure spread measures precision, not proven absolute accuracy; weather and ventilation can shift it. GPS vertical uncertainty over 2 m is blocked. Confirmed heights are staged until Save Floor Plan; survey details stay in private storage and full diagnostic downloads.</p>
+                            </details>
                             <details id="gpsSetup">
                                 <summary>GPS map alignment &amp; receiver placement</summary>
                                 <p class="bps-hint">Use known GPS/map points across the property. Two anchors align the map; a third checks agreement. GPS works best outdoors. Repeated fixes do not guarantee 1 m accuracy.</p>
@@ -543,6 +568,7 @@
     <script src="diagnostics.js"></script>
     <script src="calibration.js"></script>
     <script src="gps.js"></script>
+    <script src="height.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

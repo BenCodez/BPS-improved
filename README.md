@@ -10,6 +10,7 @@ maxi1134's improvements to the original [**Hogster/BPS**](https://github.com/Hog
 Quick list of changes in this fork:
 
 - Optional [GPS map alignment and receiver placement](docs/gps-map-setup.md)
+- Optional [phone receiver height survey](docs/phone-height-survey.md) with a shared floor reference and explicit phone barometer discovery
   uses known property anchors and stationary browser/selected phone observations,
   with explicit preview, conservative accuracy and normal floor-plan saving.
 

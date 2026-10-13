@@ -38,5 +38,6 @@ jobs:
           node --check custom_components/bps/frontend/outdoor.js
           node --check custom_components/bps/frontend/diagnostics.js
           node --check custom_components/bps/frontend/gps.js
+          node --check custom_components/bps/frontend/height.js
       - name: Run frontend tests
         run: node --test tests/frontend/*.test.cjs

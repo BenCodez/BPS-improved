@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let availableBeaconKeys = [];
     let outdoorFloorSignature = '';
     let gpsUI = null;
+    let heightUI = null;
 
     // --- API auth token (see bps-panel.js) ---------------------------------
     // The BPS panel element couriers the HA access token in via postMessage;
@@ -3301,6 +3302,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             ).then(val => {
                 if (val === undefined) return;                       // cancelled
                 const heightChanged = rec.height !== (val.height === null ? undefined : val.height);
+                if (heightChanged) delete rec.height_survey;
                 for (const key of ['height', 'height_unit', 'hardware_model', 'antenna_notes', 'distance_accuracy_m', 'external_antenna']) {
                     if (val[key] === null) delete rec[key]; else rec[key] = val[key];
                 }
@@ -5188,6 +5190,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         drawReceiverDistances();
         drawAdjustGhost();
         gpsUI?.refresh();
+        heightUI?.refresh();
         gpsUI?.draw(ctx, view.zoom || 1);
         renderEntityTree(floor);
         renderOutdoorFloor(floor);
@@ -7293,6 +7296,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         },
     });
 
+    if (globalThis.BPSHeight) heightUI = globalThis.BPSHeight.init({
+        getFloor: currentFloor,
+        getContext: () => JSON.stringify([SelMapName, mapname.value, img.src, canvas.width, canvas.height, currentFloor()?.name]),
+        fetch: bpsFetch, redraw: () => {if (mapReady()) redrawAll();},
+        stageChange: () => savebuttondiv.appendChild(saveButton),
+        getTarget(value) {
+            const floor = currentFloor(), index = Number(value);
+            const receiver = value !== '' && Number.isInteger(index) ? floor?.receivers?.[index] : null;
+            if (!receiver) return null;
+            return {floor, index, receiver, label: receiver.entity_id, signature: receiverPlacementSignature(receiver)};
+        },
+        stageHeight(target, height, survey) {
+            if (currentFloor() !== target.floor || target.floor.receivers[target.index] !== target.receiver
+                || receiverPlacementSignature(target.receiver) !== target.signature) return false;
+            target.receiver.height = height; target.receiver.height_unit = 'm'; target.receiver.height_survey = survey;
+            return true;
+        },
+    });
+
     if (globalThis.BPSBermudaCalibration) globalThis.BPSBermudaCalibration.init(bpsFetch);
     if (globalThis.BPSDiagnostics) globalThis.BPSDiagnostics.init(bpsFetch, () => {
         const keys = ['outdoor_tracking', 'tracker_groups', 'tracker_height', 'tracker_heights', 'tracker_hardware',
@@ -7313,7 +7335,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 display_uncertainty_m: position.outdoor?.display_uncertainty_m,
                 displayed_receiver_radii: circleToggle.checked ? trackingDistanceMarks(position) : [],
                 received_at: position.receivedAt / 1000})),
-            editor_layout: editor, gps_setup: gpsUI?.snapshot()};
+            editor_layout: editor, gps_setup: gpsUI?.snapshot(), height_survey: heightUI?.snapshot()};
     }, snapshotLocationTools);
 
     // With a single configured floor there is nothing to choose: open it
