@@ -165,12 +165,18 @@ test('recording map click annotates directly and clear removes the dot', async (
     assert.equal(p.el('Pick').disabled, true);
     await p.el('Refresh').fire(); await p.el('Start').fire();
     assert.equal(p.el('Pick').disabled, false); p.el('Label').value = 'Measured stationary point';
+    p.el('SnapshotX').value='12'; p.el('SnapshotY').value='34';
     await p.el('Pick').fire(); const before = p.requests.length;
     await picked({floor: 'Yard', x_m: 2.34567, y_m: 8.90123});
     assert.equal(p.requests.length, before + 1);
     assert.deepEqual(JSON.parse(p.requests.at(-1).options.body), {action: 'annotate', kind: 'known_position',
         target: 'bps_group_dog', floor: 'Yard', x_m: 2.34567, y_m: 8.90123, label: 'Measured stationary point'});
     assert.equal(p.el('X').value, '2.346'); assert.equal(p.el('Y').value, '8.901');
+    assert.equal(p.el('SnapshotX').value,''); assert.equal(p.el('SnapshotY').value,'');
+    const clearCount=cleared;
+    await p.el('SnapshotCapture').fire();
+    assert.match(p.el('ReportStatus').textContent,/Pick the actual location/);
+    assert.equal(cleared,clearCount,'invalidating the older snapshot keeps the new recording dot');
     await p.el('Release').fire(); assert.ok(cleared > 0);
     assert.equal(p.el('X').value, ''); assert.equal(p.el('Y').value, '');
     await p.el('Pick').fire(); cancelled();

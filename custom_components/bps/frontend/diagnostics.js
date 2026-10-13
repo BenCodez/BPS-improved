@@ -102,12 +102,12 @@
         }
         let status = {active: false, available: false}, timer = null, busy = false, cancelPick = null, cancelRecordingPick = null;
         const idleWaiters = [];
-        function invalidateSnapshotLocation(clearCoordinates) {
+        function invalidateSnapshotLocation(clearCoordinates, clearMapPoint = true) {
             if (cancelPick) {cancelPick(); cancelPick = null;}
             if (clearCoordinates) {
                 el('SnapshotX').value = ''; el('SnapshotY').value = '';
             }
-            locationTools.clearPoint?.();
+            if (clearMapPoint) locationTools.clearPoint?.();
             el('ReportStatus').textContent = 'Location changed. Pick or enter the location again before capturing current BLE data.';
         }
         function controls() {
@@ -227,6 +227,9 @@
                     // refresh. Preserve that annotation until the request ends.
                     if (busy) await new Promise(resolve => idleWaiters.push(resolve));
                     if (!status.active || el('Target').value !== target) {locationTools.clearPoint?.(); return;}
+                    // The map crosshair now describes this recording point,
+                    // so an older one-shot snapshot reference is no longer valid.
+                    if (el('SnapshotCapture')) invalidateSnapshotLocation(true, false);
                     el('Floor').value = point.floor;
                     el('X').value = point.x_m.toFixed(3); el('Y').value = point.y_m.toFixed(3);
                     return run(() => post({action: 'annotate', kind: 'known_position', target,
@@ -238,7 +241,9 @@
         el('Release').addEventListener('click', () => run(async () => {
             if (cancelRecordingPick) {cancelRecordingPick(); cancelRecordingPick = null;}
             await post({action: 'annotate', kind: 'clear_position', target: el('Target').value});
-            locationTools.clearPoint?.(); el('X').value = ''; el('Y').value = '';
+            if (el('SnapshotCapture')) invalidateSnapshotLocation(true);
+            else locationTools.clearPoint?.();
+            el('X').value = ''; el('Y').value = '';
         }));
         el('Note').addEventListener('click', () => run(() => post({action: 'annotate', kind: 'note', label: el('Label').value})));
         el('Download').addEventListener('click', () => run(async () => {
