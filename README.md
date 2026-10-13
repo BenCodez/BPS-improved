@@ -1223,7 +1223,8 @@ not independently verify its accuracy. Walls, trees and fences affect the
 position solver's trust rather than inventing a new range correction.
 Select **BLE ranges** or **Estimated position** to see just one view. With
 multiple devices shown, lines replace circles; select a beacon to isolate it.
-Distance labels use the selected grid unit for both measured and map distances.
+Live-tracker labels use the selected grid unit. Receiver-to-receiver labels show
+both feet and metres for the BLE distance and the map distance.
 
 A **Receiver distances** toggle in the Tracking column draws a line between
 every pair of receivers that measure each other, straight on the floor plan.

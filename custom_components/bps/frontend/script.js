@@ -1624,8 +1624,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const links = shownRecDistLinks();
         if (!links.length) return;
         if (recDistLegend) recDistLegend.style.display = "";
-        const fmt = (meters) => gridUnit === "ft"
-            ? `${(meters * 3.28084).toFixed(1)} ft` : `${meters.toFixed(1)} m`;
+        const fmt = meters => `${(meters / .3048).toFixed(1)} ft / ${meters.toFixed(1)} m`;
         // While actively hovering a line or a receiver, the link(s) being
         // inspected stay full strength and every other line dims to 10% so the
         // hovered path stands out of a dense mesh. A hovered receiver lights up
@@ -1700,8 +1699,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (showPill) {
                 const mx = (l.A.x + l.B.x) / 2, my = (l.A.y + l.B.y) / 2;
                 pill = l.stale
-                    ? drawLabelPill(`${fmt(l.detected)} (${fmt(l.liveM)}) — recalibrate`, mx, my, 0, RECDIST_STALE)
-                    : drawLabelPill(`${fmt(l.detected)} (${fmt(l.trueM)})`, mx, my, l.hue);
+                    ? drawLabelPill(`BLE ${fmt(l.detected)} · Map ${fmt(l.liveM)} — recalibrate`, mx, my, 0, RECDIST_STALE)
+                    : drawLabelPill(`BLE ${fmt(l.detected)} · Map ${fmt(l.trueM)}`, mx, my, l.hue);
             }
             recDistDrawn.push({ key, A: l.A, B: l.B, pill });
         });
@@ -5409,6 +5408,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Live HA state changes constantly, so there's no useful cache to keep — a
     // stale/failed fetch just shows an empty snapshot.
     async function loadScannerLinking() {
+        const priorMatching = receiverMatching;
         scannerLinkingLoading = true;
         renderDebugView();
         let data = { placed: [], unplaced: [], beacons: [] };
@@ -5417,6 +5417,18 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (res.ok) {
                 const parsed = await res.json();
                 if (parsed && typeof parsed === 'object') {
+                    const fresh = parsed.matching;
+                    if (fresh && typeof fresh.revision === 'string' && Array.isArray(fresh.options)
+                        && receiverMatching === priorMatching) {
+                        // Keep a later placement/matching refresh authoritative
+                        // when this read began against an older inventory.
+                        receiverMatching = fresh;
+                        receiverOptions = fresh.options.map(option => option.entity_id);
+                        receiverInventoryLoaded = true;
+                        if (addDeviceButton.dataset.active === 'true' && receiverSelect) populateReceiverSelect(true);
+                        renderEntityTree(currentFloor());
+                        renderScannerIssues();
+                    }
                     data = {
                         placed: Array.isArray(parsed.placed) ? parsed.placed : [],
                         unplaced: Array.isArray(parsed.unplaced) ? parsed.unplaced : [],

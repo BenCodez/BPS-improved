@@ -68,7 +68,8 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons, redrawAll,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
-            tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt, addDeviceButton, saveReceiver};
+            tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt, addDeviceButton, saveReceiver,
+            setCalibration: results => {calibLastResults=results;}};
     // With a single configured floor`);
     vm.runInContext(code, sandbox);
     const ready = listeners.get('DOMContentLoaded')();
@@ -248,6 +249,33 @@ test('receiver properties never borrow automatic hardware from a reused slug or 
         assert.match(edit.hardware.textContent, /unknown/); assert.doesNotMatch(edit.hardware.textContent, /Wrong board/);
         assert.match(edit.external.options[0].textContent, /unknown/); await edit.cancel.fire('click');
     }
+});
+
+test('Debugging refresh updates detected model and inherited antenna without rewriting placement metadata', async () => {
+    const source=layout(); source.floor[0].receivers=[{entity_id:'proxy',cords:{x:100,y:100},correction:1.2}];
+    const matching={revision:'old',options:[{entity_id:'proxy',hardware:{effective:{model:'Old board',external_antenna:true}}}]};
+    const p=await panel(source,undefined,false,matching); p.hooks.select('Property');
+    let edit=receiverProperties(p); assert.match(edit.hardware.textContent,/Old board/); await edit.cancel.fire('click');
+    p.network.matching={revision:'new',options:[{entity_id:'proxy',hardware:{effective:{model:'New board',external_antenna:false}}}]};
+    p.listeners.get('click')({target:{closest:selector=>selector==='[data-type="refreshlinking"]'?{}:null}});
+    await new Promise(resolve=>setImmediate(resolve));
+    edit=receiverProperties(p); assert.match(edit.hardware.textContent,/New board/); assert.match(edit.external.options[0].textContent,/built-in/);
+    await edit.cancel.fire('click');
+    p.network.matching={revision:'removed',options:[]};
+    p.listeners.get('click')({target:{closest:selector=>selector==='[data-type="refreshlinking"]'?{}:null}});
+    await new Promise(resolve=>setImmediate(resolve));
+    edit=receiverProperties(p); assert.match(edit.hardware.textContent,/unknown/); await edit.cancel.fire('click');
+    assert.equal(p.hooks.layout().floor[0].receivers[0].correction,1.2);
+});
+
+test('receiver-to-receiver labels show measured and map distances in both feet and metres', async () => {
+    const source=layout(); source.floor[0].receivers=[{entity_id:'a',cords:{x:0,y:0}},
+        {entity_id:'b',cords:{x:60,y:80}},{entity_id:'c',cords:{x:200,y:200}}];
+    const p=await panel(source); p.hooks.select('Property');
+    p.hooks.setCalibration({Property:{floor:'Property',matrix:[{tx:'a',rx:'b',corrected_m:3,measured_m:4,true_m:5}]}});
+    p.el('recDistToggle').checked=true; p.el('recDistColor').value='all'; p.el('recDistMode').value='calibrated';
+    p.listeners.get('click')({target:{closest:selector=>selector==='[data-type="focusrec"]'?{getAttribute:()=> 'a'}:null}});
+    assert.ok(p.canvasCalls.some(call=>call[0]==='text'&&call[1]==='BLE 9.8 ft / 3.0 m · Map 16.4 ft / 5.0 m'));
 });
 
 test('panel Show distances draws same-floor group member ranges once while retaining different ranges', async () => {
