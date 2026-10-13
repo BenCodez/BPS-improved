@@ -290,6 +290,31 @@ def test_direct_scanner_age_precedes_cached_legacy_dump_and_missing_age_stays_un
     assert "old_station" in hass.data["bps"]["rl_unknown"] and hass.data["bps"]["rl_offline"] == []
 
 
+@pytest.mark.parametrize("consumer", ["liveness", "scanner_diagnostics", "scanner_linking"])
+def test_receiver_views_reuse_one_direct_capture_for_scanner_matching(hass, monkeypatch, consumer):
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    hass.data["bps"]["layout"] = data
+    api = sys.modules["custom_components.bermuda.api"]
+    capture = api.async_get_advert_snapshot
+    def next_frame_after_capture(*args, **kwargs):
+        result = capture(*args, **kwargs)
+        payloads["entry"]["scanners"][MAC].update(name="Next frame station", slug="next_frame_station")
+        return result
+    api.async_get_advert_snapshot = next_frame_after_capture
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("A fully direct liveness refresh needs no legacy service")
+    hass.services.async_call = forbidden
+    if consumer == "liveness":
+        asyncio.run(bps.update_receiver_liveness(hass))
+        status = hass.data["bps"]
+        assert "old_station" not in status["rl_offline"] + status["rl_unknown"]
+        assert all("next_frame_station" not in status[key] for key in ("rl_offline", "rl_unknown"))
+    else:
+        view = getattr(bps, "_" + consumer)(hass, json.dumps(data))
+        assert "next_frame_station" not in json.dumps(view)
+    assert len(calls) == 1
+
+
 def calibration_payload():
     value = snapshot()
     value["scanners"][OTHER] = scanner(OTHER, name="Other station")

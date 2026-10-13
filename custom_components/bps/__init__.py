@@ -889,8 +889,8 @@ def _receiver_floors(coordinates_json):
         return []
 
 
-def _alias_diagnostics(hass, coordinates_json):
-    sources = ReceiverSources(hass)
+def _alias_diagnostics(hass, coordinates_json, receiver_sources=None):
+    sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass)
     aliases, issues = [], []
     for floor in _receiver_floors(coordinates_json):
         for index, (rec, binding) in enumerate(zip(floor.get("receivers", []), sources.floor_bindings(floor))):
@@ -914,9 +914,10 @@ def _scanner_diagnostics(hass, coordinates_json):
         aren't placed on any floor.
     """
     slugs, with_reading = _scanner_slugs_and_readings(hass)
-    matching = receiver_inventory(hass)
+    sources = ReceiverSources(hass)
+    matching = sources.matching
     slugs.update(row["entity_id"] for row in matching["options"])
-    aliases, issues = _alias_diagnostics(hass, coordinates_json)
+    aliases, issues = _alias_diagnostics(hass, coordinates_json, sources)
     slugs.update(row["entity_id"] for row in aliases)
     placed = _placed_receivers(coordinates_json)
     placed_slugs = {p[1] for p in placed}
@@ -1000,9 +1001,9 @@ def _scanner_linking(hass, coordinates_json):
     def _reporting(sensors):
         return [s for s in sensors if s["state"] not in _NO_DISTANCE_STATES]
 
-    matching = receiver_inventory(hass)
-    options = {row["entity_id"]: row for row in matching["options"]}
     sources = ReceiverSources(hass)
+    matching = sources.matching
+    options = {row["entity_id"]: row for row in matching["options"]}
     owned_by_identity = {}
     if sources.registry is not None:
         # Group the snapshot once; scanning every tracker/scanner reading for
@@ -1256,7 +1257,7 @@ async def update_receiver_liveness(hass):
     elapsed = max(0.0, time.time() - dom["rl_anchor_wall"]) if dom.get("rl_anchor_wall") else 0.0
 
     receivers, _ = _scanner_slugs_and_readings(hass)
-    matching = {row["entity_id"]: row for row in receiver_inventory(hass)["options"]}
+    matching = {row["entity_id"]: row for row in sources.matching["options"]}
     receivers.update(matching)
     identity_conflicts = set()
     placed_identities = {}
