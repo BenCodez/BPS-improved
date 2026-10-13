@@ -403,6 +403,48 @@ def test_direct_scanner_liveness_age_survives_an_api_fallback(hass, monkeypatch)
     assert receiver_constraints(data["floor"][0], ["tag"], source, health, NOW + 2, 30) == []
 
 
+@pytest.mark.parametrize("evidence", ["connectivity", "device"])
+@pytest.mark.parametrize("shared_age", [30, 90])
+def test_shared_mac_health_uses_current_owner_status_not_global_radio_age(hass, monkeypatch, evidence, shared_age):
+    import asyncio
+    import bps
+    from test_receiver_aliases import aliases, timestamp
+    from test_bermuda_direct import install, MAC
+    from bps.receiver_sources import ReceiverSources
+
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    rec = data["floor"][0]["receivers"][0]
+    rec.update(entity_id="current_station", scanner_mac=MAC, scanner_config_entry_id="entry")
+    hass.data["bps"]["layout"] = data
+    configs = hass.config_entries.async_entries("bermuda") + [NS(entry_id="other-owner",
+        runtime_data=NS(coordinator=NS(devices={"other": NS(
+            _is_scanner=True, address=MAC, name="Other station")})))]
+    hass.config_entries.async_entries = lambda _: configs
+    install(monkeypatch, {"entry": None, "other-owner": None})
+    states[old].state = states[new].state = "unavailable"
+    hass.data["bps"].update(rl_mac_ages={MAC: shared_age}, rl_anchor_wall=NOW)
+
+    async def failed_dump(*args, **kwargs):
+        raise RuntimeError("synthetic dump unavailable")
+    hass.services.async_call = failed_dump
+    if evidence == "connectivity":
+        states["binary_sensor.current_station_status"] = NS(state="on", attributes={"device_class": "connectivity"})
+    else:
+        monkeypatch.setattr(bps.dr, "async_get", lambda _: NS(devices={"station": NS(
+            id="station", name="Current station", name_by_user=None)}))
+        add("sensor.station_uptime", "ready", platform="esphome")
+        entries["sensor.station_uptime"].device_id = "station"
+        states["sensor.station_uptime"].last_updated = timestamp(NOW)
+    source = ReceiverSources(hass)
+    assert source.owners_by_mac[MAC] == {"entry", "other-owner"}
+    asyncio.run(bps.update_receiver_liveness(hass))
+    health = hass.data["bps"]["rl_status_snapshot"]
+    assert health["current_station"]["online"] is True
+    assert health["current_station"]["source_age_s"] == 0
+    result = receiver_constraints(data["floor"][0], ["tag"], source, health, NOW, 30)
+    assert result and result[0]["missing_beacons"] == ["tag"]
+
+
 @pytest.mark.parametrize("change", ["membership", "scale"])
 @pytest.mark.parametrize("supported_member", [False, True])
 def test_changed_group_signature_cannot_hold_a_fix_from_the_old_group(monkeypatch, change, supported_member):

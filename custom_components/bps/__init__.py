@@ -1406,11 +1406,10 @@ async def update_receiver_liveness(hass):
     dom["rl_offline"] = sorted(s for s, status in resolved.items() if status is False)
     dom["rl_unknown"] = sorted(s for s, status in resolved.items() if status is None)
     def evidence_age(slug):
-        if slug in source_evidence_ages:
-            return finite_number(source_evidence_ages[slug], minimum=0)
-        key = bindings.get(slug, {}).get("identity")
-        age = finite_number(dom.get("rl_mac_ages", {}).get(key[1]), minimum=0) if key else None
-        return age + elapsed if age is not None else 0.0
+        # Radio/reading ages are recorded only when that evidence is used.
+        # Current connectivity/device status must not inherit a rejected,
+        # globally keyed MAC age belonging to another Bermuda owner.
+        return finite_number(source_evidence_ages.get(slug, 0.0), minimum=0)
 
     dom["rl_status_snapshot"] = {slug: {"online": status,
         "identity": list(bindings[slug]["identity"]) if bindings.get(slug, {}).get("identity") else None,
