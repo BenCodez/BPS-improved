@@ -288,3 +288,54 @@ def test_direct_scanner_liveness_age_survives_an_api_fallback(hass, monkeypatch)
     monkeypatch.setattr(bps.time, "time", lambda: NOW + 2)
     source = ReceiverSources(hass)
     assert receiver_constraints(data["floor"][0], ["tag"], source, health, NOW + 2, 30) == []
+
+
+@pytest.mark.parametrize("change", ["membership", "scale"])
+@pytest.mark.parametrize("supported_member", [False, True])
+def test_changed_group_signature_cannot_hold_a_fix_from_the_old_group(monkeypatch, change, supported_member):
+    import asyncio
+    import bps
+    from conftest import make_hass
+
+    hass = make_hass()
+    floor = copy.deepcopy(FLOOR)
+    floor["scale"] = 1
+    floor["receivers"][0]["cords"]["x"] = 8
+    group_config = {"id": "rover", "beacons": ["a", "b"]}
+    hass.data["bps"] = {"layout": {"outdoor_tracking": {"enabled": True}, "floor": [floor],
+        "tracker_groups": [group_config]}}
+    source = sources()
+    source.direct_trackers = lambda: {"a", "b", "c", "d"}
+    source.source = lambda *args, **kwargs: ("sensor.range", state())
+    monkeypatch.setattr(bps, "ReceiverSources", lambda _: source)
+    monkeypatch.setattr(bps, "get_position_history", lambda _: NS(record=lambda *a: None, mark_gap=lambda *a: None))
+    monkeypatch.setattr(bps, "apitricords", [])
+    clock = NOW
+    monkeypatch.setattr(bps.time, "time", lambda: clock)
+
+    def fixes(coordinates):
+        return [{"ent": ent, "floor": "Yard", "cords": [x, 0], "updated": clock,
+            "outdoor": {"observed": clock, "estimated_uncertainty_m": 4, "receivers_used": 4}}
+            for ent, x in zip(group_config["beacons"], coordinates)]
+
+    bps.apitricords = fixes((0, 0))
+    asyncio.run(bps.update_tracker_groups(hass))
+    previous = next(p for p in bps.apitricords if p.get("group"))
+    assert previous["cords"] == [0, 0]
+    clock += 1
+    if change == "membership":
+        group_config["beacons"] = ["c", "d"]
+    else:
+        floor["scale"] = 2
+    member_x = 8 + 3 * floor["scale"] + 1 if supported_member else 8
+    bps.apitricords = fixes((8, member_x)) + [previous]
+    asyncio.run(bps.update_tracker_groups(hass))
+    report = hass.data["bps"]["group_receiver_guards"]["bps_group_rover"]
+    if supported_member:
+        current = next(p for p in bps.apitricords if p.get("group"))
+        assert current["cords"] == [member_x, 0]
+        assert current["updated"] == clock
+        assert report["state"] == "member_fix"
+    else:
+        assert not any(p.get("group") for p in bps.apitricords)
+        assert report["state"] == "unavailable"

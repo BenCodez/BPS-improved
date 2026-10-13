@@ -2028,6 +2028,7 @@ async def update_tracker_groups(hass):
     stability = dom.setdefault("group_stability", {})
     motion_epochs = {ent: finite_number(state.get("motion_epoch"), minimum=0)
                      for ent, state in stability.items()}
+    prior_signatures = {ent: state.get("signature") for ent, state in stability.items()}
     fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
                         use_observation_age=use_observation_age, known_trackers=known,
                         previous=previous, stability=stability)
@@ -2038,16 +2039,21 @@ async def update_tracker_groups(hass):
         floor = next(f for f in layout["floor"] if f["name"] == position["floor"])
         constraints = receiver_constraints(floor, group_definitions[position["ent"]]["beacons"],
             sources, dom.get("rl_status_snapshot", {}), fusion_time, group_max_age)
+        # A changed membership, floor, scale or detection mode invalidates the
+        # old point in fusion and must invalidate it in this publication check.
+        signature = stability.get(position["ent"], {}).get("signature")
+        prior = previous.get(position["ent"]) if signature is not None \
+            and signature == prior_signatures.get(position["ent"]) else None
         # Fusion consumes its observation epoch even when the receiver check
         # holds an older fix. Preserve this cycle's allowance without requiring
         # a motion_gate payload, which fusion omits for ordinary small steps.
-        old_epoch = motion_epochs.get(position["ent"])
+        old_epoch = motion_epochs.get(position["ent"]) if prior is not None else None
         if old_epoch is None:
-            old_epoch = finite_number(previous.get(position["ent"], {}).get("updated"), minimum=0)
+            old_epoch = finite_number((prior or {}).get("updated"), minimum=0)
         new_epoch = finite_number(stability.get(position["ent"], {}).get("motion_epoch"), minimum=0)
         motion_budget = max(GROUP_MOTION_SLACK_M, GROUP_MAX_SPEED_MS * max(0, new_epoch - old_epoch)) \
             if old_epoch is not None and new_epoch is not None else None
-        checked, report = constrain_group(position, constraints, previous.get(position["ent"]),
+        checked, report = constrain_group(position, constraints, prior,
             scales[position["floor"]], fusion_time, group_max_age, motion_budget_m=motion_budget)
         if report is not None:
             reports[position["ent"]] = report
