@@ -6,7 +6,7 @@ const NOW = 1800000000000;
 
 function ui() {
     const ids = new Map(), timers = new Map(), watchers = new Map(), windowEvents = new Map(), documentEvents = new Map();
-    let clock = NOW, counter = 0, context = 'synthetic-context', pendingPoll = null, pendingStart = null;
+    let clock = NOW, counter = 0, context = 'synthetic-context', pendingPoll = null, pendingStart = null, pendingVerify = null;
     let candidates = [], notify = [], saveCalls = [], requests = [], pollCount = 0, pollActive = 0, maxPollActive = 0;
     function element() {
         const events = new Map();
@@ -29,7 +29,8 @@ function ui() {
                 pollCount++; pollActive++; maxPollActive = Math.max(maxPollActive, pollActive);
                 const response = pendingPoll ? await pendingPoll : {ok: true, json: async () => pollData}; pollActive--; return response;
             }
-            if (body.action === 'verify') return {ok: true, json: async () => ({saved: true, candidate: {...candidates[0], status: 'verified'}, position: candidates[0].position})};
+            if (body.action === 'verify') {if (pendingVerify) await pendingVerify;
+                return {ok: true, json: async () => ({saved: true, candidate: {...candidates[0], status: 'verified'}, position: candidates[0].position})};}
             return {ok: true, json: async () => ({stopped: true, removed: true})};
         }};
     const api = gps.surveyController(hooks, {document, window: {addEventListener(name, fn) {windowEvents.set(name, fn);}}, now: () => clock,
@@ -44,11 +45,21 @@ function ui() {
         unload: () => windowEvents.get('pagehide')(), changeFloor: () => {context = 'replacement-context';},
         pollData: data => {pollData = data;}, candidates: rows => {candidates = rows;}, services: rows => {notify = rows;},
         deferPoll: promise => {pendingPoll = promise;}, deferStart: promise => {pendingStart = promise;},
+        deferVerify: promise => {pendingVerify = promise;},
         pollCount: () => pollCount, maxPollActive: () => maxPollActive};
 }
 
 const candidate = () => ({id: 'synthetic-candidate', receiver: 'synthetic_receiver', floor: 'Synthetic floor', phone: 'synthetic_phone', status: 'pending',
     position: {x: 300, y: 300}, map_accuracy_m: 4, gps: {sample_count: 16, reported_accuracy_m: 2, spread_m: 1}});
+
+test('verification remains observable until the committed response is merged', async () => {
+    const p = ui(); p.candidates([candidate()]); await p.click('gpsSurveyRefresh');
+    let release; p.deferVerify(new Promise(resolve => {release = resolve;}));
+    const save = p.el('gpsSurveyCandidates').children[0].children[1].fire('click');
+    assert.equal(p.api.isVerifying(), true);
+    release(); await save;
+    assert.equal(p.api.isVerifying(), false);
+});
 
 test('auto survey is opt-in and loads BLE phones and services without guessing selections', async () => {
     const p = ui(); assert.equal(p.requests.length, 0); assert.equal(p.watchers.size, 0);

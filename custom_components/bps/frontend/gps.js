@@ -304,11 +304,14 @@
         doc.addEventListener?.('visibilitychange', () => {if (doc.hidden && active) stop('Page hidden. Auto survey stopped.');});
         win.addEventListener('pagehide', () => stop()); win.addEventListener('beforeunload', () => stop());
         status('Auto survey is off. Averaged GPS candidates require verification before a receiver moves.'); render();
-        return {load, stop, refresh() {if (active && active.context !== signature()) stop('Floor or layout changed. Auto survey stopped.'); render();},
+        return {load, stop, isVerifying: () => verifying,
+            refresh() {if (active && active.context !== signature()) stop('Floor or layout changed. Auto survey stopped.'); render();},
             draw(ctx, zoom = 1) {for (const c of candidates) {
                 if (c.floor !== hooks.getFloor()?.name || c.status === 'verified') continue;
                 const p = c.position; if (!p || !number(p.x, 0, 1e6) || !number(p.y, 0, 1e6)) continue;
                 ctx.save(); ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2/zoom;
+                const radius = c.map_accuracy_m * hooks.getFloor().scale;
+                if (number(radius, 0, 1e9)) {ctx.beginPath(); ctx.arc(p.x, p.y, radius, 0, Math.PI*2); ctx.stroke();}
                 ctx.beginPath(); ctx.arc(p.x, p.y, 8/zoom, 0, Math.PI*2); ctx.stroke(); ctx.restore();
             }}, snapshot: () => ({active: !!active, candidate_count: candidates.length, status: el('gpsSurveyStatus').textContent})};
     }
@@ -544,7 +547,7 @@
             surveySourceChanged: () => cancel('Phone source changed. Capture again.')}, environment);
         win.addEventListener('pagehide', () => cancel()); win.addEventListener('beforeunload', () => {release(); survey?.stop();});
         refresh();
-        return {refresh, cancel, draw(ctx, zoom = 1) {
+        return {refresh, cancel, isVerifying: () => !!survey?.isVerifying(), draw(ctx, zoom = 1) {
             survey?.draw(ctx, zoom);
             if (!preview || !current(preview.guard)) return;
             ctx.save(); ctx.strokeStyle = '#06b6d4'; ctx.fillStyle = 'rgba(6,182,212,0.12)'; ctx.lineWidth = 2/zoom;

@@ -26,6 +26,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let outdoorFloorSignature = '';
     let gpsUI = null;
     let truthUI = null;
+    let layoutSavePending = false;
     let heightUI = null;
 
     // --- API auth token (see bps-panel.js) ---------------------------------
@@ -6416,6 +6417,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     async function savedata(skipScaleCheck = false){
+        if (layoutSavePending || gpsUI?.isVerifying?.()) {
+            bpsToast('Wait for the current map save or receiver verification to finish.');
+            return false;
+        }
+        layoutSavePending = true;
+        try {
         if(!skipScaleCheck && myScaleVal == null){
             bpsToast("You have not added a scale, it won't work without it!");
             return;
@@ -6476,6 +6483,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.error('Error saving data:', error);
             bpsToast('Error saving data!');
         }
+        } finally {layoutSavePending = false;}
     }
 
     // =================================================================
@@ -7318,6 +7326,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             return cleanup;
         },
         surveyCanStart() {
+            if (layoutSavePending) throw new Error('Wait for the current floor-plan save to finish.');
             if (savebuttondiv.contains(saveButton)) throw new Error('Save Floor Plan before starting the phone survey.');
             if (!mapReady() || anyLayoutToolActive()) throw new Error('Open a saved map and finish the map editing tool first.');
             return true;
