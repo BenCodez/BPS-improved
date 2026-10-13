@@ -8,18 +8,33 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util import slugify
 
 from .bermuda_diagnostics import _coordinator
+from .bermuda_direct import BermudaDirect
 from .scanner_addresses import ble_mac, retained_mac
 
 # Only the public scanner MAC suffix of a filtered range unique ID is read.
 _RANGE_MAC = re.compile(r"_((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})_range$")
 
 
-def inventory(hass):
+def inventory(hass, direct=None):
     """Identity revision excludes fluctuating readings, includes registry changes."""
     rows, runtime, address_pairs = {}, {}, set()
     manager = getattr(hass, "config_entries", None)
     entries = manager.async_entries("bermuda") if manager is not None else []
+    direct = direct if direct is not None else BermudaDirect(hass)
     for entry in entries:
+        if entry.entry_id in direct.snapshots:
+            for (owner, address), scanners in direct.scanners.items():
+                if owner != entry.entry_id:
+                    continue
+                for sid, scanner in scanners:
+                    bluetooth = sid.lower() if isinstance(sid, str) and re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", sid) else None
+                    if bluetooth is not None:
+                        address_pairs.add((owner, address, bluetooth))
+                    runtime.setdefault((owner, address), set())
+                    name = scanner.get("name")
+                    if isinstance(name, str) and name:
+                        runtime[(owner, address)].add(name[:256])
+            continue
         devices = getattr(_coordinator(hass, entry), "devices", {})
         if not isinstance(devices, Mapping):
             continue
@@ -109,9 +124,11 @@ def inventory(hass):
         target.update(name=names[0] if len(names) == 1 else slug, scanner_mac=mac,
                       config_entry_ids=sorted({owner for owner, _ in identities if isinstance(owner, str)}),
                       token=mac.replace(":", "")[-6:] if mac else None,
-                      identity_ambiguous=ambiguous, selectable=not ambiguous and not renamed_only,
+                      identity_ambiguous=ambiguous, selectable=not ambiguous and (not renamed_only or any(
+                          identity in direct.scanners for identity in identities)),
                       warning="Bermuda scanner identity is ambiguous across owners or names." if ambiguous else
-                      "Restore Bermuda distance entity IDs with _distance_to_<scanner slug> before matching." if renamed_only else None)
+                      "Restore Bermuda distance entity IDs with _distance_to_<scanner slug> before matching." if renamed_only and not any(
+                          identity in direct.scanners for identity in identities) else None)
         # Keep underlying hardware proofs even when the display slug cannot be
         # selected without an owner/MAC. Existing explicitly matched placements
         # can still resolve one scanner without borrowing the other one's data.

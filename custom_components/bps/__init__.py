@@ -709,10 +709,13 @@ async def update_tracked_entities(hass):
             # loop that grew with the size of the user's Home Assistant rather
             # than with the number of beacons.
             tracked_entities = _bermuda_distance_sensor_ids(hass)
+            receiver_sources = ReceiverSources(hass)
+            direct_trackers = receiver_sources.direct_trackers()
 
             await prune_stale_positions(hass)
 
-            num_points = len(tracked_entities)
+            num_points = len(tracked_entities) + sum(len(device["scanners"]) for snapshot in receiver_sources.direct.snapshots.values()
+                for device in snapshot["devices"].values() if device.get("tracked") is True)
             if num_points == 0:
                 await update_tracker_groups(hass)
                 await _capture_recent_tracking(hass)
@@ -728,11 +731,11 @@ async def update_tracked_entities(hass):
                 continue  # Skip and start over
 
             cleaned = [item.split("_distance_to_")[0].replace("sensor.", "") for item in tracked_entities]
-            unique_values = list(set(cleaned))
+            unique_values = list(set(cleaned) | direct_trackers)
             # Use a separate copy per entity to avoid cross-entity mutation side effects.
             new_global_data = [{"entity": ent, "data": copy.deepcopy(layout)} for ent in unique_values]
 
-            await process_entities(hass, new_global_data)
+            await process_entities(hass, new_global_data, receiver_sources)
 
         except Exception as e:
             _LOGGER.info(f"Error executing Jinja code: {e}")
@@ -1061,10 +1064,14 @@ def _beacon_links(hass):
         beacons.setdefault(device, [])
         binding = sources.binding({"entity_id": slug})
         selected, chosen = sources.source(device, {"entity_id": slug}, binding)
-        identity = (device, binding["identity"] or slug, sources.tracker_ids.get(eid))
-        if sources.registry is not None and (selected != eid or chosen is None or identity in seen):
+        provenance = getattr(chosen, "attributes", {}).get("bps_source", {}) if chosen is not None else {}
+        is_direct = provenance.get("path") == "direct"
+        identity = (device, binding["identity"] or slug, provenance.get("device_id") if is_direct else sources.tracker_ids.get(eid))
+        if sources.registry is not None and ((not is_direct and selected != eid) or chosen is None or identity in seen):
             continue
         seen.add(identity)
+        if is_direct:
+            st = chosen
         if st.state in _NO_DISTANCE_STATES:
             continue
         try:
@@ -1191,8 +1198,9 @@ async def update_receiver_liveness(hass):
     their absence leaves liveness unknown. Never infer offline from silence.
     """
     dom = hass.data.setdefault(DOMAIN, {})
+    sources = ReceiverSources(hass)
     try:
-        devices = await wait_for(
+        devices = None if not sources.direct.needs_legacy else await wait_for(
             hass.services.async_call(
                 "bermuda", "dump_devices", {"configured_devices": True},
                 blocking=True, return_response=True,
@@ -1217,7 +1225,6 @@ async def update_receiver_liveness(hass):
     receivers, _ = _scanner_slugs_and_readings(hass)
     matching = {row["entity_id"]: row for row in receiver_inventory(hass)["options"]}
     receivers.update(matching)
-    sources = ReceiverSources(hass)
     identity_conflicts = set()
     placed_identities = {}
     bindings = {slug: sources.binding({"entity_id": slug}) for slug in matching}
@@ -1286,6 +1293,13 @@ async def update_receiver_liveness(hass):
     def live_distance(slug):
         binding = bindings.get(slug, {})
         key = binding.get("identity")
+        if key in sources.direct.scanners:
+            clock, cutoff = time.time(), _reading_max_age(layout)
+            for device in sources.direct.snapshots[key[0]]["devices"]:
+                state = sources.direct.reading(key[0], device, key[1], "", now=clock)
+                if isinstance(state.state, (int, float)) and (not cutoff or _reading_age_secs(state, now=clock) <= cutoff):
+                    return True
+            return False
         options = [option for name in binding.get("aliases", [])
                    if (option := sources.resolved_option(name, binding)) is not None] if key else [sources.options.get(slug, {})]
         candidates = {eid for option in options for eid in option.get("distance_sensors", [])
@@ -1316,7 +1330,13 @@ async def update_receiver_liveness(hass):
             return None
         name = matching.get(slug, {}).get("name")
         mac = matching.get(slug, {}).get("scanner_mac")
-        age = dom.get("rl_mac_ages", {}).get(mac) if len(sources.owners_by_mac.get(mac, ())) <= 1 else None
+        identity = bindings.get(slug, {}).get("identity")
+        if identity in sources.direct.scanners:
+            direct_age = sources.direct.scanner_age(identity)
+            if direct_age is not None and direct_age >= 0:
+                return direct_age <= RECEIVER_OFFLINE_SECS
+        age = (dom.get("rl_mac_ages", {}).get(mac) if len(sources.owners_by_mac.get(mac, ())) <= 1
+               and identity not in sources.direct.scanners else None)
         if age is None and not mac and matching.get(slug, {}).get("liveness_name_unique", True):
             # Name-only ages have no hardware proof. A proven MAC must use its
             # own age or current connectivity/readings, even after dump failure.
@@ -1465,7 +1485,7 @@ async def update_receiver_radii(hass, eids, receiver_sources=None):
                             observed = None
                         receiver["_diagnostic_reading"] = {
                             "observed": observed, "entity_id": entity_id, "corrected_distance_m": distance,
-                            "horizontal_distance_m": horizontal,
+                            "horizontal_distance_m": horizontal, "measurement_source": sources.source_info(binding, rec_value),
                         }
                 except ValueError:
                     #_LOGGER.info(f"Invalid numerical value: {rec_value.state}")
@@ -1749,6 +1769,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 "entity_id": r.get("_diagnostic_reading", {}).get("entity_id"),
                 "corrected_distance_m": r.get("_diagnostic_reading", {}).get("corrected_distance_m"),
                 "horizontal_distance_m": r.get("_diagnostic_reading", {}).get("horizontal_distance_m"),
+                "measurement_source": r.get("_diagnostic_reading", {}).get("measurement_source"),
                 "radius_px": pt[2], "jump_environment_weight": pt[3]}
                 for r, pt in zip(selected_receivers, weighted)]
         if outdoor and elected["outdoor"] is not None:
@@ -2051,7 +2072,7 @@ async def process_single_entity(hass, new_global_data, eids, receiver_sources=No
     await update_receiver_radii(hass, eids, receiver_sources)  # Wait for the receivers to update
     await update_trilateration_and_zone(hass, new_global_data, eids["entity"])  # When it is complete → perform trilateration
 
-async def process_entities(hass, new_global_data):
+async def process_entities(hass, new_global_data, receiver_sources=None):
     """Finish every tracker before another refresh or group publication starts."""
     bucket = hass.data.setdefault(DOMAIN, {})
     lock = bucket.setdefault("_tracking_batch_lock", asyncio.Lock())
@@ -2059,7 +2080,7 @@ async def process_entities(hass, new_global_data):
     async with lock:
         if not _tracking_context_current(context):
             return
-        receiver_sources = ReceiverSources(hass)
+        receiver_sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass)
         token = _tracking_context.set(context)
         slots = asyncio.Semaphore(MAX_CONCURRENT_TRACKERS)
 
@@ -2918,6 +2939,7 @@ class BPSReadAPIText(HomeAssistantView):
         try:
             allowed = _bermuda_distance_sensor_ids(hass)
             entities = sorted({eid[len("sensor."):].split("_distance_to_")[0] for eid in allowed})
+            entities = sorted(set(entities) | ReceiverSources(hass).direct_trackers())
             receivers = sorted({eid.split("_distance_to_", 1)[1] for eid in allowed})
         except Exception as e:
             _LOGGER.info(f"Error listing Bermuda distance sensors: {e}")
@@ -2954,7 +2976,7 @@ class BPSReadAPIText(HomeAssistantView):
 def _diagnostic_inventory(hass):
     """Only actual Bermuda beacons and enabled logical groups are selectable."""
     known = sorted({eid[len("sensor."):].split("_distance_to_", 1)[0]
-                    for eid in _bermuda_distance_sensor_ids(hass)})
+                    for eid in _bermuda_distance_sensor_ids(hass)} | ReceiverSources(hass).direct_trackers())
     data = get_bps_data(hass)
     groups = normalize_groups(data, known)
     return {"trackers": [{"key": key, "name": key} for key in known] + [
@@ -3016,8 +3038,9 @@ def _diagnostic_snapshot(hass, targets, now):
         if not report:
             raise ValueError("Save a BPS layout before recording")
         data = {}
+    sources = ReceiverSources(hass)
     known = {eid[len("sensor."):].split("_distance_to_", 1)[0]
-             for eid in _bermuda_distance_sensor_ids(hass)}
+             for eid in _bermuda_distance_sensor_ids(hass)} | sources.direct_trackers()
     groups = {"bps_group_" + g["id"]: g["beacons"] for g in normalize_groups(data, known)}
     recording = hass.data.get(DOMAIN, {}).get("_diagnostics")
     retained = recording.members if not report and recording and recording.active else {}
@@ -3050,7 +3073,6 @@ def _diagnostic_snapshot(hass, targets, now):
         "mode", "floor", "results", "applied", "last_solved_at")}
     readings = []
     max_age = _reading_max_age(data)
-    sources = ReceiverSources(hass)
     for beacon in beacons:
         factor, tracker_height = _tracker_distance_factor(data, beacon), _tracker_height(data, beacon)
         for floor in floors:
@@ -3060,13 +3082,17 @@ def _diagnostic_snapshot(hass, targets, now):
                 row = {"tracker": beacon, "receiver": slug, "floor": floor.get("name"),
                        "entity_id": source, "status": binding["status"] if sources.blocked(binding) else "missing",
                        "scanner_aliases": binding["aliases"], "tracker_height_m": tracker_height,
-                       "tracker_distance_factor": factor, "ignored": receiver.get("outdoor_policy") == "ignore"}
+                       "tracker_distance_factor": factor, "ignored": receiver.get("outdoor_policy") == "ignore",
+                       "measurement_source": sources.source_info(binding, state)}
                 if state is not None:
                     raw = state.state
                     unit = state.attributes.get("unit_of_measurement")
                     age = _reading_age_secs(state, now=now)
                     row.update({"raw_state": str(raw)[:256], "unit": str(unit)[:32] if unit is not None else None,
                                 "age_s": age, "status": "invalid"})
+                    provenance = state.attributes.get("bps_source")
+                    if isinstance(provenance, dict):
+                        row["measurement_source"] = copy.deepcopy(provenance)
                     ts = getattr(state, "last_updated", None) or getattr(state, "last_changed", None)
                     try:
                         row["observed"] = ts.timestamp()
@@ -3095,6 +3121,8 @@ def _diagnostic_snapshot(hass, targets, now):
                         pass
                     if raw in ("unknown", "unavailable"):
                         row["status"] = str(raw)
+                        if isinstance(provenance, dict):
+                            row["status"] = provenance.get("status") or "unavailable"
                 readings.append(row)
     wanted = set(targets) | set(beacons)
     positions = [copy.deepcopy(p) for p in hass.data.get(DOMAIN, {}).get("apitricords", [])

@@ -169,7 +169,7 @@ def test_runtime_ble_mapping_is_indexed_once_per_snapshot(hass, monkeypatch):
     matching = inventory(hass)
     rows = CountingRows(matching["runtime_address_map"])
     matching["runtime_address_map"] = rows
-    monkeypatch.setattr(sources, "inventory", lambda _hass: matching)
+    monkeypatch.setattr(sources, "inventory", lambda _hass, _direct=None: matching)
     resolver = ReceiverSources(hass)
     for _ in range(100):
         assert resolver.binding({"entity_id": "scanner_one", "scanner_mac": BLE})["identity"] == ("owner", RETAINED)

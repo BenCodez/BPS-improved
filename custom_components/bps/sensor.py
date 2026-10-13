@@ -139,6 +139,8 @@ def get_filtered_entities(hass):
         if entry is None or entry.platform != "bermuda":
             continue
         filtered.add(eid.replace("sensor.", "").split("_distance_to_")[0])
+    from .receiver_sources import ReceiverSources
+    filtered.update(ReceiverSources(hass).direct_trackers())
     return list(filtered)
 
 class CustomDistanceSensor(SensorEntity):

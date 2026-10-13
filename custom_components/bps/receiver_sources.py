@@ -6,19 +6,30 @@ import time
 from homeassistant.helpers import entity_registry as er
 
 from .bermuda_diagnostics import MAC
+from .bermuda_direct import BermudaDirect
 from .receiver_matching import _RANGE_MAC, inventory
 
 
 class ReceiverSources:
     """One detached registry/identity index per update or diagnostic snapshot."""
 
-    def __init__(self, hass):
+    def __init__(self, hass, *, direct=None):
         self.hass = hass
         lookup = getattr(er, "async_get", None)
         self.registry = lookup(hass) if lookup else None
+        self.direct = direct if direct is not None else BermudaDirect(hass)
         # Minimal callers without HA registry retain exact lookup; they cannot
         # expand aliases. Real HA always supplies the entity registry.
-        self.matching = inventory(hass) if self.registry is not None else {"options": []}
+        self.matching = inventory(hass, self.direct) if self.registry is not None else {"options": []}
+        self.direct_tracker_proofs = {}
+        for ent in getattr(self.registry, "entities", {}).values():
+            eid = ent.entity_id
+            uid = getattr(ent, "unique_id", "") or ""
+            match = _RANGE_MAC.search(uid)
+            if ent.platform == "bermuda" and match and eid.startswith("sensor.") and "_distance_to_" in eid:
+                tracker = eid.removeprefix("sensor.").split("_distance_to_", 1)[0]
+                owner = getattr(ent, "config_entry_id", None)
+                self.direct_tracker_proofs.setdefault((tracker, owner), []).append((eid, uid, uid[:match.start()]))
         self.options = {o["entity_id"]: o for o in self.matching["options"]}
         self.by_identity, self.owners_by_mac, self.readings, self.tracker_ids, self.reading_proofs = {}, {}, {}, {}, {}
         self.tracker_proofs = {}
@@ -63,6 +74,28 @@ class ReceiverSources:
             return None
         owners = option.get("config_entry_ids", [])
         return (owners[0], option["scanner_mac"]) if len(owners) == 1 else None
+
+    def direct_trackers(self):
+        """Retain registry tracker keys even when distance entities are disabled."""
+        result = set()
+        for (tracker, owner), proofs in self.direct_tracker_proofs.items():
+            identities = {identity for _, _, identity in proofs}
+            if len(identities) != 1:
+                continue
+            device = self.direct.device(owner, next(iter(identities)))
+            if device and self.direct.snapshots[owner]["devices"][device].get("tracked") is True:
+                result.add(tracker)
+        return result
+
+    def source_info(self, binding, state):
+        provenance = getattr(state, "attributes", {}).get("bps_source") if state is not None else None
+        if isinstance(provenance, dict):
+            return copy.deepcopy(provenance)
+        owner = binding.get("identity", (None,))[0] if binding.get("identity") else None
+        status = next((row for row in self.direct.statuses if row["entry_id"] == owner), {})
+        return {"path": "legacy_entity", "age_clock": "ha_publication", "reason":
+                binding["status"] if self.blocked(binding) else
+                status.get("reason", "identity_not_proven") if status.get("path") != "direct" else "direct_identity_not_proven"}
 
     def binding(self, receiver):
         if not isinstance(receiver, dict):
@@ -156,6 +189,29 @@ class ReceiverSources:
         return binding["status"] not in ("matched", "unmatched")
 
     def source(self, tracker, receiver, binding=None, *, now=None):
+        """Prefer public direct measurements only with owner/device/scanner proof."""
+        binding = binding or self.binding(receiver)
+        entity_id = f'sensor.{tracker}_distance_to_{receiver.get("entity_id", "")}'
+        key = binding.get("identity")
+        if not self.blocked(binding) and key and key[0] in self.direct.snapshots:
+            proofs = self.direct_tracker_proofs.get((tracker, key[0]), [])
+            anchor = [proof for proof in proofs if proof[0] == entity_id]
+            selected_proofs = anchor or [proof for proof in proofs if _RANGE_MAC.search(proof[1])[1].lower() == key[1]]
+            # Recheck after executor suspension, including disabled anchors.
+            valid = all((entry := self.registry.entities.get(eid)) is not None and entry.platform == "bermuda"
+                        and (getattr(entry, "unique_id", "") or "") == uid
+                        and getattr(entry, "config_entry_id", None) == key[0] for eid, uid, _ in proofs)
+            exact = self.registry.entities.get(entity_id)
+            captured = any(eid == entity_id for eid, _, _ in proofs)
+            if proofs and (not valid or exact is not None and not captured):
+                return entity_id, None
+            identities = {identity for _, _, identity in selected_proofs}
+            device = self.direct.device(key[0], next(iter(identities))) if len(identities) == 1 else None
+            if device and (key in self.direct.scanners or (key[0], device, key[1]) in self.direct.pairs):
+                return entity_id, self.direct.reading(key[0], device, key[1], entity_id, now=now)
+        return self._legacy_source(tracker, receiver, binding, now=now)
+
+    def _legacy_source(self, tracker, receiver, binding=None, *, now=None):
         binding = binding or self.binding(receiver)
         direct = f'sensor.{tracker}_distance_to_{receiver.get("entity_id", "")}'
         if self.blocked(binding):

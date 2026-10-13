@@ -47,6 +47,7 @@ from scipy.optimize import least_squares
 
 from .calibration_auto import assess_update, WINDOW_S as AUTO_HISTORY_WINDOW
 from .bermuda_calibration import build_preview, runtime_context, source_snapshot, source_for_floor
+from .bermuda_direct import BermudaDirect
 from .scanner_addresses import retained_mac, ble_mac
 
 _LOGGER = logging.getLogger(__name__)
@@ -554,6 +555,9 @@ def _ingest_dump(cal: dict, devices: dict) -> None:
             if (not isinstance(stamp, (int, float)) or not math.isfinite(stamp)
                     or newest - stamp > STALE_ADVERT_SECS):
                 continue
+            if "_bps_direct_usable" in advert and (not advert["_bps_direct_usable"]
+                    or advert.get("_bps_direct_age") is None or advert["_bps_direct_age"] > STALE_ADVERT_SECS):
+                continue
             distance = advert.get("rssi_distance_raw")
             if not isinstance(distance, (int, float)) or not math.isfinite(distance) or distance <= 0:
                 continue
@@ -833,17 +837,33 @@ def solve(cal: dict, floor_name: str):
 async def _dump_devices(hass) -> dict:
     # Bounded so a hung/slow Bermuda service can't stall the sampling loop
     # indefinitely; the caller counts a timeout as a normal sampling failure.
-    response = await asyncio.wait_for(
-        hass.services.async_call(
-            "bermuda",
-            "dump_devices",
-            {"configured_devices": True},
-            blocking=True,
-            return_response=True,
-        ),
-        timeout=DUMP_DEVICES_TIMEOUT_S,
-    )
-    return response or {}
+    direct = BermudaDirect(hass, include_scanner_devices=True)
+    if not direct.needs_legacy:
+        return direct.dump_devices()
+    try:
+        response = await asyncio.wait_for(
+            hass.services.async_call(
+                "bermuda",
+                "dump_devices",
+                {"configured_devices": True},
+                blocking=True,
+                return_response=True,
+            ),
+            timeout=DUMP_DEVICES_TIMEOUT_S,
+        )
+    except Exception as err:
+        if not direct.snapshots:
+            raise
+        _LOGGER.debug("Legacy Bermuda calibration dump unavailable (%s); retaining direct sources", type(err).__name__)
+        response = {}
+    if not direct.snapshots:
+        return response or {}
+    runtime = direct.legacy_scanners(hass)
+    addresses = {row["address"] for row in runtime.values()}
+    response = response if isinstance(response, dict) else {}
+    service = {key: value for key, value in response.items() if isinstance(value, dict)
+               and str(value.get("address") or "").lower() not in addresses}
+    return direct.dump_devices({**service, **runtime})
 
 
 async def _sample_loop(hass, cal: dict) -> None:

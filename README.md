@@ -825,6 +825,33 @@ other integrations. Missing runtime data and collection limits are identified;
 defaults are shown only when available from the installed Bermuda version.
 No settings are changed and no additional Bluetooth scan or dump is requested.
 
+When the installed Bermuda exposes its version-1 local measurement API, BPS
+uses its filtered metre ranges and packet timestamps for tracking, scanner
+identity/freshness for receiver matching and liveness, and raw metre ranges for
+scanner calibration. Existing BPS receiver corrections, tracker trims, layouts
+and entity IDs continue to apply. Disabled distance entities can still prove an
+existing tracker identity; a device name alone cannot. Bermuda is optional at
+the API level: older versions, unsupported snapshots and unavailable/failed
+entries retain the existing entity, runtime and service paths. A direct pair
+that is stale, rejected or missing does not fall back to a newer HA publication
+of its old range. Pet/stationary held ranges retain their last accepted packet
+age, even when a newer raw spike arrives.
+
+Full diagnostics also include the direct source choice/fallback reason,
+scanner bindings, raw/filtered RSSI and ranges, source and accepted-data ages,
+quality/rejection details, effective per-pair model/version, and up to five
+recent runtime history readings. Allowlisted toolkit settings, hardware
+profiles, filter modes, calibration decisions, history/shadow summaries and
+performance health appear when available. Profiles and quality metadata do not
+become BPS coordinates or certified accuracy. Captures prioritize tracked
+devices; scanner calibration data is requested separately by scanner address.
+Direct debug exports share a byte/count budget across entries and report omitted
+data. The history is recent runtime context, not a recorded replay. These reads
+stay local and do not require HTTP requests or installing a particular Bermuda
+fork. Keep one automatic calibration system active while validating changes;
+moving a correction into Bermuda requires deliberately updating the relevant
+BPS factor afterward.
+
 The BPS section includes saved receiver coordinates, heights and corrections,
 zones/sub-zones, building/tree outlines and wall materials, tracker tuning,
 entity states, history settings and tracking/calibration task health. A separate
