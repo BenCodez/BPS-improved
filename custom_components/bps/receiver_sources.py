@@ -79,6 +79,8 @@ class ReceiverSources:
         """Retain registry tracker keys even when distance entities are disabled."""
         result = set()
         for (tracker, owner), proofs in self.direct_tracker_proofs.items():
+            if not self._tracker_proofs_current(owner, proofs):
+                continue
             identities = {identity for _, _, identity in proofs}
             if len(identities) != 1:
                 continue
@@ -86,6 +88,11 @@ class ReceiverSources:
             if device and self.direct.snapshots[owner]["devices"][device].get("tracked") is True:
                 result.add(tracker)
         return result
+
+    def _tracker_proofs_current(self, owner, proofs):
+        return bool(proofs) and all((entry := self.registry.entities.get(eid)) is not None and entry.platform == "bermuda"
+            and (getattr(entry, "unique_id", "") or "") == uid
+            and getattr(entry, "config_entry_id", None) == owner for eid, uid, _identity in proofs)
 
     def source_info(self, binding, state):
         provenance = getattr(state, "attributes", {}).get("bps_source") if state is not None else None
@@ -196,11 +203,13 @@ class ReceiverSources:
         if not self.blocked(binding) and key and key[0] in self.direct.snapshots:
             proofs = self.direct_tracker_proofs.get((tracker, key[0]), [])
             anchor = [proof for proof in proofs if proof[0] == entity_id]
-            selected_proofs = anchor or [proof for proof in proofs if _RANGE_MAC.search(proof[1])[1].lower() == key[1]]
+            # The owner/device proof belongs to the tracker, not one receiver.
+            # It can authorize a newly placed scanner with no pair entity yet.
+            # An exact anchor still wins; conflicting whole-tracker identities
+            # remain ambiguous and cannot authorize a new receiver.
+            selected_proofs = anchor or proofs
             # Recheck after executor suspension, including disabled anchors.
-            valid = all((entry := self.registry.entities.get(eid)) is not None and entry.platform == "bermuda"
-                        and (getattr(entry, "unique_id", "") or "") == uid
-                        and getattr(entry, "config_entry_id", None) == key[0] for eid, uid, _ in proofs)
+            valid = self._tracker_proofs_current(key[0], proofs)
             exact = self.registry.entities.get(entity_id)
             captured = any(eid == entity_id for eid, _, _ in proofs)
             if proofs and (not valid or exact is not None and not captured):

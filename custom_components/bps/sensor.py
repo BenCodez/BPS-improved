@@ -395,7 +395,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     group_signature = None
 
-    async def sync_group_sensors(groups):
+    async def sync_group_sensors(groups, *, known_trackers=None):
         """Own only group entities; preserve the original per-beacon registry."""
         nonlocal group_signature
         signature = tuple((g["id"], g["name"]) for g in groups)
@@ -431,7 +431,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             # sensors again. This scan only runs when groups are retired.
             positions = {p["ent"]: p for p in hass.data.get("bps", {}).get("apitricords", [])
                          if not p.get("group")}
-            for entity in get_filtered_entities(hass):
+            for entity in get_filtered_entities(hass) if known_trackers is None else known_trackers:
                 ensure_sensors_for_entity(hass, entity, cache, additions)
                 position = positions.get(entity)
                 if position is not None:

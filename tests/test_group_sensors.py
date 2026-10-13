@@ -324,6 +324,60 @@ def test_direct_discovery_owner_guards_pause_reentry_and_cache_replacement(platf
     assert len(added) == created
 
 
+def test_unsolved_direct_beacon_reclaims_colliding_group_before_first_fix(platform, monkeypatch, tmp_path):
+    import bps
+    from test_bermuda_direct import snapshot, install, MAC
+    hass, registry, module, add, added = platform
+    hass.states.async_all = lambda _domain=None: []
+    hass.states.get = lambda _eid: None
+    config = types.SimpleNamespace(entry_id="entry", state="loaded", options={},
+        runtime_data=types.SimpleNamespace(coordinator=types.SimpleNamespace(devices={}, options={})))
+    hass.config_entries = types.SimpleNamespace(async_entries=lambda _domain: [config])
+    payloads = {"entry": snapshot()}
+    payloads["entry"]["devices"]["synthetic-tracker"]["tracked"] = False
+    captures = install(monkeypatch, payloads)
+    layout = {"floor": [], "outdoor_tracking": {"enabled": True},
+        "tracker_groups": [{"id": "rover", "name": "Synthetic Rover", "beacons": ["tag"]}]}
+    hass.data["bps"] = {"layout": layout, "_tracking_active": True}
+    monkeypatch.setattr(bps, "apitricords", [])
+    monkeypatch.setattr(bps, "tracked_entities", [])
+    monkeypatch.setattr(bps.time, "time", lambda: 1000.)
+    for name in ("last_liveness", "last_selftest", "last_history_flush"):
+        monkeypatch.setattr(bps.update_tracked_entities, name, 1000., raising=False)
+    async def stop_after_tick(_delay): raise asyncio.CancelledError
+    monkeypatch.setattr(bps.asyncio, "sleep", stop_after_tick)
+
+    async def scenario():
+        await module.async_setup_entry(hass, None, add)
+        groups = [entity for entity in added if isinstance(entity, module.BPSGroupSensor)]
+        assert len(groups) == 3
+        eid = "sensor.bps_group_rover_distance_to_proxy"
+        registry.entities[eid] = types.SimpleNamespace(entity_id=eid, platform="bermuda", device_id=None,
+            unique_id=f"synthetic-tracker_{MAC}_range", config_entry_id="entry", disabled_by="user")
+        device = payloads["entry"]["devices"]["synthetic-tracker"]
+        device.update(tracked=True, scanners={})
+        monkeypatch.setattr(module, "get_filtered_entities", lambda _hass: pytest.fail("extra group API capture"))
+        before = len(captures)
+        with pytest.raises(asyncio.CancelledError):
+            await bps.update_tracked_entities(hass)
+        assert len(captures) == before + 1 and bps.apitricords == []
+        assert all(entity.removed for entity in groups)
+        for suffix, _label in module.SENSOR_KINDS:
+            sensor = hass.data["bps_sensors"][f"sensor.bps_group_rover_{suffix}"]
+            assert not isinstance(sensor, module.BPSGroupSensor)
+            assert sensor.unique_id == f"{suffix}_bps_group_rover"
+            assert sensor._state == "unknown"
+        assert "sensor.bps_group_rover_bps_position" not in hass.data["bps_sensors"]
+        assert bps._receiver_sources_context.get() is None
+        # Diagnostics and the save boundary see the same genuine direct key;
+        # no fake HA distance states or successful map fix supply the proof.
+        inventory = bps._diagnostic_inventory(hass)
+        assert inventory["trackers"] == [{"key": "bps_group_rover", "name": "bps_group_rover"}]
+        response = await bps.BPSSaveAPIText()._write_save(hass, str(tmp_path), {}, layout)
+        assert response.status == 400 and not hass._store_saves
+    asyncio.run(scenario())
+
+
 def test_renamed_registry_entity_removed_by_unique_id(platform):
     hass, registry, module, add, added = platform
     asyncio.run(module.async_setup_entry(hass, None, add))

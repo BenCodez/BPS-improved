@@ -96,6 +96,14 @@ STALE_POSITION_SECS = 300
 # layout and lifecycle that supplied the cycle's measurements.
 MAX_CONCURRENT_TRACKERS = 8
 _tracking_context = ContextVar("bps_tracking_context", default=None)
+_receiver_sources_context = ContextVar("bps_receiver_sources", default=None)
+
+
+def _direct_tracker_keys(hass):
+    sources = _receiver_sources_context.get()
+    if sources is None or sources.hass is not hass:
+        sources = ReceiverSources(hass)
+    return sources.direct_trackers()
 
 
 def _capture_tracking_context(hass):
@@ -660,6 +668,7 @@ async def update_tracked_entities(hass):
     # Reloads may be requested by callbacks originating inside a tracker task;
     # the new background loop must not inherit that old batch's ContextVar.
     _tracking_context.set(None)
+    _receiver_sources_context.set(None)
     while True:
         # Receiver liveness and the self-localization accuracy sensor are
         # receiver-side diagnostics, independent of how many beacons are being
@@ -697,6 +706,7 @@ async def update_tracked_entities(hass):
             except Exception as e:  # disk trouble must not stop tracking
                 _LOGGER.warning("BPS position history flush failed: %s", e)
 
+        sources_token = None
         try:
             # This used to render a Jinja template that selected every
             # "sensor.*_distance_to_*" and then intersect it with the Bermuda
@@ -710,6 +720,7 @@ async def update_tracked_entities(hass):
             # than with the number of beacons.
             tracked_entities = _bermuda_distance_sensor_ids(hass)
             receiver_sources = ReceiverSources(hass)
+            sources_token = _receiver_sources_context.set(receiver_sources)
             direct_trackers = receiver_sources.direct_trackers()
             discover_sensors = hass.data.get(DOMAIN, {}).get("resume_sensor_discovery")
             if discover_sensors is not None and direct_trackers:
@@ -745,6 +756,9 @@ async def update_tracked_entities(hass):
 
         except Exception as e:
             _LOGGER.info(f"Error executing Jinja code: {e}")
+        finally:
+            if sources_token is not None:
+                _receiver_sources_context.reset(sources_token)
 
         await asyncio.sleep(secToUpdate)  # Run every X seconds, set timer in global variables
 
@@ -1961,10 +1975,11 @@ async def update_tracker_groups(hass):
     known = {p["ent"] for p in originals}
     known.update(eid.removeprefix("sensor.").split("_distance_to_", 1)[0]
                  for eid in tracked_entities)
+    known.update(_direct_tracker_keys(hass))
     groups = normalize_groups(layout, known_trackers=known)
     sync = hass.data.get(DOMAIN, {}).get("sync_group_sensors")
     if sync is not None:
-        await sync(groups)
+        await sync(groups, known_trackers=known)
         if not _tracking_context_current(context):
             return
     dom["groups_active"] = bool(groups) or len(originals) != len(apitricords)
@@ -2101,6 +2116,7 @@ async def process_entities(hass, new_global_data, receiver_sources=None):
             return
         receiver_sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass)
         token = _tracking_context.set(context)
+        sources_token = _receiver_sources_context.set(receiver_sources)
         slots = asyncio.Semaphore(MAX_CONCURRENT_TRACKERS)
 
         async def process(eids):
@@ -2129,6 +2145,7 @@ async def process_entities(hass, new_global_data, receiver_sources=None):
                 await update_tracker_groups(hass)
                 await _capture_recent_tracking(hass)
         finally:
+            _receiver_sources_context.reset(sources_token)
             _tracking_context.reset(token)
 
 def extract_candidate_floors(new_global_data, tmpentity):
@@ -2840,7 +2857,7 @@ class BPSSaveAPIText(HomeAssistantView):
         groups = coords_obj.get("tracker_groups", []) if isinstance(coords_obj, dict) else []
         if groups:
             known = {eid.removeprefix("sensor.").split("_distance_to_", 1)[0]
-                     for eid in _bermuda_distance_sensor_ids(hass)}
+                     for eid in _bermuda_distance_sensor_ids(hass)} | _direct_tracker_keys(hass)
             error = await hass.async_add_executor_job(validate_outdoor_layout, coords_obj, known)
             if error:
                 return web.Response(status=400, text=error)
@@ -3175,6 +3192,7 @@ def _recent_tracking_snapshot(hass, now):
         "tracking_update_interval_s": secToUpdate}
     positions = dom.get("apitricords", [])
     known = {p.get("ent") for p in positions if not p.get("group") and isinstance(p.get("ent"), str)}
+    known.update(_direct_tracker_keys(hass))
     members = {beacon for group in normalize_groups(layout, known_trackers=known)
                for beacon in group.get("beacons", [])}
     # Groups are appended after originals at publication. Retain their
