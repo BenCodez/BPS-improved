@@ -304,7 +304,8 @@ def test_full_report_budgets_maximum_utf8_profiles_across_all_settings_views(has
                     assert profile["environment"] == "unknown"
                     radio = {"attenuation": 2., "rssi_offset": -3.} if namespace == "receiver_profiles" else {"reference_power": -60.}
                     assert all(profile[key] == value for key, value in radio.items())
-                    rich = {field: profile[field] for field in bps.bermuda_diagnostics.PROFILE_TEXT_FIELDS if field in profile}
+                    rich = {field: profile[field] for field in bps.bermuda_diagnostics.PROFILE_TEXT_FIELDS
+                            if field in profile and field != "environment"}
                     if rich:
                         assert all(value == text for value in rich.values())
                         emitted_bytes += len(json.dumps(rich, ensure_ascii=False, separators=(",", ":")).encode())
@@ -328,6 +329,47 @@ def test_full_report_budgets_maximum_utf8_profiles_across_all_settings_views(has
     last = updated["bermuda"]["entries"][-1]["effective_settings"]["measurement_toolkit"]
     previous = report["bermuda"]["entries"][-1]["effective_settings"]["measurement_toolkit"]
     assert last["profile_metadata_export"]["signature"] != previous["profile_metadata_export"]["signature"]
+
+
+@pytest.mark.parametrize("entry_count", [1, 8])
+def test_full_report_budgets_freeform_environment_text_from_other_bermuda_sources(hass, monkeypatch, entry_count):
+    configure(hass, monkeypatch)
+    hass.states.async_all = lambda _domain=None: []
+    monkeypatch.setattr(bps.er, "async_get", lambda _h: SimpleNamespace(entities={}, async_get=lambda _eid: None), raising=False)
+    monkeypatch.setattr(bps.dr, "async_get", lambda _h: SimpleNamespace(devices={}), raising=False)
+    text = "🛰" * 512
+    toolkit = {"receiver_profiles": {f"aa:bb:cc:dd:ee:{i:02x}": {
+        "environment": text, "attenuation": 2.} for i in range(128)},
+        "beacon_profiles": {f"synthetic-beacon-{i}": {
+            "environment": text, "reference_power": -60.} for i in range(128)}}
+    # This fork uses a short enum, but BPS also reads other Bermuda sources;
+    # their free-form or old values must not bypass the shared text limit.
+    options = {"measurement_toolkit": toolkit}
+    entries = [SimpleNamespace(entry_id=f"synthetic-entry-{i}", title="Synthetic Bermuda", state="loaded",
+        options=copy.deepcopy(options), runtime_data=SimpleNamespace(coordinator=SimpleNamespace(
+            options=copy.deepcopy(options), devices={}))) for i in range(entry_count)]
+    hass.config_entries = SimpleNamespace(async_entries=lambda _domain: entries)
+    before = copy.deepcopy([(entry.options, entry.runtime_data.coordinator.options) for entry in entries])
+    report = bps._diagnostic_report_snapshot(hass, 1000.)
+    assert len(diag.format_report(report).encode()) < diag.MAX_REPORT_BYTES
+    included, omitted = 0, 0
+    for entry in report["bermuda"]["entries"]:
+        for view in ("configured_settings", "effective_settings"):
+            settings = entry[view]["measurement_toolkit"]
+            for namespace in ("receiver_profiles", "beacon_profiles"):
+                assert len(settings[namespace]) == 128
+                radio = {"attenuation": 2.} if namespace == "receiver_profiles" else {"reference_power": -60.}
+                for profile in settings[namespace].values():
+                    assert all(profile[key] == value for key, value in radio.items())
+                    if "environment" in profile:
+                        assert profile["environment"] == text
+                        included += len(json.dumps({"environment": text}, ensure_ascii=False, separators=(",", ":")).encode())
+            loss = settings["profile_metadata_export"]
+            omitted += loss["omitted_fields"]
+            assert loss["omitted_fields"] == sum(loss["omitted_profiles"].values())
+    assert included <= bps.bermuda_diagnostics.MAX_PROFILE_METADATA_BYTES and omitted > 0
+    assert [(entry.options, entry.runtime_data.coordinator.options) for entry in entries] == before
+    assert not hass._store_saves
 
 
 def test_normal_full_profiles_remain_complete_and_scanner_recovery_is_allowlisted(hass):

@@ -13,7 +13,8 @@ from homeassistant.helpers import entity_registry as er
 MAX_ENTITIES = 4096
 MAX_ADVERTS = 2048
 MAX_PROFILE_METADATA_BYTES = 128 * 1024
-PROFILE_TEXT_FIELDS = ("hardware_type", "manufacturer", "model", "antenna", "notes")
+PROFILE_TEXT_FIELDS = ("hardware_type", "manufacturer", "model", "antenna", "environment", "notes")
+PROFILE_ENVIRONMENT_VALUES = ("indoor", "outdoor", "unknown")
 SETTING_DEFAULTS = {
     "ref_power": "DEFAULT_REF_POWER", "attenuation": "DEFAULT_ATTENUATION",
     "smoothing_samples": "DEFAULT_SMOOTHING_SAMPLES", "max_velocity": "DEFAULT_MAX_VELOCITY",
@@ -96,7 +97,10 @@ def settings(values, *, compact=False, metadata_budget=None):
                         # metadata. Numeric fields and identity always remain.
                         signature.update(json.dumps([namespace, identity, profile], sort_keys=True,
                             ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode())
-                        metadata = {key: profile[key] for key in PROFILE_TEXT_FIELDS if key in profile}
+                        # Keep the bounded radio-context enum, while charging
+                        # free-form environment text from other/older sources.
+                        metadata = {key: profile[key] for key in PROFILE_TEXT_FIELDS if key in profile
+                            and not (key == "environment" and profile[key] in PROFILE_ENVIRONMENT_VALUES)}
                         size = len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode()) if metadata else 0
                         if size <= min(metadata_budget["remaining"], view_quota - metadata_bytes):
                             metadata_budget["remaining"] -= size
@@ -104,7 +108,7 @@ def settings(values, *, compact=False, metadata_budget=None):
                         else:
                             omitted[namespace] = omitted.get(namespace, 0) + 1
                             omitted_fields += len(metadata)
-                            profile = {key: value for key, value in profile.items() if key not in PROFILE_TEXT_FIELDS}
+                            profile = {key: value for key, value in profile.items() if key not in metadata}
                     allowed[namespace][identity] = profile
         if omitted:
             allowed["profile_metadata_export"] = {"budget_bytes": MAX_PROFILE_METADATA_BYTES,
