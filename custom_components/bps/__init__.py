@@ -717,23 +717,26 @@ async def update_tracked_entities(hass):
 
             await prune_stale_positions(hass)
 
-            num_points = len(tracked_entities) + sum(len(device["scanners"]) for snapshot in receiver_sources.direct.snapshots.values()
-                for device in snapshot["devices"].values() if device.get("tracked") is True)
-            if num_points == 0:
+            # Legacy admission still follows published distance entities. A
+            # proved direct tracker must also run when its adverts disappear,
+            # so its normal unavailable handling clears nearest-zone promptly.
+            num_points = len(tracked_entities)
+            if num_points == 0 and not direct_trackers:
                 await update_tracker_groups(hass)
                 await _capture_recent_tracking(hass)
                 _LOGGER.info("There are no devices present to track, sleep 10 seconds")
                 await asyncio.sleep(10)
                 continue  # Skip and start over
             layout = get_bps_data(hass)
-            if num_points < 3 and not outdoor_settings(layout)["enabled"]:
+            legacy_admitted = num_points >= 3 or outdoor_settings(layout)["enabled"]
+            if not legacy_admitted and not direct_trackers:
                 await update_tracker_groups(hass)
                 await _capture_recent_tracking(hass)
                 _LOGGER.info("There are not enough trackers with available data to track, sleep 10 seconds")
                 await asyncio.sleep(10)
                 continue  # Skip and start over
 
-            cleaned = [item.split("_distance_to_")[0].replace("sensor.", "") for item in tracked_entities]
+            cleaned = [item.split("_distance_to_")[0].replace("sensor.", "") for item in tracked_entities] if legacy_admitted else []
             unique_values = list(set(cleaned) | direct_trackers)
             # Use a separate copy per entity to avoid cross-entity mutation side effects.
             new_global_data = [{"entity": ent, "data": copy.deepcopy(layout)} for ent in unique_values]

@@ -539,3 +539,78 @@ def test_beacon_debug_disabled_direct_aliases_preserve_multi_entry_ambiguity(has
         if eid.startswith("sensor.other_"): entry.config_entry_id = "second"
     states.clear()
     assert bps._beacon_links(hass) == [{"device": "other", "receivers": []}, {"device": "tag", "receivers": []}]
+
+
+def _tick_with_retained_sensors(hass, monkeypatch, data):
+    """Run the real tick and SensorEntity state writer for one bounded cycle."""
+    hass.data["bps"]["layout"] = data
+    previous = {"ent": "tag", "floor": "Ground", "zone": "synthetic_previous_zone",
+        "cords": [10, 20], "updated": 998.}
+    bps.apitricords[:] = [previous]
+    hass.data["bps"]["apitricords"] = bps.apitricords
+    sensors, writes, sleeps = {}, [], []
+    for suffix, value in (("zone", "synthetic_previous_zone"), ("nearest_zone", "synthetic_previous_zone"),
+                          ("floor", "Ground"), ("sub_zone", "unknown")):
+        eid = f"sensor.tag_bps_{suffix}"
+        sensor = NS(_state=value, _attrs={})
+        sensor.async_write_ha_state = lambda eid=eid, sensor=sensor: writes.append((eid, sensor._state))
+        sensors[eid] = sensor
+    hass.data["bps_sensors"] = sensors
+    monkeypatch.setattr(bps, "new_global_data", {})
+    for name in ("last_liveness", "last_selftest", "last_history_flush"):
+        monkeypatch.setattr(bps.update_tracked_entities, name, 1000., raising=False)
+    async def stop_after_tick(delay):
+        sleeps.append(delay)
+        raise asyncio.CancelledError
+    monkeypatch.setattr(bps.asyncio, "sleep", stop_after_tick)
+    async def run():
+        with pytest.raises(asyncio.CancelledError):
+            await bps.update_tracked_entities(hass)
+    asyncio.run(run())
+    return previous, sensors, writes, sleeps
+
+
+@pytest.mark.parametrize("reading_count", [0, 1, 2])
+def test_indoor_tick_processes_proved_direct_tracker_after_adverts_clear_or_become_insufficient(hass, monkeypatch, reading_count):
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    states.clear()
+    for entry in entries.values(): entry.disabled_by = "user"
+    ads = payloads["entry"]["devices"]["synthetic-tracker"]["scanners"]
+    if reading_count == 0:
+        ads.clear()  # Bermuda can deliberately clear iBeacon adverts on UUID change.
+    elif reading_count == 2:
+        payloads["entry"]["scanners"][OTHER] = scanner(OTHER, name="Other station")
+        ads[OTHER] = measurement(OTHER)
+        data["floor"][0]["receivers"].append({"entity_id": "other_station", "cords": {"x": 100, "y": 20}})
+        add("sensor.tag_distance_to_other_station", None, uid=f"synthetic-tracker_{OTHER}_range")
+        entries["sensor.tag_distance_to_other_station"].disabled_by = "user"
+    previous, sensors, writes, sleeps = _tick_with_retained_sensors(hass, monkeypatch, data)
+    expected = [("sensor.tag_bps_nearest_zone", "unknown")] if reading_count == 0 else []
+    assert writes == expected
+    assert sensors["sensor.tag_bps_nearest_zone"]._state == ("unknown" if reading_count == 0 else "synthetic_previous_zone")
+    assert sensors["sensor.tag_bps_zone"]._state == "synthetic_previous_zone"
+    assert sensors["sensor.tag_bps_floor"]._state == "Ground"
+    assert bps.apitricords == [previous] and previous["updated"] == 998.
+    assert [subject["entity"] for subject in bps.new_global_data] == ["tag"]
+    assert sum("distance" in receiver for receiver in bps.new_global_data[0]["data"]["floor"][0]["receivers"]) == reading_count
+    assert sleeps == [bps.secToUpdate] and len(calls) == 1
+
+
+@pytest.mark.parametrize("legacy_count", [0, 1, 2])
+@pytest.mark.parametrize("api", ["unproved", "unsupported"])
+def test_indoor_tick_keeps_legacy_admission_without_proved_direct_tracker(hass, monkeypatch, legacy_count, api):
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    for eid in list(states)[legacy_count:]: states.pop(eid)
+    if api == "unproved":
+        # Several unrelated API observations must not supply admission for the
+        # legacy tracker merely because the API device happens to share a name.
+        payloads["entry"] = snapshot(did="different-synthetic-device")
+        ads = payloads["entry"]["devices"]["different-synthetic-device"]["scanners"]
+        for i in range(4): ads[f"aa:bb:cc:dd:ee:{i:02x}"] = measurement()
+    else:
+        payloads["entry"] = {"version": 99}
+    previous, sensors, writes, sleeps = _tick_with_retained_sensors(hass, monkeypatch, data)
+    assert writes == [] and sleeps == [10]
+    assert bps.new_global_data == {}
+    assert sensors["sensor.tag_bps_nearest_zone"]._state == "synthetic_previous_zone"
+    assert bps.apitricords == [previous]
