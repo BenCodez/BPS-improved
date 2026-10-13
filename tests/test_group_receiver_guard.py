@@ -111,6 +111,28 @@ def test_holding_a_supported_prior_fix_never_refreshes_its_timestamp_and_expires
     assert report["beacons_reporting"] == 2
 
 
+def test_the_only_eligible_member_keeps_its_large_uncertainty():
+    p = payload()
+    p["beacon_positions"][0].update(cords=[10, 0], estimated_uncertainty_m=1, weight=.99)
+    p["beacon_positions"][1].update(estimated_uncertainty_m=100, weight=.01)
+    result, report = constrain_group(p, constraints(), None, 10, NOW, 30)
+    assert result["cords"] == [40, 0] and report["selected_beacon"] == "b"
+    assert result["outdoor"]["estimated_uncertainty_m"] >= 100
+    assert report["source_uncertainty_m"] == 100
+
+
+def test_a_held_prior_fix_keeps_its_large_uncertainty():
+    p = payload()
+    for member in p["beacon_positions"]:
+        member["cords"] = [10, 0]
+    prior = {"floor": "Yard", "cords": [-60, 0], "updated": NOW - 1,
+             "outdoor": {"estimated_uncertainty_m": 100}}
+    result, report = constrain_group(p, constraints(), prior, 10, NOW, 30)
+    assert result["cords"] == prior["cords"] and report["state"] == "held"
+    assert result["outdoor"]["estimated_uncertainty_m"] >= 100
+    assert report["source_uncertainty_m"] == 100
+
+
 def test_guard_cannot_spend_elapsed_held_time_to_bypass_the_motion_budget():
     p = payload()
     p["motion_gate"] = {"state": "limited", "allowed_step_m": 10}

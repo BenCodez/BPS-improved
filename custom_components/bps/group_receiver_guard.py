@@ -165,10 +165,12 @@ def constrain_group(position, constraints, previous, scale, now, max_age_s, *, m
     if candidates:
         member, point = min(candidates, key=lambda pair: math.dist(pair[1], prior_point)
                            if prior_point is not None else -pair[0]["weight"])
+        source_uncertainty = finite_number(member.get("estimated_uncertainty_m"), minimum=0)
         report.update(state="member_fix", selected_beacon=member["ent"])
         position["cords"] = point
         position["updated"] = member["updated"]
     elif prior_point is not None and not conflicts(prior_point) and not prior.get("outdoor", {}).get("detection_only"):
+        source_uncertainty = finite_number(prior.get("outdoor", {}).get("estimated_uncertainty_m"), minimum=0)
         report["state"] = "held"
         position["cords"] = prior_point
         position["updated"] = prior_time  # cached coordinates do not gain a new observation timestamp
@@ -177,7 +179,10 @@ def constrain_group(position, constraints, previous, scale, now, max_age_s, *, m
     displacement = math.dist(original, position["cords"]) / scale
     report["displacement_m"] = displacement
     quality = position["outdoor"]
-    quality["estimated_uncertainty_m"] = math.hypot(quality["estimated_uncertainty_m"], displacement)
+    quality["estimated_uncertainty_m"] = max(
+        math.hypot(quality["estimated_uncertainty_m"], displacement), source_uncertainty or 0)
+    if source_uncertainty is not None:
+        report["source_uncertainty_m"] = source_uncertainty
     quality["confidence"] = "poor"
     quality["receiver_guard"] = report
     position["fusion_confidence"] = "disagreement"
