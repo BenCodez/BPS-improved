@@ -208,3 +208,83 @@ def test_removed_groups_clear_receiver_guard_diagnostics(monkeypatch, outdoor):
     monkeypatch.setattr(bps, "apitricords", [])
     asyncio.run(bps.update_tracker_groups(hass))
     assert "group_receiver_guards" not in hass.data["bps"]
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("complete_absence", True), ("stale_pair", True), ("ambiguous", False),
+    ("api_truncated", False), ("bridge_truncated", False), ("api_missing_counts", False),
+    ("missing_age", False), ("negative_age", False), ("nonfinite_age", False),
+    ("fresh_raw_stale_status", False),
+])
+def test_real_direct_adapters_require_complete_unambiguous_contact_evidence(hass, monkeypatch, case, expected):
+    from test_bermuda_direct import prepared, measurement, MAC, OTHER
+    from bps import bermuda_direct
+    from bps.receiver_sources import ReceiverSources
+
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    snapshot = payloads["entry"]
+    device = snapshot["devices"]["synthetic-tracker"]
+    if case in ("complete_absence", "api_truncated", "api_missing_counts"):
+        device["scanners"] = {}
+    if case == "api_truncated":
+        snapshot["omitted"]["observations"] = 1
+    elif case == "api_missing_counts":
+        snapshot.pop("omitted")
+    elif case == "bridge_truncated":
+        monkeypatch.setattr(bermuda_direct, "MAX_OBSERVATIONS", 0)
+    elif case == "ambiguous":
+        device["scanners"][OTHER] = measurement(OTHER, retained=MAC)
+    elif case in ("missing_age", "negative_age", "nonfinite_age"):
+        device["scanners"][MAC]["age"] = {"missing_age": None, "negative_age": -1,
+                                           "nonfinite_age": float("nan")}[case]
+    elif case in ("stale_pair", "fresh_raw_stale_status"):
+        ad = device["scanners"][MAC]
+        ad["status"] = "stale"
+        if case == "stale_pair":
+            ad["age"] = 31
+            ad["observed"] = NOW - 31
+    source = ReceiverSources(hass)
+    result = receiver_constraints(data["floor"][0], ["tag"], source, {}, NOW, 30)
+    assert bool(result) is expected
+    if result:
+        assert result[0]["missing_beacons"] == ["tag"]
+
+
+def test_legacy_distance_liveness_retains_the_original_reading_age(hass, monkeypatch):
+    import asyncio
+    import bps
+    from test_receiver_aliases import aliases, timestamp
+    from test_bermuda_direct import install
+    from bps.receiver_sources import ReceiverSources
+
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    install(monkeypatch, {"entry": None})
+    states[new].last_updated = timestamp(NOW - 29)
+    asyncio.run(bps.update_receiver_liveness(hass))
+    health = hass.data["bps"]["rl_status_snapshot"]
+    assert health["old_station"]["online"] is True
+    assert health["old_station"]["source_age_s"] == 29
+    monkeypatch.setattr(bps.time, "time", lambda: NOW + 2)
+    source = ReceiverSources(hass)
+    assert receiver_constraints(data["floor"][0], ["tag"], source, health, NOW + 2, 30) == []
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert hass.data["bps"]["rl_status_snapshot"]["old_station"]["online"] is None
+
+
+def test_direct_scanner_liveness_age_survives_an_api_fallback(hass, monkeypatch):
+    import asyncio
+    import bps
+    from test_bermuda_direct import prepared, MAC
+    from bps.receiver_sources import ReceiverSources
+
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    payloads["entry"]["scanners"][MAC]["scanner_last_seen_age"] = 29
+    asyncio.run(bps.update_receiver_liveness(hass))
+    health = hass.data["bps"]["rl_status_snapshot"]
+    assert health["old_station"]["online"] is True
+    assert health["old_station"]["source_age_s"] == 29
+    payloads["entry"] = None
+    states[new].state = "unavailable"
+    monkeypatch.setattr(bps.time, "time", lambda: NOW + 2)
+    source = ReceiverSources(hass)
+    assert receiver_constraints(data["floor"][0], ["tag"], source, health, NOW + 2, 30) == []

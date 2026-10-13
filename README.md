@@ -1242,8 +1242,9 @@ have no fresh distance for any member beacon. A group is not published within
 limit or retains a recent supported group fix with its original timestamp. If
 neither is available, the group position becomes unknown rather than inventing a
 new point. Offline stations, unknown health, disabled/missing pair entities,
-ambiguous identities, manually ignored receivers and current raw packets awaiting
-filter acceptance do not create exclusions. The check uses Bermuda's direct
+ambiguous identities or pairs, incomplete exports, invalid clocks, manually
+ignored receivers and current raw packets awaiting filter acceptance do not create
+exclusions. The check uses Bermuda's direct
 scanner/packet data when available and recent proven liveness for older versions.
 Diagnostics show the rejected point, affected stations and the chosen action;
 full reports retain the reason even when the group position is unknown.

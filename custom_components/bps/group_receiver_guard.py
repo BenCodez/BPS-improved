@@ -35,6 +35,25 @@ def _range(value):
         return None
 
 
+def _direct_absence_known(direct, info, now, limit):
+    """Missing rows prove silence only in a complete, unambiguous export."""
+    owner = info.get("entry_id")
+    snapshot = direct.snapshots.get(owner, {})
+    for field in ("omitted", "bridge_omitted"):
+        counts = snapshot.get(field)
+        if not isinstance(counts, Mapping) or any(
+                finite_number(counts.get(key), minimum=0) != 0
+                for key in ("devices", "scanners", "observations")):
+            return False
+    rows = direct.pairs.get((owner, info.get("device_id"), info.get("scanner_mac")), [])
+    if len(rows) > 1:
+        return False
+    if not rows:
+        return info.get("reason") == "measurement_missing"
+    age = finite_number(info.get("source_age_s"), minimum=0)
+    return age is not None and age <= direct.now and age + now - direct.now >= limit
+
+
 def receiver_constraints(floor, members, sources, health, now, max_age_s):
     """Use proven online identities and supported pairs; unknown evidence is neutral."""
     limit = min(HEALTH_MAX_AGE_S, max_age_s)
@@ -55,7 +74,7 @@ def receiver_constraints(floor, members, sources, health, now, max_age_s):
         cached = health.get(rec.get("entity_id"), {})
         captured = finite_number(cached.get("captured"), minimum=0)
         same_identity = list(key) == cached.get("identity")
-        evidence_age = finite_number(cached.get("source_age_s"), 0.0, minimum=0)
+        evidence_age = finite_number(cached.get("source_age_s", 0.0), minimum=0)
         current_health = same_identity and captured is not None and 0 <= now - captured < limit \
             and evidence_age is not None and evidence_age + now - captured < limit
         scanner_age = sources.direct.scanner_age(key)
@@ -90,6 +109,8 @@ def receiver_constraints(floor, members, sources, health, now, max_age_s):
                 break
             if info.get("path") == "direct" and info.get("reason") in (
                     "invalid_observation_clock", "accepted_stamp_unavailable", "filtered_measurement_unavailable"):
+                break
+            if info.get("path") == "direct" and not _direct_absence_known(sources.direct, info, now, limit):
                 break
             missing.append(member)
         if len(missing) == len(members):

@@ -1329,6 +1329,8 @@ async def update_receiver_liveness(hass):
                 names.append(slugify(option["name"]))
         return list(dict.fromkeys(names))
 
+    source_evidence_ages = {}
+
     def live_distance(slug):
         binding = bindings.get(slug, {})
         key = binding.get("identity")
@@ -1336,7 +1338,9 @@ async def update_receiver_liveness(hass):
             clock, cutoff = time.time(), _reading_max_age(layout)
             for device in sources.direct.snapshots[key[0]]["devices"]:
                 state = sources.direct.reading(key[0], device, key[1], "", now=clock)
-                if isinstance(state.state, (int, float)) and (not cutoff or _reading_age_secs(state, now=clock) <= cutoff):
+                source_age = _reading_age_secs(state, now=clock)
+                if isinstance(state.state, (int, float)) and (not cutoff or source_age <= cutoff):
+                    source_evidence_ages[slug] = source_age
                     return True
             return False
         options = [option for name in binding.get("aliases", [])
@@ -1359,6 +1363,7 @@ async def update_receiver_liveness(hass):
                 observed = stamp.timestamp()
                 if math.isfinite(value) and value >= 0 and math.isfinite(observed) and observed <= now \
                         and (max_age == 0 or now - observed <= max_age):
+                    source_evidence_ages[slug] = now - observed
                     return True
             except (TypeError, ValueError, AttributeError, OSError, OverflowError):
                 continue
@@ -1373,7 +1378,9 @@ async def update_receiver_liveness(hass):
         if identity in sources.direct.scanners:
             direct_age = sources.direct.scanner_age(identity)
             if direct_age is not None and direct_age >= 0:
-                return direct_age <= RECEIVER_OFFLINE_SECS
+                source_age = direct_age + max(0.0, time.time() - sources.direct.now)
+                source_evidence_ages[slug] = source_age
+                return source_age <= RECEIVER_OFFLINE_SECS
         age = (dom.get("rl_mac_ages", {}).get(mac) if len(sources.owners_by_mac.get(mac, ())) <= 1
                and identity not in sources.direct.scanners else None)
         if age is None and not mac and matching.get(slug, {}).get("liveness_name_unique", True):
@@ -1381,6 +1388,7 @@ async def update_receiver_liveness(hass):
             # own age or current connectivity/readings, even after dump failure.
             age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
+            source_evidence_ages[slug] = age + elapsed
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS
         aliases = evidence_slugs(slug)
         for alias in aliases:
@@ -1398,6 +1406,8 @@ async def update_receiver_liveness(hass):
     dom["rl_offline"] = sorted(s for s, status in resolved.items() if status is False)
     dom["rl_unknown"] = sorted(s for s, status in resolved.items() if status is None)
     def evidence_age(slug):
+        if slug in source_evidence_ages:
+            return finite_number(source_evidence_ages[slug], minimum=0)
         key = bindings.get(slug, {}).get("identity")
         age = finite_number(dom.get("rl_mac_ages", {}).get(key[1]), minimum=0) if key else None
         return age + elapsed if age is not None else 0.0
