@@ -160,3 +160,51 @@ def test_group_publication_applies_the_guard_without_moving_individual_beacons(m
     assert group["outdoor"]["receiver_guard"]["state"] == "member_fix"
     assert [p for p in bps.apitricords if not p.get("group")] == before
     assert hass.data["bps"]["group_receiver_guards"]["bps_group_rover"]["state"] == "member_fix"
+
+
+def test_guard_hold_cannot_reuse_consumed_motion_time_without_a_motion_gate(monkeypatch):
+    import asyncio
+    import bps
+    from conftest import make_hass
+
+    hass = make_hass()
+    floor = copy.deepcopy(FLOOR)
+    floor["scale"] = 1
+    floor["receivers"][0]["cords"]["x"] = 8
+    hass.data["bps"] = {"layout": {"outdoor_tracking": {"enabled": True}, "floor": [floor],
+        "tracker_groups": [{"id": "rover", "beacons": ["a", "b"]}]}}
+    source = sources()
+    source.direct_trackers = lambda: {"a", "b"}
+    monkeypatch.setattr(bps, "ReceiverSources", lambda _: source)
+    monkeypatch.setattr(bps, "get_position_history", lambda _: NS(record=lambda *a: None, mark_gap=lambda *a: None))
+    monkeypatch.setattr(bps, "apitricords", [])
+    clock = NOW
+    monkeypatch.setattr(bps.time, "time", lambda: clock)
+    for step, coordinates in enumerate(((0, 0), (7, 9), (8, 12))):
+        clock = NOW + step
+        previous = [p for p in bps.apitricords if p.get("group")]
+        bps.apitricords = [{"ent": ent, "floor": "Yard", "cords": [x, 0], "updated": clock,
+            "outdoor": {"observed": clock, "estimated_uncertainty_m": 4, "receivers_used": 4}}
+            for ent, x in zip(("a", "b"), coordinates)] + previous
+        asyncio.run(bps.update_tracker_groups(hass))
+        group = next(p for p in bps.apitricords if p.get("group"))
+        assert group["cords"] == [0, 0]
+        assert group["updated"] == NOW
+    assert "motion_gate" not in group
+    assert group["outdoor"]["receiver_guard"]["state"] == "held"
+    assert hass.data["bps"]["group_stability"]["bps_group_rover"]["motion_epoch"] == NOW + 2
+
+
+@pytest.mark.parametrize("outdoor", [False, True])
+def test_removed_groups_clear_receiver_guard_diagnostics(monkeypatch, outdoor):
+    import asyncio
+    import bps
+    from conftest import make_hass
+
+    hass = make_hass()
+    hass.data["bps"] = {"layout": {"outdoor_tracking": {"enabled": outdoor},
+        "floor": [copy.deepcopy(FLOOR)], "tracker_groups": []},
+        "group_receiver_guards": {"bps_group_rover": {"state": "unavailable"}}}
+    monkeypatch.setattr(bps, "apitricords", [])
+    asyncio.run(bps.update_tracker_groups(hass))
+    assert "group_receiver_guards" not in hass.data["bps"]

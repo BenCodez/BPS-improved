@@ -58,7 +58,7 @@ from .outdoor_tracking import solve_outdoor, account_for_published_position
 from .display_radius import reporting_radius_limit
 from .sparse_tracking import solve_sparse_detection
 from .solver_settings import MIN_WEIGHT_RADIUS_M, SOLVER_ROBUST_F_SCALE
-from .tracker_groups import fuse_groups, normalize_groups
+from .tracker_groups import fuse_groups, normalize_groups, GROUP_MAX_SPEED_MS, GROUP_MOTION_SLACK_M
 from .group_receiver_guard import receiver_constraints, constrain_group
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
@@ -1985,6 +1985,7 @@ async def update_tracker_groups(hass):
         sync = dom.get("sync_group_sensors")
         if sync is not None:
             await sync([])
+        dom.pop("group_receiver_guards", None)
         return
     originals = [p for p in apitricords if not p.get("group")]
     known = {p["ent"] for p in originals}
@@ -2000,6 +2001,7 @@ async def update_tracker_groups(hass):
     dom["groups_active"] = bool(groups) or len(originals) != len(apitricords)
     if not groups and len(originals) == len(apitricords):
         dom.pop("group_stability", None)
+        dom.pop("group_receiver_guards", None)
         return
     scales = {f["name"]: f.get("scale") for f in layout.get("floor", [])} if isinstance(layout, dict) else {}
     safe_layout = {**layout, "tracker_groups": groups} if isinstance(layout, dict) else {}
@@ -2013,9 +2015,12 @@ async def update_tracker_groups(hass):
                                       minimum=0.0) or STALE_POSITION_SECS
     fusion_time = time.time()
     previous = {p["ent"]: p for p in apitricords if p.get("group")}
+    stability = dom.setdefault("group_stability", {})
+    motion_epochs = {ent: finite_number(state.get("motion_epoch"), minimum=0)
+                     for ent, state in stability.items()}
     fused = fuse_groups(safe_layout, originals, scales, fusion_time, max_age_s=group_max_age,
                         use_observation_age=use_observation_age, known_trackers=known,
-                        previous=previous, stability=dom.setdefault("group_stability", {}))
+                        previous=previous, stability=stability)
     sources = _receiver_sources_context.get() or ReceiverSources(hass)
     group_definitions = {"bps_group_" + g["id"]: g for g in groups}
     guarded, reports = [], {}
@@ -2023,8 +2028,17 @@ async def update_tracker_groups(hass):
         floor = next(f for f in layout["floor"] if f["name"] == position["floor"])
         constraints = receiver_constraints(floor, group_definitions[position["ent"]]["beacons"],
             sources, dom.get("rl_status_snapshot", {}), fusion_time, group_max_age)
+        # Fusion consumes its observation epoch even when the receiver check
+        # holds an older fix. Preserve this cycle's allowance without requiring
+        # a motion_gate payload, which fusion omits for ordinary small steps.
+        old_epoch = motion_epochs.get(position["ent"])
+        if old_epoch is None:
+            old_epoch = finite_number(previous.get(position["ent"], {}).get("updated"), minimum=0)
+        new_epoch = finite_number(stability.get(position["ent"], {}).get("motion_epoch"), minimum=0)
+        motion_budget = max(GROUP_MOTION_SLACK_M, GROUP_MAX_SPEED_MS * max(0, new_epoch - old_epoch)) \
+            if old_epoch is not None and new_epoch is not None else None
         checked, report = constrain_group(position, constraints, previous.get(position["ent"]),
-            scales[position["floor"]], fusion_time, group_max_age)
+            scales[position["floor"]], fusion_time, group_max_age, motion_budget_m=motion_budget)
         if report is not None:
             reports[position["ent"]] = report
         if checked is not None:

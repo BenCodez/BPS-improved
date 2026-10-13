@@ -99,7 +99,7 @@ def receiver_constraints(floor, members, sources, health, now, max_age_s):
     return constraints
 
 
-def constrain_group(position, constraints, previous, scale, now, max_age_s):
+def constrain_group(position, constraints, previous, scale, now, max_age_s, *, motion_budget_m=None):
     """Select an existing supported fix or hold it briefly; never invent a repelled point."""
     if not constraints or position.get("outdoor", {}).get("detection_only"):
         return position, None
@@ -121,6 +121,9 @@ def constrain_group(position, constraints, previous, scale, now, max_age_s):
         prior_point = None
     allowed = max(GROUP_MOTION_SLACK_M, GROUP_MAX_SPEED_MS * max(0,
         position["updated"] - prior_time)) if prior_point is not None else math.inf
+    budget = finite_number(motion_budget_m, minimum=0)
+    if prior_point is not None and budget is not None:
+        allowed = min(allowed, max(GROUP_MOTION_SLACK_M, budget))
     motion_step = finite_number(position.get("motion_gate", {}).get("allowed_step_m"), minimum=0)
     if prior_point is not None and motion_step is not None:
         allowed = min(allowed, max(GROUP_MOTION_SLACK_M, motion_step))
