@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const directory = join(__dirname, '../../custom_components/bps/frontend');
 const plain = x => JSON.parse(JSON.stringify(x));
 
-async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false, matching = null, gpsEnabled = false) {
+async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false, matching = null, gpsEnabled = false, heightEnabled = false) {
     const ids = new Map(), listeners = new Map(), requests = [], intervals = [], canvasCalls = [];
     const network = {cords: [], cordsStatus: 200, failCords: false, calibration: {}, matching, matchingRequest: null};
     let clock = Date.now();
@@ -66,12 +66,13 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     vm.runInContext(readFileSync(join(directory, 'outdoor.js'), 'utf8'), sandbox);
     vm.runInContext(readFileSync(join(directory, 'diagnostics.js'), 'utf8'), sandbox);
     if (gpsEnabled) vm.runInContext(readFileSync(join(directory, 'gps.js'), 'utf8'), sandbox);
+    if (heightEnabled) vm.runInContext(readFileSync(join(directory, 'height.js'), 'utf8'), sandbox);
     // Expose closures only in the VM so production keeps its private state.
     const code = readFileSync(join(directory, 'script.js'), 'utf8').replace('    // With a single configured floor', `
         globalThis.hooks = {layout: () => finalcords, beginEnvironmentEdit, finalizeShape, cancelShapeEdit, savedata, drawZonePreview, drawEnvironmentPolygons, redrawAll,
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
-            gps: () => gpsUI, tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt, addDeviceButton, saveReceiver,
+            gps: () => gpsUI, height: () => heightUI, tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt, addDeviceButton, saveReceiver,
             setCalibration: results => {calibLastResults=results;},
             zoom: value => {view.zoom=value;}, receiverIconSize, hitReceiverAt, tintCache: () => beaconTintCache};
     // With a single configured floor`);
@@ -1562,4 +1563,50 @@ test('GPS preview refuses deleted/replaced receiver and changed picker inputs', 
     p.el('gpsReceiver').value = 'draft'; await p.el('gpsPreview').fire('click'); p.el('receiverName').value = 'atrium_445566';
     await p.el('gpsConfirm').fire('click'); assert.match(p.el('gpsStatus').textContent, /changed/);
     await p.el('saveToolBtn').fire('click'); assert.equal(p.hooks.layout().floor[0].receivers[1].cords.x, 400);
+});
+
+async function capturePanelHeight(p, button, altitude) {
+    await p.el(button).fire('click'); p.emitGPS({altitude, altitudeAccuracy: .5});
+    p.setClock(p.clock()+30000); p.emitGPS({altitude, altitudeAccuracy: .5}); await p.el('heightStop').fire('click');
+}
+async function heightPanel() {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'synthetic_station', cords: {x: 10, y: 20}, correction: 1.25, height: 1}];
+    const p = await panel(source, [], false, null, false, true); p.hooks.select('Property'); p.hooks.height().refresh();
+    p.el('heightUnit').value = 'm'; p.el('heightBase').value = '1.5'; p.el('heightOffset').value = '.5';
+    await capturePanelHeight(p, 'heightBaseCapture', 100); p.el('heightReceiver').value = '0';
+    await capturePanelHeight(p, 'heightStationCapture', 101);
+    assert.match(p.el('heightStatus').textContent, /3.000 m above the common floor/);
+    return p;
+}
+test('height integration requires confirmation and Save stages bounded common-floor provenance without touching map/calibration', async () => {
+    const p = await heightPanel(); const receiver = p.hooks.layout().floor[0].receivers[0];
+    assert.equal(receiver.height, 1); assert.equal(receiver.height_survey, undefined);
+    assert.equal(p.requests.filter(r => r.url === '/api/bps/save_text').length, 0);
+    await p.el('heightConfirm').fire('click');
+    assert.equal(receiver.height, 3); assert.equal(receiver.height_unit, 'm');
+    assert.equal(receiver.height_survey.reference, 'common_floor'); assert.equal(receiver.height_survey.station_offset_m, .5);
+    assert.deepEqual(plain(receiver.cords), {x: 10, y: 20}); assert.equal(receiver.correction, 1.25); assert.equal(p.hooks.layout().floor[0].scale, 20);
+    assert.ok(p.hooks.height().snapshot().baseline, 'confirming one receiver retains the session reference');
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.deepEqual(saved.floor[0].receivers[0].height_survey, plain(receiver.height_survey));
+    assert.equal(saved.floor[0].receivers[0].height, 3);
+});
+test('production receiver signature rejects replaced, moved or height-edited receivers at height confirmation', async () => {
+    for (const mutate of [floor => {floor.receivers[0] = plain(floor.receivers[0]);},
+        floor => {floor.receivers[0].cords.x++;}, floor => {floor.receivers[0].height = 2;}]) {
+        const p = await heightPanel(); mutate(p.hooks.layout().floor[0]); await p.el('heightConfirm').fire('click');
+        assert.equal(p.hooks.layout().floor[0].receivers[0].height_survey, undefined);
+        assert.match(p.el('heightStatus').textContent, /Receiver changed/);
+    }
+});
+test('manual height edit clears obsolete confirmed height provenance before the normal floor save', async () => {
+    const p = await heightPanel(); await p.el('heightConfirm').fire('click');
+    const dialog = receiverProperties(p, 'synthetic_station'); dialog.height.value = '4'; dialog.unit.value = 'm'; await dialog.save.fire('click');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(p.hooks.layout().floor[0].receivers[0].height, 4);
+    assert.equal(p.hooks.layout().floor[0].receivers[0].height_survey, undefined);
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[0].receivers[0].height_survey, undefined);
 });

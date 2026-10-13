@@ -64,6 +64,7 @@ from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, sh
 from .receiver_matching import inventory as receiver_inventory
 from .receiver_sources import ReceiverSources
 from .gps_locations import BPSGPSLocationsAPI, validate_georeference
+from .height_sources import BPSHeightSourcesAPI, validate_height_surveys
 from . import bermuda_diagnostics
 from . import recent_tracking
 
@@ -2531,6 +2532,7 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSReceiverStatusAPI())
             hass.http.register_view(BPSScannerLinkingAPI())
             hass.http.register_view(BPSGPSLocationsAPI())
+            hass.http.register_view(BPSHeightSourcesAPI())
             hass.http.register_view(BPSCordsAPI(hass))
             hass.http.register_view(BPSCalibrationAPI(_calibration_tracking_check))
             hass.http.register_view(BPSSelfTestAPI(hass))
@@ -2853,6 +2855,9 @@ class BPSSaveAPIText(HomeAssistantView):
         images live under maps_path.
         """
         error = await hass.async_add_executor_job(validate_georeference, coords_obj)
+        if error:
+            return web.Response(status=400, text=error)
+        error = await hass.async_add_executor_job(validate_height_surveys, coords_obj)
         if error:
             return web.Response(status=400, text=error)
         error = await hass.async_add_executor_job(validate_outdoor_layout, coords_obj)
