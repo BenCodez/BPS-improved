@@ -1,6 +1,8 @@
 """Read-only, bounded Bermuda telemetry. Never exports arbitrary entry data."""
 from collections.abc import Mapping
 from enum import Enum
+import hashlib
+import json
 import math
 import re
 import sys
@@ -10,6 +12,9 @@ from homeassistant.helpers import entity_registry as er
 
 MAX_ENTITIES = 4096
 MAX_ADVERTS = 2048
+MAX_PROFILE_METADATA_BYTES = 128 * 1024
+PROFILE_TEXT_FIELDS = ("hardware_type", "manufacturer", "model", "antenna", "environment", "notes")
+PROFILE_ENVIRONMENT_VALUES = ("indoor", "outdoor", "unknown")
 SETTING_DEFAULTS = {
     "ref_power": "DEFAULT_REF_POWER", "attenuation": "DEFAULT_ATTENUATION",
     "smoothing_samples": "DEFAULT_SMOOTHING_SAMPLES", "max_velocity": "DEFAULT_MAX_VELOCITY",
@@ -44,8 +49,13 @@ def timestamp(value):
         return None
 
 
-def settings(values):
+def settings(values, *, compact=False, metadata_budget=None):
     values = values if isinstance(values, Mapping) else {}
+    if not compact and metadata_budget is not None:
+        view_quota = metadata_budget["remaining"] // max(1, metadata_budget.get("views_remaining", 1))
+        metadata_budget["views_remaining"] = max(0, metadata_budget.get("views_remaining", 1) - 1)
+    else:
+        view_quota = MAX_PROFILE_METADATA_BYTES
     result = {key: scalar(values[key]) for key in SETTING_DEFAULTS if key in values}
     offsets = values.get("rssi_offsets")
     if isinstance(offsets, Mapping):
@@ -58,6 +68,59 @@ def settings(values):
     for key in ("configured_devices", "configured_scanners"):
         if isinstance(values.get(key), (list, tuple)):
             result[key + "_count"] = len(values[key])
+    toolkit = values.get("measurement_toolkit")
+    if isinstance(toolkit, Mapping):
+        from .bermuda_direct import detached, public_id
+        allowed = {key: scalar(toolkit[key]) for key in ("auto_calibration", "fingerprint_area_selection",
+            "history_enabled", "history_window_s", "reliability_weighting") if key in toolkit}
+        profile_fields = ("hardware_type", "manufacturer", "model", "antenna", "environment", "notes",
+            "reference_power", "attenuation", "rssi_offset", "height_m", "antenna_gain_dbi", "antenna_gain_db",
+            "distance_accuracy_m", "reference_power_verified")
+        if compact:
+            profile_fields = ("reference_power", "attenuation", "rssi_offset", "reference_power_verified")
+        if not compact and metadata_budget is None:
+            metadata_budget = {"remaining": MAX_PROFILE_METADATA_BYTES}
+        omitted, omitted_fields, metadata_bytes = {}, 0, 0
+        signature = hashlib.sha256()
+        for namespace in ("receiver_profiles", "beacon_profiles", "scanner_bindings", "scanner_identity_recovery"):
+            rows = toolkit.get(namespace)
+            if isinstance(rows, Mapping):
+                keys = ("device_registry_id",) if namespace == "scanner_bindings" else (
+                    ("entity_id",) if namespace == "scanner_identity_recovery" else profile_fields)
+                allowed[namespace] = {}
+                for identity, row in sorted((identity, row) for identity, row in list(rows.items())[:128]
+                                           if isinstance(identity, str) and isinstance(row, Mapping)):
+                    identity = public_id(identity)
+                    profile = {key: detached(row[key]) for key in keys if key in row}
+                    if not compact and namespace in ("receiver_profiles", "beacon_profiles"):
+                        # Sign the allowlisted complete profile, including omitted
+                        # metadata. Numeric fields and identity always remain.
+                        signature.update(json.dumps([namespace, identity, profile], sort_keys=True,
+                            ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode())
+                        # Keep the bounded radio-context enum, while charging
+                        # free-form environment text from other/older sources.
+                        metadata = {key: profile[key] for key in PROFILE_TEXT_FIELDS if key in profile
+                            and not (key == "environment" and profile[key] in PROFILE_ENVIRONMENT_VALUES)}
+                        size = len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode()) if metadata else 0
+                        if size <= min(metadata_budget["remaining"], view_quota - metadata_bytes):
+                            metadata_budget["remaining"] -= size
+                            metadata_bytes += size
+                        else:
+                            omitted[namespace] = omitted.get(namespace, 0) + 1
+                            omitted_fields += len(metadata)
+                            profile = {key: value for key, value in profile.items() if key not in metadata}
+                    allowed[namespace][identity] = profile
+        if omitted:
+            allowed["profile_metadata_export"] = {"budget_bytes": MAX_PROFILE_METADATA_BYTES,
+                "view_budget_bytes": view_quota, "included_bytes": metadata_bytes,
+                "omitted_profiles": omitted, "omitted_fields": omitted_fields,
+                "signature": signature.hexdigest(), "guide": "Rich metadata shares a UTF-8 byte budget across report entries and configured/effective settings. Omitted text fields are excluded whole; profile identities and numeric fields remain."}
+        for namespace in ("filters", "receiver_limits"):
+            rows = toolkit.get(namespace)
+            if isinstance(rows, Mapping):
+                allowed[namespace] = {public_id(identity): detached(value) for identity, value in list(rows.items())[:128]
+                    if isinstance(identity, str) and isinstance(value, (int, float, str)) and not isinstance(value, bool)}
+        result["measurement_toolkit"] = allowed
     return result
 
 
@@ -110,16 +173,75 @@ def _coordinator(hass, entry):
     return legacy.get("coordinator") if isinstance(legacy, Mapping) else legacy
 
 
+def toolkit_snapshot(coordinator):
+    """Read stored health/summary fields; never invoke analysis or area election."""
+    from .bermuda_direct import detached, fields
+    manager = getattr(coordinator, "toolkit", None)
+    if manager is None:
+        return {"available": False, "reason": "toolkit_runtime_unavailable"}
+    result = {"available": True, "read_only": True,
+              "model_version": detached(getattr(manager, "_version_cache", None)),
+              "closed": getattr(manager, "_closed", None),
+              "worker_busy": getattr(manager, "_worker", None) is not None}
+    perf = getattr(manager, "_perf", None)
+    result["performance"] = fields(perf, ("updates", "last_update_s", "max_update_s", "background_skipped",
+        "observations", "scanners")) if isinstance(perf, Mapping) else {"available": False}
+    states = getattr(manager, "_states", None)
+    result["filter_states"] = len(states) if isinstance(states, Mapping) else None
+    status_fields = ("status", "eligible", "reasons", "model_version", "created_at", "latest_observed",
+        "applied_at", "automatic", "rolled_back", "offsets", "deltas", "improvement_m", "metrics",
+        "applied", "apply", "rollback", "accepted", "sufficient", "mode", "rejected", "coverage",
+        "target_groups", "data_id", "step_scale", "requires_step_validation", "step_metrics", "proposal_id")
+    result["calibration"] = {key: fields(value, status_fields) if isinstance(value, Mapping) else None
+        for key in ("proposal", "last_result", "trial") for value in (getattr(manager, key, None),)}
+    history = getattr(manager, "history", None)
+    result["history"] = ({"available": False} if history is None else {
+        key: detached(getattr(history, attr, None)) for key, attr in (
+            ("running", "enabled"), ("session_epoch", "session_epoch"), ("rows", "_row_count"),
+            ("bytes", "_byte_count"), ("dropped_rows", "dropped_rows"), ("window_s", "window_s"),
+            ("max_frames", "max_frames"), ("max_rows", "max_rows"), ("max_bytes", "max_bytes"))})
+    frames = getattr(history, "_frames", None)
+    if isinstance(frames, (list, tuple)):
+        result["history"]["frames"] = len(frames)
+    shadow = getattr(manager, "shadow", None)
+    result["shadow"] = {"state": "absent"} if shadow is None else {
+        key: detached(getattr(shadow, key, None)) for key in (
+            "state", "cancel_reason", "model_version", "signature", "min_labelled_rows", "min_locations")}
+    return result
+
+
 def settings_snapshot(hass):
-    """Cheap allowlisted settings context, without registry/state/advert scans."""
+    """Bound recurring radio context; descriptive profiles belong in full debug."""
     manager = getattr(hass, "config_entries", None)
     entries = manager.async_entries("bermuda") if manager is not None else []
     const = sys.modules.get("custom_components.bermuda.const")
     rows = []
+    budget = 64 * 1024
     for entry in entries[:32]:
         coordinator = _coordinator(hass, entry)
-        rows.append({"entry_id": entry.entry_id, "configured_settings": settings(entry.options),
-                     "effective_settings": settings(getattr(coordinator, "options", {}))})
+        row = {"entry_id": entry.entry_id,
+               "model_version": scalar(getattr(getattr(coordinator, "toolkit", None), "_version_cache", None))}
+        for key, values in (("configured_settings", entry.options),
+                            ("effective_settings", getattr(coordinator, "options", {}))):
+            radio = settings(values, compact=True)
+            encoded = json.dumps(radio, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            row[key + "_signature"] = hashlib.sha256(encoded).hexdigest()
+            if len(encoded) <= budget:
+                row[key] = radio
+                budget -= len(encoded)
+                continue
+            # Retain scalar controls and bounded map counts. The radio signature
+            # still changes for a model setting omitted from the numeric view.
+            row[key] = {field: value for field, value in radio.items() if not isinstance(value, Mapping)}
+            row[key]["maps_compacted"] = True
+            row[key]["map_counts"] = {field: len(value) for field, value in radio.items() if isinstance(value, Mapping)}
+            toolkit = radio.get("measurement_toolkit")
+            if isinstance(toolkit, Mapping):
+                row[key]["measurement_toolkit"] = {field: value for field, value in toolkit.items()
+                    if not isinstance(value, Mapping)}
+                row[key]["measurement_toolkit"]["map_counts"] = {field: len(value) for field, value in toolkit.items()
+                    if isinstance(value, Mapping)}
+        rows.append(row)
     return {"entries": rows, "entries_truncated": len(entries) > 32,
             "installed_defaults": {key: scalar(getattr(const, attr))
                 for key, attr in SETTING_DEFAULTS.items() if const is not None and hasattr(const, attr)}}
@@ -129,6 +251,9 @@ def snapshot(hass, now):
     """Public HA states/config plus optional, allowlisted Bermuda runtime data."""
     result = {"available": False, "entries": [], "entities": [], "adverts": [], "warnings": [],
               "guide": "HA state ages are publication ages. Advert ages use Bermuda's monotonic observation clock. Runtime distances are metres; RSSI/reference power are dBm and RSSI offsets are dB. Per-device ref_power 0 uses Bermuda's global default. BPS receiver corrections and tracker trims are additional adjustments. Settings and telemetry are read only; missing runtime fields are not inferred."}
+    from .bermuda_direct import BermudaDirect
+    direct = BermudaDirect(hass, now=now, include_history=True, include_scanner_devices=True)
+    result["direct"] = direct.diagnostics()
     try:
         rows, runtime_ids, counts = entity_snapshot(hass, "bermuda", now)
         result.update(entities=rows, entity_counts=counts)
@@ -149,18 +274,23 @@ def snapshot(hass, now):
         except (KeyError, AttributeError):
             pass
     mono = time.monotonic()
-    for entry in entries:
+    metadata_budget = {"remaining": MAX_PROFILE_METADATA_BYTES,
+        "views_remaining": sum(1 + (_coordinator(hass, entry) is not None) for entry in entries[:32])}
+    for entry in entries[:32]:
         coordinator = _coordinator(hass, entry)
         row = {"entry_id": entry.entry_id, "title": scalar(entry.title),
                "state": scalar(getattr(entry, "state", None)),
-               "configured_settings": settings(entry.options),
-               "runtime_available": coordinator is not None}
+               "configured_settings": settings(entry.options, metadata_budget=metadata_budget),
+               "runtime_available": coordinator is not None, "toolkit": toolkit_snapshot(coordinator)}
         result["entries"].append(row)
         if coordinator is None:
             continue
-        row.update(effective_settings=settings(getattr(coordinator, "options", {})),
+        row.update(effective_settings=settings(getattr(coordinator, "options", {}), metadata_budget=metadata_budget),
                    sensor_update_interval_s=scalar(getattr(coordinator, "sensor_interval", None)),
                    last_update_success=scalar(getattr(coordinator, "last_update_success", None)))
+        if entry.entry_id in direct.snapshots:
+            row["measurement_path"] = "direct"
+            continue
         devices = getattr(coordinator, "devices", {})
         if not isinstance(devices, Mapping):
             continue
@@ -214,6 +344,6 @@ def snapshot(hass, now):
                 ad["observation_age_s"] = mono - stamp if isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and 0 < stamp <= mono else None
                 result["adverts"].append(ad)
     result["available"] = bool(entries or result["entities"])
-    if result["available"] and not result["adverts"]:
+    if result["available"] and not result["adverts"] and not direct.snapshots:
         result["warnings"].append("Per-receiver RSSI runtime data is unavailable; enabled Bermuda entities are still included")
     return result

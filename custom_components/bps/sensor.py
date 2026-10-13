@@ -139,6 +139,8 @@ def get_filtered_entities(hass):
         if entry is None or entry.platform != "bermuda":
             continue
         filtered.add(eid.replace("sensor.", "").split("_distance_to_")[0])
+    from .receiver_sources import ReceiverSources
+    filtered.update(ReceiverSources(hass).direct_trackers())
     return list(filtered)
 
 class CustomDistanceSensor(SensorEntity):
@@ -150,6 +152,7 @@ class CustomDistanceSensor(SensorEntity):
         self._attr_unique_id = unique_id
         self._state = "unknown"
         self._attrs = {}
+        self._bps_pending = True
         self.entity_id = entity_id
         # Group each tracked device's BPS sensors under their own device rather
         # than one shared "BLE Positioning System" bucket. All four sensors for
@@ -169,6 +172,11 @@ class CustomDistanceSensor(SensorEntity):
                 else:
                     info["via_device"] = via_identifier
             self._attr_device_info = info
+
+    async def async_added_to_hass(self):
+        """Publish buffered fixes through HA's initial write after registration."""
+        await super().async_added_to_hass()
+        self._bps_pending = False
 
     @property
     def device_info(self):
@@ -387,7 +395,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     group_signature = None
 
-    async def sync_group_sensors(groups):
+    async def sync_group_sensors(groups, *, known_trackers=None):
         """Own only group entities; preserve the original per-beacon registry."""
         nonlocal group_signature
         signature = tuple((g["id"], g["name"]) for g in groups)
@@ -423,7 +431,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             # sensors again. This scan only runs when groups are retired.
             positions = {p["ent"]: p for p in hass.data.get("bps", {}).get("apitricords", [])
                          if not p.get("group")}
-            for entity in get_filtered_entities(hass):
+            for entity in get_filtered_entities(hass) if known_trackers is None else known_trackers:
                 ensure_sensors_for_entity(hass, entity, cache, additions)
                 position = positions.get(entity)
                 if position is not None:
@@ -488,14 +496,20 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     if "layout" in hass.data.get("bps", {}):
         await sync_group_sensors(normalize_groups(get_bps_data(hass), known_trackers=entities))
 
+    discovery_cache = hass.data.get("bps_sensors")
+
     @callback
-    def discover_sensors():
+    def discover_sensors(entities=None):
         """Reconcile a paused discovery window once tracking becomes active."""
         sensors_cache = hass.data.get("bps_sensors")
-        if sensors_cache is None or hass.data.get("bps", {}).get("_tracking_active") is False:
+        bucket = hass.data.get("bps", {})
+        if sensors_cache is not discovery_cache or sensors_cache is None or bucket.get("_tracking_active") is False \
+                or bucket.get("resume_sensor_discovery") is not discover_sensors:
             return
         new_sensors = []
-        for entity in get_filtered_entities(hass):
+        # The direct tracking batch already proved these keys. Reuse them
+        # rather than capture Bermuda and scan all HA states again.
+        for entity in get_filtered_entities(hass) if entities is None else entities:
             ensure_sensors_for_entity(hass, entity, sensors_cache, new_sensors)
         if new_sensors:
             async_add_entities(new_sensors, update_before_add=True)

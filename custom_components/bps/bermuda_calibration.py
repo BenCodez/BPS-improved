@@ -10,6 +10,7 @@ import math
 from collections.abc import Mapping
 
 from .bermuda_diagnostics import MAC, _coordinator
+from .bermuda_direct import BermudaDirect
 from .scanner_addresses import retained_mac
 
 MIN_USEFUL_OFFSET_DB = .5
@@ -38,6 +39,7 @@ def source_snapshot(receivers, devices, scanner_map):
         row = {"geometry": copy.deepcopy(geometry), "scanner_mac": addresses[0] if len(addresses) == 1 else None,
                "attenuation": None, "rssi_offset_db": None, "reference_power_dbm": None}
         models = set()
+        versions = set()
         for dev in devices.values():
             if not isinstance(dev, Mapping) or dev.get("_is_scanner") is not True:
                 continue
@@ -48,10 +50,14 @@ def source_snapshot(receivers, devices, scanner_map):
                 if not isinstance(ad, Mapping) or str(ad.get("scanner_address", "")).lower() != row["scanner_mac"]:
                     continue
                 n, offset, ref = (ad.get(k) for k in ("conf_attenuation", "conf_rssi_offset", "conf_ref_power"))
+                if isinstance(ad.get("_bps_model_version"), str):
+                    versions.add(ad["_bps_model_version"])
                 if number(n) and n > 0 and number(offset) and number(ref):
                     models.add((n, offset, ref))
         if len(models) == 1:
             row["attenuation"], row["rssi_offset_db"], row["reference_power_dbm"] = next(iter(models))
+        if versions:
+            row.update(source_path="direct", model_versions=sorted(versions))
         # Transmitter reference power changes also invalidate these raw samples.
         refs = set()
         for address, matched in scanner_map.items():
@@ -81,9 +87,12 @@ def runtime_context(hass, coords, floor_name):
     receivers = _build_receiver_map(coords, floor_name, hass=hass)
     manager = getattr(hass, "config_entries", None)
     entries = manager.async_entries("bermuda") if manager is not None else []
+    direct = BermudaDirect(hass, include_scanner_devices=True)
     devices, owners, options_by_mac, offset_keys = {}, {}, {}, {}
     runtime_scanners = 0
     for entry in entries:
+        if entry.entry_id in direct.calibration_entries:
+            continue
         coordinator = _coordinator(hass, entry)
         live = getattr(coordinator, "devices", {})
         if not isinstance(live, Mapping):
@@ -110,6 +119,12 @@ def runtime_context(hass, coords, floor_name):
             devices[address] = row
             options_by_mac[address] = getattr(coordinator, "options", {})
             offset_keys[address] = original_address
+    if direct.snapshots:
+        devices = direct.calibration_dump(hass, devices)
+        for address, row in devices.items():
+            owner = row.get("_bps_config_entry_id")
+            owners.setdefault(address, set()).add(owner)
+        runtime_scanners += sum(len(snapshot["scanners"]) for snapshot in direct.snapshots.values())
     private = {"receivers": receivers, "all_placed_slugs": _all_placed_slugs(coords)}
     scanner_map = _match_scanners(private, devices)
     scanner_map = {a: s for a, s in scanner_map.items() if len(owners.get(a, ())) == 1}
@@ -123,6 +138,8 @@ def runtime_context(hass, coords, floor_name):
         row["entry_id"] = next(iter(owners[address])) if address else None
         row["scanner_name"] = devices[address]["name"] if address else None
         options = options_by_mac.get(address, {})
+        if row.get("source_path") == "direct":
+            continue
         if not isinstance(options, Mapping):
             continue
         # Bermuda's actual effective options are authoritative for a manual
