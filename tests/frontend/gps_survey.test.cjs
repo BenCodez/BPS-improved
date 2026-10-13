@@ -61,6 +61,22 @@ test('verification remains observable until the committed response is merged', a
     assert.equal(p.api.isVerifying(), false);
 });
 
+test('survey accuracy circle uses captured GPS scale even when the displayed floor scale differs', async () => {
+    const p = ui();
+    const c = candidate();
+    const origin = {latitude: 10, longitude: 20};
+    c.context = {floor: {georeference: {anchors: [[0, 0], [30, 0], [0, 30]].map(([x, y]) => ({
+        ...gps.fromLocal({x, y}, origin), x: 200 + x * 20, y: 200 + y * 20, accuracy_m: 1}))}}};
+    p.candidates([c]); await p.click('gpsSurveyRefresh');
+    for (const scale of [10, 5]) {
+        p.hooks.getFloor = () => ({name: c.floor, scale});
+        const radii = [];
+        p.api.draw({save() {}, restore() {}, beginPath() {}, stroke() {}, arc(x, y, radius) {radii.push(radius);}});
+        assert.ok(Math.abs(radii[0] - 80) < 1e-6);
+        assert.equal(radii[1], 8);
+    }
+});
+
 test('auto survey is opt-in and loads BLE phones and services without guessing selections', async () => {
     const p = ui(); assert.equal(p.requests.length, 0); assert.equal(p.watchers.size, 0);
     await p.click('gpsSurveyStart'); assert.equal(p.requests.length, 0); assert.match(p.el('gpsSurveyStatus').textContent, /Select your own/);

@@ -572,13 +572,13 @@ class PhoneSurvey:
 
     async def _poll(self, owner, body, now):
         s, floor = self._session(body.get("session"), owner, now)
-        gap = now - s["touched"]
-        s["touched"] = now
+        previous_check = s["touched"]
         gps_request = await self._request_gps(s, now)
         # A Mobile App service call can suspend this coroutine. Re-read saved
         # context and range on the current server clock after it completes.
         now = self.clock()
         s, floor = self._session(body.get("session"), owner, now)
+        gap = now - previous_check
         s["touched"] = now
         near, nearby_count = self._nearby(s, floor, now)
         c = s["capture"]

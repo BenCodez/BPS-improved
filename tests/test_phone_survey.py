@@ -193,6 +193,33 @@ def test_real_group_prefixed_phone_remains_selectable():
     assert f.manager.sessions[token]["phone"] == "bps_group_real_phone"
 
 
+def test_phone_location_command_latency_breaks_continuous_proximity_capture():
+    f = Fixture()
+    service = "mobile_app_synthetic_phone"
+    f.hass.services = SimpleNamespace(async_services=lambda: {"notify": {service: {}}})
+
+    async def delayed_request(*args, **kwargs):
+        f.now += 7
+
+    f.hass.services.async_call = delayed_request
+    f.manager.gps_requests[service] = NOW - 59
+
+    async def scenario():
+        token = await f.start(request_gps=True, notify_service=service)
+        first = await f.poll(token)
+        assert first["elapsed_s"] == 0
+        f.now += 2
+        second = await f.poll(token)
+        assert second["gps_request"]["status"] == "requested"
+        assert second["elapsed_s"] == 0
+        capture = f.manager.sessions[token]["capture"]
+        assert capture["started"] == NOW + 9
+        assert capture["proof"][0]["received"] == NOW + 9
+        assert len(capture["proof"]) == 1
+
+    run(scenario())
+
+
 def test_verified_move_refreshes_running_manual_calibration_geometry(monkeypatch):
     from bps import calibration
 
