@@ -858,12 +858,7 @@ async def _dump_devices(hass) -> dict:
         response = {}
     if not direct.snapshots:
         return response or {}
-    runtime = direct.legacy_scanners(hass)
-    addresses = {row["address"] for row in runtime.values()}
-    response = response if isinstance(response, dict) else {}
-    service = {key: value for key, value in response.items() if isinstance(value, dict)
-               and str(value.get("address") or "").lower() not in addresses}
-    return direct.dump_devices({**service, **runtime})
+    return direct.calibration_dump(hass, response)
 
 
 async def _sample_loop(hass, cal: dict) -> None:

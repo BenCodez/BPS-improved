@@ -24,6 +24,7 @@ MAX_DEVICES = 256
 MAX_SCANNERS = 128
 MAX_OBSERVATIONS = 4096
 MAC = re.compile(r"^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
+RANGE_MAC = re.compile(r"_((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})_range(?:_raw)?$")
 PRIVATE = re.compile(r"^[0-9a-fA-F]{32}$")
 _LOGGER = logging.getLogger(__name__)
 SCANNER_FIELDS = ("scanner_id", "address", "name", "slug", "unique_id", "entity_id_address",
@@ -383,3 +384,119 @@ class BermudaDirect:
                             "conf_ref_power", "ref_power")}
                 result[entry.entry_id + "/" + address] = row
         return result
+
+    def calibration_dump(self, hass, service):
+        """Combine mixed-install raw rows using current, unique ownership proof.
+
+        A service response has no reliable entry owner. Registry range suffixes
+        prove retained MAC ownership; a different BLE source additionally needs
+        an explicit current runtime/API pair. Names and service owner markers
+        cannot provide that proof, including for each advert's receiver.
+        """
+        from homeassistant.helpers import entity_registry as er
+        from .bermuda_diagnostics import _coordinator
+        from .scanner_addresses import retained_mac, ble_mac
+
+        inactive = {row["entry_id"] for row in self.statuses if row["reason"] == "entry_not_loaded"}
+        eligible = {entry.entry_id for entry in self.entries
+                    if entry.entry_id not in self.calibration_entries and entry.entry_id not in inactive}
+        claims, pairs = {}, {}
+
+        def claim(owner, address):
+            if address:
+                claims.setdefault(address, set()).add(owner)
+
+        def pair(owner, address, retained):
+            if not address or not retained:
+                return
+            identity = (owner, address, retained)
+            for alias in (address, retained):
+                claim(owner, alias)
+                pairs.setdefault(alias, set()).add(identity)
+
+        # Include direct and inactive owners in collision proofs even though
+        # their service rows cannot be used. Missing/truncated direct scanners
+        # can still be identified by their owned registry anchors.
+        for (owner, retained), scanners in self.scanners.items():
+            for sid, _ in scanners:
+                pair(owner, sid.lower() if MAC.fullmatch(sid) else None, retained)
+        for entry in self.entries:
+            devices = getattr(_coordinator(hass, entry), "devices", {})
+            if not isinstance(devices, Mapping):
+                continue
+            for dev in islice(devices.values(), MAX_DEVICES):
+                is_scanner = dev.get("_is_scanner") if isinstance(dev, Mapping) else getattr(dev, "_is_scanner", False)
+                if is_scanner is True:
+                    pair(entry.entry_id, ble_mac(dev), retained_mac(dev))
+        lookup = getattr(er, "async_get", None)
+        registry = lookup(hass) if lookup else None
+        for ent in getattr(registry, "entities", {}).values():
+            if getattr(ent, "platform", None) != "bermuda" or not ent.entity_id.startswith("sensor."):
+                continue
+            match = RANGE_MAC.search(getattr(ent, "unique_id", "") or "")
+            if match:
+                claim(getattr(ent, "config_entry_id", None), match[1].lower())
+
+        def owner_for(address, retained, *, legacy=True):
+            owners = claims.get(address, set())
+            if len(owners) != 1 or owners != claims.get(retained, set()):
+                return None
+            owner = next(iter(owners))
+            if legacy and owner not in eligible:
+                return None
+            known = pairs.get(address, set()) | pairs.get(retained, set())
+            if known and known != {(owner, address, retained)}:
+                return None
+            if not known and address != retained:
+                return None
+            return owner
+
+        def receiver_owner(address, *, legacy=True):
+            if not isinstance(address, str) or not MAC.fullmatch(address):
+                return None
+            address = address.lower()
+            known = pairs.get(address, set())
+            if known:
+                if len(known) != 1:
+                    return None
+                _, source, retained = next(iter(known))
+                if source != address:
+                    return None
+            else:
+                retained = address
+            return owner_for(address, retained, legacy=legacy)
+
+        runtime = self.legacy_scanners(hass)
+        runtime_addresses = {row["address"] for row in runtime.values()}
+        service = service if isinstance(service, Mapping) else {}
+        candidates = [row for row in islice(service.values(), MAX_ENTRIES * MAX_DEVICES)
+                      if isinstance(row, dict) and ble_mac(row) not in runtime_addresses]
+        candidates.extend(runtime.values())
+        result = {}
+        for index, row in enumerate(candidates):
+            if row.get("_is_scanner") is not True:
+                continue
+            address, retained = ble_mac(row), retained_mac(row)
+            owner = owner_for(address, retained)
+            if owner is None or row.get("_bps_config_entry_id", owner) != owner:
+                continue
+            copied = {**row, "address": address, "address_wifi_mac": retained,
+                      "_bps_config_entry_id": owner, "adverts": {}}
+            adverts = row.get("adverts", {})
+            if isinstance(adverts, Mapping):
+                for key, ad in islice(adverts.items(), MAX_SCANNERS):
+                    if isinstance(ad, dict) and receiver_owner(ad.get("scanner_address")) == owner:
+                        copied["adverts"][key] = dict(ad)
+            result[str(index)] = copied
+        # A calibration window can retain an earlier owner-unique placement.
+        # Recheck direct rows as well, so a newly conflicting retained alias
+        # cannot use that old uniqueness flag to bind to the legacy placement.
+        combined = {}
+        for key, row in self.dump_devices(result).items():
+            owner = row.get("_bps_config_entry_id")
+            if owner_for(ble_mac(row), retained_mac(row), legacy=False) != owner:
+                continue
+            copied = {**row, "adverts": {key: ad for key, ad in row["adverts"].items()
+                      if receiver_owner(ad.get("scanner_address"), legacy=False) == owner}}
+            combined[key] = copied
+        return combined

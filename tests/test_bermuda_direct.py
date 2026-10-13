@@ -368,6 +368,10 @@ def test_mixed_calibration_api_replaces_covered_legacy_rows_and_keeps_other_entr
     legacy = NS(entry_id="legacy", runtime_data=None)
     configs = hass.config_entries.async_entries("bermuda") + [legacy]
     hass.config_entries.async_entries = lambda _: configs
+    registry = bps.er.async_get(hass)
+    registry.entities["sensor.legacy_distance_to_legacy"] = NS(
+        entity_id="sensor.legacy_distance_to_legacy", platform="bermuda", config_entry_id="legacy",
+        unique_id=f"synthetic-legacy_{legacy_mac}_range")
     async def dump(*args, **kwargs):
         return {MAC: {"_is_scanner": True, "address": MAC, "name": "Current station", "adverts": {
             OTHER: {"scanner_address": OTHER, "stamp": 999., "rssi_distance_raw": 999.}}},
