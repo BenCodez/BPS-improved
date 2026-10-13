@@ -56,7 +56,7 @@ def _direct_absence_known(direct, info, now, limit):
 
 def receiver_constraints(floor, members, sources, health, now, max_age_s, *, reading_max_age_s=None):
     """Use proven online identities and supported pairs; unknown evidence is neutral."""
-    health_limit = min(HEALTH_MAX_AGE_S, max_age_s)
+    health_limit = HEALTH_MAX_AGE_S
     range_limit = finite_number(max_age_s if reading_max_age_s is None else reading_max_age_s, minimum=0)
     scale = finite_number(floor.get("scale"), minimum=1e-6, maximum=1e6)
     if scale is None or range_limit is None or not members:

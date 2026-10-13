@@ -430,3 +430,46 @@ def test_real_direct_ranges_honor_configured_freshness(hass, monkeypatch, cutoff
     source = ReceiverSources(hass)
     assert receiver_constraints(data["floor"][0], ["tag"], source, {}, NOW,
         cutoff or 180, reading_max_age_s=cutoff) == []
+
+
+def test_short_range_age_gate_preserves_recent_direct_receiver_health(hass, monkeypatch):
+    import asyncio
+    import bps
+    from test_bermuda_direct import prepared, MAC
+
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch, outdoor=True)
+    data["reading_max_age"] = 5
+    data["tracker_groups"] = [{"id": "rover", "beacons": ["tag"]}]
+    hass.data["bps"]["layout"] = data
+    payloads["entry"]["scanners"][MAC]["scanner_last_seen_age"] = 10
+    payloads["entry"]["devices"]["synthetic-tracker"]["scanners"] = {}
+    asyncio.run(bps.update_receiver_liveness(hass))
+    assert hass.data["bps"]["rl_status_snapshot"]["old_station"]["online"] is True
+    monkeypatch.setattr(bps, "get_position_history", lambda _: NS(record=lambda *a: None, mark_gap=lambda *a: None))
+    monkeypatch.setattr(bps, "apitricords", [{"ent": "tag", "floor": "Ground", "cords": [10, 20], "updated": NOW,
+        "outdoor": {"observed": NOW, "estimated_uncertainty_m": 4, "receivers_used": 4}}])
+    asyncio.run(bps.update_tracker_groups(hass))
+    assert not any(p.get("group") for p in bps.apitricords)
+    assert hass.data["bps"]["group_receiver_guards"]["bps_group_rover"]["state"] == "unavailable"
+
+
+def test_short_range_age_gate_preserves_recent_legacy_health_between_polls(hass, monkeypatch):
+    import asyncio
+    import bps
+    from test_receiver_aliases import aliases
+    from test_bermuda_direct import install
+    from bps.receiver_sources import ReceiverSources
+
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch, outdoor=True)
+    install(monkeypatch, {"entry": None})
+    states[new].state = "unavailable"
+    states["binary_sensor.current_station_status"] = NS(state="on", attributes={"device_class": "connectivity"})
+    clock = NOW - 6
+    monkeypatch.setattr(bps.time, "time", lambda: clock)
+    asyncio.run(bps.update_receiver_liveness(hass))
+    health = hass.data["bps"]["rl_status_snapshot"]
+    assert health["old_station"]["online"] is True
+    clock = NOW
+    result = receiver_constraints(data["floor"][0], ["tag"], ReceiverSources(hass),
+        health, NOW, 5, reading_max_age_s=5)
+    assert result and result[0]["missing_beacons"] == ["tag"]
