@@ -187,6 +187,85 @@ def test_recent_bermuda_context_allowlists_settings_without_state_scan(hass):
     assert "excluded-secret" not in json.dumps(context)
 
 
+def _metadata_heavy_toolkit_profiles():
+    """Maximum valid profile maps with deliberately synthetic descriptions."""
+    description = "Synthetic profile metadata " + "x" * (512 - len("Synthetic profile metadata "))
+    return {"receiver_profiles": {f"aa:bb:cc:dd:ee:{i:02x}": {
+        "hardware_type": description, "manufacturer": description, "model": description,
+        "antenna": description, "notes": description, "environment": "indoor", "attenuation": 2.,
+        "rssi_offset": -3.} for i in range(128)},
+        "beacon_profiles": {f"synthetic-beacon-{i}": {
+            "hardware_type": description, "manufacturer": description, "model": description,
+            "antenna": description, "notes": description, "environment": "indoor", "reference_power": -60.}
+            for i in range(128)}, "auto_calibration": False, "filters": {"synthetic-beacon-0": "pet"}}
+
+
+def test_automatic_history_packs_maximum_descriptive_profiles_and_tracks_radio_changes(hass, monkeypatch):
+    async def scenario():
+        configure(hass, monkeypatch)
+        hass.states.async_all = lambda _domain=None: []
+        registry = SimpleNamespace(entities={}, async_get=lambda _eid: None)
+        monkeypatch.setattr(bps.er, "async_get", lambda _h: registry, raising=False)
+        monkeypatch.setattr(bps.dr, "async_get", lambda _h: SimpleNamespace(devices={}), raising=False)
+        options = {"attenuation": 2., "measurement_toolkit": _metadata_heavy_toolkit_profiles()}
+        coordinator = SimpleNamespace(options=copy.deepcopy(options), devices={})
+        entry = SimpleNamespace(entry_id="synthetic", title="Synthetic Bermuda", state="loaded",
+            options=options, runtime_data=SimpleNamespace(coordinator=coordinator))
+        hass.config_entries = SimpleNamespace(async_entries=lambda _domain: [entry])
+        clock = [1000.]
+        monkeypatch.setattr(bps.time, "time", lambda: clock[0])
+        # This is the real automatic recorder and real pack size gate, not a
+        # helper-size assertion. Earlier full profiles exceeded its 256 KiB cap.
+        await bps._capture_recent_tracking(hass)
+        history = hass.data["bps"]["_recent_tracking"]
+        first = history.snapshot(clock[0])
+        assert len(first.frames) == 1 and dict(first.metadata)["oversize_samples"] == 0
+        context = json.loads(first.contexts[0][1])
+        radio = context["bermuda_settings"]["entries"][0]
+        assert radio["effective_settings"]["measurement_toolkit"]["receiver_profiles"]["aa:bb:cc:dd:ee:7f"] == {
+            "attenuation": 2., "rssi_offset": -3.}
+        assert "Synthetic profile metadata" not in first.contexts[0][1].decode()
+        # Descriptive edits have no ranging effect and do not duplicate contexts.
+        coordinator.options["measurement_toolkit"]["receiver_profiles"]["aa:bb:cc:dd:ee:7f"]["notes"] = "Synthetic edited note"
+        clock[0] += 2.
+        await bps._capture_recent_tracking(hass)
+        assert len(history.snapshot(clock[0]).contexts) == 1
+        # A real model change must get a different context, including a receiver
+        # near the end of the maximum profile map.
+        coordinator.options["measurement_toolkit"]["receiver_profiles"]["aa:bb:cc:dd:ee:7f"]["attenuation"] = 2.5
+        clock[0] += 2.
+        await bps._capture_recent_tracking(hass)
+        final = history.snapshot(clock[0])
+        assert len(final.frames) == 3 and len(final.contexts) == 2
+        assert dict(final.metadata)["oversize_samples"] == 0
+        report = bps._diagnostic_report_snapshot(hass, clock[0])
+        full = report["bermuda"]["entries"][0]["effective_settings"]["measurement_toolkit"]
+        assert full["receiver_profiles"]["aa:bb:cc:dd:ee:7f"]["notes"] == "Synthetic edited note"
+        assert full["beacon_profiles"]["synthetic-beacon-127"]["manufacturer"].startswith("Synthetic profile metadata")
+        assert "Synthetic profile metadata" in diag.format_report(report)
+        assert not hass._store_saves
+    asyncio.run(scenario())
+
+
+def test_recurring_radio_context_budget_keeps_signatures_for_compacted_entries(hass, monkeypatch):
+    configure(hass, monkeypatch)
+    options = {"attenuation": 2., "measurement_toolkit": _metadata_heavy_toolkit_profiles()}
+    entries = [SimpleNamespace(entry_id=f"synthetic-entry-{i}", options=options,
+        runtime_data=SimpleNamespace(coordinator=SimpleNamespace(options=options))) for i in range(32)]
+    hass.config_entries = SimpleNamespace(async_entries=lambda _domain: entries)
+    first = recent.pack(bps._recent_tracking_snapshot(hass, 1000.))
+    assert len(first.context_json) < recent.MAX_CONTEXT_BYTES
+    context = json.loads(first.context_json)["bermuda_settings"]["entries"]
+    assert context[-1]["effective_settings"]["maps_compacted"] is True
+    # Only the last, compacted entry changes. Its signature still identifies the
+    # changed radio inputs even though its full numeric maps were omitted.
+    last = entries[-1].runtime_data.coordinator
+    last.options = copy.deepcopy(options)
+    last.options["measurement_toolkit"]["beacon_profiles"]["synthetic-beacon-127"]["reference_power"] = -65.
+    second = recent.pack(bps._recent_tracking_snapshot(hass, 1002.))
+    assert second.context_id != first.context_id and len(second.context_json) < recent.MAX_CONTEXT_BYTES
+
+
 def test_recent_inventory_cap_preserves_groups_and_members(hass, monkeypatch):
     configure(hass, monkeypatch)
     positions = [{"ent": "other" + str(i)} for i in range(140)]

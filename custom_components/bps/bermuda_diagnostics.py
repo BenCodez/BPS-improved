@@ -1,6 +1,8 @@
 """Read-only, bounded Bermuda telemetry. Never exports arbitrary entry data."""
 from collections.abc import Mapping
 from enum import Enum
+import hashlib
+import json
 import math
 import re
 import sys
@@ -44,7 +46,7 @@ def timestamp(value):
         return None
 
 
-def settings(values):
+def settings(values, *, compact=False):
     values = values if isinstance(values, Mapping) else {}
     result = {key: scalar(values[key]) for key in SETTING_DEFAULTS if key in values}
     offsets = values.get("rssi_offsets")
@@ -66,6 +68,8 @@ def settings(values):
         profile_fields = ("hardware_type", "manufacturer", "model", "antenna", "environment", "notes",
             "reference_power", "attenuation", "rssi_offset", "height_m", "antenna_gain_dbi", "antenna_gain_db",
             "distance_accuracy_m", "reference_power_verified")
+        if compact:
+            profile_fields = ("reference_power", "attenuation", "rssi_offset", "reference_power_verified")
         for namespace in ("receiver_profiles", "beacon_profiles", "scanner_bindings"):
             rows = toolkit.get(namespace)
             if isinstance(rows, Mapping):
@@ -168,15 +172,37 @@ def toolkit_snapshot(coordinator):
 
 
 def settings_snapshot(hass):
-    """Cheap allowlisted settings context, without registry/state/advert scans."""
+    """Bound recurring radio context; descriptive profiles belong in full debug."""
     manager = getattr(hass, "config_entries", None)
     entries = manager.async_entries("bermuda") if manager is not None else []
     const = sys.modules.get("custom_components.bermuda.const")
     rows = []
+    budget = 64 * 1024
     for entry in entries[:32]:
         coordinator = _coordinator(hass, entry)
-        rows.append({"entry_id": entry.entry_id, "configured_settings": settings(entry.options),
-                     "effective_settings": settings(getattr(coordinator, "options", {}))})
+        row = {"entry_id": entry.entry_id,
+               "model_version": scalar(getattr(getattr(coordinator, "toolkit", None), "_version_cache", None))}
+        for key, values in (("configured_settings", entry.options),
+                            ("effective_settings", getattr(coordinator, "options", {}))):
+            radio = settings(values, compact=True)
+            encoded = json.dumps(radio, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            row[key + "_signature"] = hashlib.sha256(encoded).hexdigest()
+            if len(encoded) <= budget:
+                row[key] = radio
+                budget -= len(encoded)
+                continue
+            # Retain scalar controls and bounded map counts. The radio signature
+            # still changes for a model setting omitted from the numeric view.
+            row[key] = {field: value for field, value in radio.items() if not isinstance(value, Mapping)}
+            row[key]["maps_compacted"] = True
+            row[key]["map_counts"] = {field: len(value) for field, value in radio.items() if isinstance(value, Mapping)}
+            toolkit = radio.get("measurement_toolkit")
+            if isinstance(toolkit, Mapping):
+                row[key]["measurement_toolkit"] = {field: value for field, value in toolkit.items()
+                    if not isinstance(value, Mapping)}
+                row[key]["measurement_toolkit"]["map_counts"] = {field: len(value) for field, value in toolkit.items()
+                    if isinstance(value, Mapping)}
+        rows.append(row)
     return {"entries": rows, "entries_truncated": len(entries) > 32,
             "installed_defaults": {key: scalar(getattr(const, attr))
                 for key, attr in SETTING_DEFAULTS.items() if const is not None and hasattr(const, attr)}}

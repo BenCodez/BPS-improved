@@ -711,6 +711,9 @@ async def update_tracked_entities(hass):
             tracked_entities = _bermuda_distance_sensor_ids(hass)
             receiver_sources = ReceiverSources(hass)
             direct_trackers = receiver_sources.direct_trackers()
+            discover_sensors = hass.data.get(DOMAIN, {}).get("resume_sensor_discovery")
+            if discover_sensors is not None and direct_trackers:
+                discover_sensors(direct_trackers)
 
             await prune_stale_positions(hass)
 
@@ -2061,9 +2064,9 @@ def update_bps_sensor_state(hass, entity_id, state, attributes=None, *, only_cha
     sensor._state = state
     if attributes is not None:
         sensor._attrs = attributes
-    if getattr(sensor, "_bps_group_pending", False):
+    if getattr(sensor, "_bps_pending", False) or getattr(sensor, "_bps_group_pending", False):
         # AddEntitiesCallback schedules registration. Keep the latest state for
-        # HA's initial write, without writing a group before it has a platform.
+        # HA's initial write, without writing before the entity has a platform.
         return
     sensor.async_write_ha_state()
 

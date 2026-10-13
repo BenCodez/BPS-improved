@@ -830,7 +830,9 @@ uses its filtered metre ranges and packet timestamps for tracking, scanner
 identity/freshness for receiver matching and liveness, and raw metre ranges for
 scanner calibration. Existing BPS receiver corrections, tracker trims, layouts
 and entity IDs continue to apply. Disabled distance entities can still prove an
-existing tracker identity; a device name alone cannot. Bermuda is optional at
+existing tracker identity; a device name alone cannot. Newly tracked devices
+with proven registry anchors receive their BPS sensors during tracking without
+requiring a reload or enabled distance entities. Bermuda is optional at
 the API level: older versions, unsupported snapshots and unavailable/failed
 entries retain the existing entity, runtime and service paths. A direct pair
 that is stale, rejected or missing does not fall back to a newer HA publication
@@ -846,7 +848,9 @@ performance health appear when available. Profiles and quality metadata do not
 become BPS coordinates or certified accuracy. Captures prioritize tracked
 devices; scanner calibration data is requested separately by scanner address.
 Direct debug exports share a byte/count budget across entries and report omitted
-data. The history is recent runtime context, not a recorded replay. These reads
+data. Automatic recent-history contexts retain compact radio settings and
+deterministic model/settings signatures; full descriptive profiles stay in the
+live report. The history is recent runtime context, not a recorded replay. These reads
 stay local and do not require HTTP requests or installing a particular Bermuda
 fork. Keep one automatic calibration system active while validating changes;
 moving a correction into Bermuda requires deliberately updating the relevant
