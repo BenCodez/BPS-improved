@@ -487,8 +487,18 @@ units preserves the current physical value; old layouts are not automatically
 converted. If an old height was entered in feet while BPS treated it as metres,
 select **ft** and re-enter the measured number before saving the floor.
 
+Receiver properties show automatic manufacturer/model information from the
+matched Bermuda scanner. The custom Bermuda fork supplies HA/ESPHome hardware
+metadata directly; older versions use the selected HA device only when its
+physical MAC connection is proven. Unmatched hardware remains unknown.
+Leave the model override empty to follow automatic information. Choose
+**External antenna**, **Built-in antenna**, or inherit the Bermuda setting.
+Antenna presence cannot be detected from BLE readings. Save the floor to keep
+manual overrides. Automatic information refreshes with the scanner inventory
+and is included in full diagnostics, without copying it into saved placements.
+
 Add receiver model/antenna notes there, and use **Beacon hardware** for the
-selected individual tracker. These notes are included in full diagnostics, not
+selected individual tracker. These descriptions are included in full diagnostics, not
 automatic RSSI presets. Populate expected distance error from measured tests:
 larger errors reduce influence. Building crossings already reduce trust in
 indoor receivers heard through walls; fresh short indoor readings provide soft
@@ -943,9 +953,10 @@ It never applies corrections or changes tracking, layout, or calibration.
 For useful accuracy evidence:
 
 1. Save the receiver positions, map scale, and environment polygons first.
-2. Keep the actual collar still at a measured location. Enter its floor and
-   **X/Y in metres from the map's top-left corner** (right/down), and click
-   **Mark known position**. Leave it there for 30–60 seconds.
+2. Keep the actual collar still at a measured location. Use **Place known
+   position on map**, then click or tap its actual location. BPS records the
+   marker directly and converts the point to metres. Manual X/Y entry remains
+   under **Enter coordinates manually (optional)**. Leave it there for 30–60 seconds.
 3. Click **Clear known position before moving**. Repeat at several locations:
    open yard, near the metal shop, behind a building, and among trees. Add notes
    for collar orientation, doors, weather, or an observed jump. Walking without
@@ -1202,6 +1213,17 @@ Some deliberate choices worth knowing:
   segment across the gap.
 
 ## Receiver distances
+
+The live-tracking **Distances** control defaults to **BLE + estimated**.
+Dashed circles show corrected, height-adjusted BLE ranges. Solid circles show
+the horizontal distance from each reporting receiver to the estimated beacon
+position, or the combined position of a group. One estimated circle is drawn
+per receiver location. These circles describe the estimated position; they do
+not independently verify its accuracy. Walls, trees and fences affect the
+position solver's trust rather than inventing a new range correction.
+Select **BLE ranges** or **Estimated position** to see just one view. With
+multiple devices shown, lines replace circles; select a beacon to isolate it.
+Distance labels use the selected grid unit for both measured and map distances.
 
 A **Receiver distances** toggle in the Tracking column draws a line between
 every pair of receivers that measure each other, straight on the floor plan.

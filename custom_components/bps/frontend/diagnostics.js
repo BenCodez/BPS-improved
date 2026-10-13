@@ -100,7 +100,7 @@
                 }
             }
         }
-        let status = {active: false, available: false}, timer = null, busy = false, cancelPick = null;
+        let status = {active: false, available: false}, timer = null, busy = false, cancelPick = null, cancelRecordingPick = null;
         function invalidateSnapshotLocation(clearCoordinates) {
             if (cancelPick) {cancelPick(); cancelPick = null;}
             if (clearCoordinates) {
@@ -118,6 +118,7 @@
             });
             el('Target').disabled = busy || status.active;
             el('Duration').disabled = busy || status.active;
+            if (el('Pick')) el('Pick').disabled = busy || !status.active;
         }
         function options(node, items) {
             const selected = node.value;
@@ -133,6 +134,7 @@
             const previousSnapshotTarget = el('SnapshotTarget')?.value;
             const previousSnapshotFloor = el('SnapshotFloor')?.value;
             status = next;
+            if (!next.active && cancelRecordingPick) {cancelRecordingPick(); cancelRecordingPick = null;}
             if (Array.isArray(next.trackers)) {
                 const items = next.trackers.slice();
                 (next.targets || []).forEach(key => {if (!items.some(item => item.key === key)) items.push({key, name: key});});
@@ -212,7 +214,28 @@
             return post({action: 'annotate', kind: 'known_position', target: el('Target').value,
                 floor: el('Floor').value, x_m: Number(el('X').value), y_m: Number(el('Y').value), label: el('Label').value});
         }));
-        el('Release').addEventListener('click', () => run(() => post({action: 'annotate', kind: 'clear_position', target: el('Target').value})));
+        if (el('Pick')) el('Pick').addEventListener('click', () => {
+            if (busy || !status.active) return;
+            if (cancelRecordingPick) {cancelRecordingPick(); cancelRecordingPick = null; return;}
+            const target = el('Target').value;
+            try {
+                if (!locationTools.pick) throw new Error('Map picking is unavailable. Open a saved floor map first.');
+                cancelRecordingPick = locationTools.pick(point => {
+                    cancelRecordingPick = null;
+                    if (!status.active || el('Target').value !== target) {locationTools.clearPoint?.(); return;}
+                    el('Floor').value = point.floor;
+                    el('X').value = point.x_m.toFixed(3); el('Y').value = point.y_m.toFixed(3);
+                    return run(() => post({action: 'annotate', kind: 'known_position', target,
+                        floor: point.floor, x_m: point.x_m, y_m: point.y_m, label: el('Label').value}));
+                }, () => {cancelRecordingPick = null; el('Status').textContent = 'Map location selection cancelled.';});
+                el('Status').textContent = 'Click or tap the dog’s actual location to record it. Press Esc to cancel.';
+            } catch (error) {el('Status').textContent = error.message;}
+        });
+        el('Release').addEventListener('click', () => run(async () => {
+            if (cancelRecordingPick) {cancelRecordingPick(); cancelRecordingPick = null;}
+            await post({action: 'annotate', kind: 'clear_position', target: el('Target').value});
+            locationTools.clearPoint?.(); el('X').value = ''; el('Y').value = '';
+        }));
         el('Note').addEventListener('click', () => run(() => post({action: 'annotate', kind: 'note', label: el('Label').value})));
         el('Download').addEventListener('click', () => run(async () => {
             const response = await apiFetch('/api/bps/diagnostics?download=1');

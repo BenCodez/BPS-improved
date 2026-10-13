@@ -396,6 +396,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 });
             }
             const metadataInputs = [];
+            const hardware = opts.receiverHardware;
+            const hardwareInfo = opts.receiverMetadata ? document.createElement('p') : null;
+            const externalAntenna = opts.receiverMetadata ? document.createElement('select') : null;
             if (opts.receiverMetadata) {
                 for (const [key, label, maxLength] of [
                     ['hardware_model', 'Hardware / model (optional)', 128],
@@ -405,10 +408,24 @@ document.addEventListener('DOMContentLoaded', async () => {
                     field.type = 'text'; field.className = 'bps-modal-input';
                     field.maxLength = maxLength; field.placeholder = label;
                     field.value = typeof opts.receiverMetadata[key] === 'string' ? opts.receiverMetadata[key] : '';
+                    if (key === 'hardware_model' && hardware?.effective?.model) field.placeholder = `Automatic: ${hardware.effective.model}`;
                     const wrapper = document.createElement('label');
                     wrapper.textContent = label; wrapper.appendChild(field);
                     metadataInputs.push({key, maxLength, field, wrapper});
                 }
+            }
+            if (hardwareInfo) {
+                const fields = hardware?.effective || {};
+                const description = [fields.manufacturer, fields.model, fields.hardware_type].filter(value => typeof value === 'string' && value);
+                hardwareInfo.textContent = description.length ? `Automatic hardware: ${description.join(' · ')}. Leave the model override empty to use this information.`
+                    : 'Automatic hardware: unknown. Match the receiver to its HA / Bermuda scanner, or enter a model override.';
+                hardwareInfo.dataset.role = 'receiver-hardware';
+                externalAntenna.className = 'bps-modal-input'; externalAntenna.title = 'External antenna';
+                const inherited = typeof fields.external_antenna === 'boolean' ? (fields.external_antenna ? 'external' : 'built-in') : 'unknown';
+                for (const [value, label] of [['', `Use Bermuda setting (${inherited})`], ['true', 'External antenna'], ['false', 'Built-in antenna']]) {
+                    const option = document.createElement('option'); option.value = value; option.textContent = label; externalAntenna.appendChild(option);
+                }
+                externalAntenna.value = typeof opts.receiverMetadata.external_antenna === 'boolean' ? String(opts.receiverMetadata.external_antenna) : '';
             }
             const row = document.createElement("div");
             row.className = "bps-modal-actions";
@@ -427,6 +444,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (unitSelect) dialog.appendChild(unitSelect);
             metadataInputs.forEach(({wrapper}) => dialog.appendChild(wrapper));
             if (accuracyLabel) dialog.appendChild(accuracyLabel);
+            if (hardwareInfo) {
+                dialog.appendChild(hardwareInfo);
+                const label = document.createElement('label'); label.textContent = 'External antenna'; label.appendChild(externalAntenna); dialog.appendChild(label);
+            }
             dialog.appendChild(row);
             overlay.appendChild(dialog);
             document.body.appendChild(overlay);
@@ -445,6 +466,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
                 const properties = {height, height_unit: height === null && accuracy === null ? null : heightUnit,
                     distance_accuracy_m: accuracy === null ? null : Number(accuracy.toFixed(10))};
+                if (!['', 'true', 'false'].includes(externalAntenna.value)) {bpsToast('Choose an antenna option.'); return;}
+                properties.external_antenna = externalAntenna.value === '' ? null : externalAntenna.value === 'true';
                 for (const {key, maxLength, field} of metadataInputs) {
                     const value = field.value.trim();
                     if (value.length > maxLength) {
@@ -1298,25 +1321,47 @@ document.addEventListener('DOMContentLoaded', async () => {
     //   Multi: circles from several beacons pile into noise, so just a thin line
     //   from each beacon to the receivers hearing it.
     // Returns a Map: receiver coord key -> [{order, text, hue, x, y}].
+    function trackingDistanceMarks(t) {
+        if (!Array.isArray(t.circles)) return [];
+        const measured = validRadii(t.circles);
+        const mode = document.getElementById('trackingDistanceMode')?.value || 'both';
+        const valid = mode === 'estimated' ? [] : measured.map(c => [...c, 'measured']);
+        if (mode !== 'measured' && Number.isFinite(t.x) && Number.isFinite(t.y)
+            && !t.payload?.outdoor?.detection_only && t.payload?.outdoor?.direction_known !== false) {
+            const seen = new Set();
+            for (const c of measured) {
+                const key = JSON.stringify(c.slice(0, 2));
+                if (seen.has(key)) continue;
+                seen.add(key);
+                valid.push([c[0], c[1], Math.hypot(t.x - c[0], t.y - c[1]), 'estimated']);
+            }
+        }
+        return valid;
+    }
+
     function drawDistanceMarks(entries, solo) {
         const labels = new Map();
         if (!circleToggle.checked) return labels;
         entries.forEach(([entKey, t]) => {
-            if (!Array.isArray(t.circles)) return; // off-floor: no distance overlay
             const order = trackedDevices.indexOf(entKey);
-            const valid = validRadii(t.circles);
+            const valid = trackingDistanceMarks(t);
             const hueOf = (c) => solo ? floorReceiverHue(c[0], c[1]) : deviceBaseHue(entKey);
             ctx.save();
             ctx.lineCap = "round";
             if (solo) {
                 // Thick receiver -> tracker connectors first, so the circle rings
                 // (next) overlap them at the edge.
+                const connected = new Set();
                 valid.forEach((c) => {
+                    const key = JSON.stringify(c.slice(0, 2));
+                    if (connected.has(key)) return;
+                    connected.add(key);
                     ctx.beginPath();
                     ctx.moveTo(t.x, t.y);
                     ctx.lineTo(c[0], c[1]);
                     ctx.strokeStyle = `hsla(${hueOf(c)}, 90%, 42%, 0.9)`;
-                    ctx.lineWidth = 5;
+                    ctx.setLineDash([]);
+                    ctx.lineWidth = 3;
                     ctx.stroke();
                 });
                 // Circles on top: faint tint inside, receiver-coloured ring.
@@ -1324,10 +1369,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const hue = hueOf(c);
                     ctx.beginPath();
                     ctx.arc(c[0], c[1], c[2], 0, Math.PI * 2);
-                    ctx.fillStyle = `hsla(${hue}, 95%, 55%, 0.10)`;
+                    const estimated = c[3] === 'estimated';
+                    ctx.setLineDash(estimated ? [] : [10, 7]);
+                    ctx.fillStyle = `hsla(${hue}, 95%, 55%, ${estimated ? 0.025 : 0.04})`;
                     ctx.fill();
                     ctx.strokeStyle = `hsla(${hue}, 95%, 48%, 0.95)`;
-                    ctx.lineWidth = 3;
+                    ctx.lineWidth = estimated ? 3 : 2;
                     ctx.stroke();
                 });
             } else {
@@ -1335,6 +1382,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     ctx.beginPath();
                     ctx.moveTo(t.x, t.y);
                     ctx.lineTo(c[0], c[1]);
+                    ctx.setLineDash(c[3] === 'estimated' ? [] : [10, 7]);
                     ctx.strokeStyle = `hsla(${hueOf(c)}, 90%, 50%, 0.55)`;
                     ctx.lineWidth = 2.5;
                     ctx.stroke();
@@ -1342,8 +1390,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             ctx.restore();
             valid.forEach((c) => {
-                const text = distanceLabel(c[2]);
-                if (!text) return;
+                const distance = distanceLabel(c[2]);
+                if (!distance) return;
+                const text = `${c[3] === 'estimated' ? 'Est' : 'BLE'} ${distance}`;
                 const key = `${Math.round(c[0])},${Math.round(c[1])}`;
                 let arr = labels.get(key);
                 if (!arr) { arr = []; labels.set(key, arr); }
@@ -3250,11 +3299,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 `Receiver properties for "${recId}". Mount height above this floor (empty = unknown); select metres or feet. Heights are saved in metres. `
                 + `Used to remove the vertical leg from its distances and to judge calibration `
                 + `against the true 3D distance — recalibrate after changing it.`,
-                { initial: Number.isFinite(rec.height) ? rec.height : "", placeholder: "Mount height m (optional)", receiverMetadata: rec }
+                { initial: Number.isFinite(rec.height) ? rec.height : "", placeholder: "Mount height m (optional)", receiverMetadata: rec, receiverHardware: receiverHardware(rec) }
             ).then(val => {
                 if (val === undefined) return;                       // cancelled
                 const heightChanged = rec.height !== (val.height === null ? undefined : val.height);
-                for (const key of ['height', 'height_unit', 'hardware_model', 'antenna_notes', 'distance_accuracy_m']) {
+                for (const key of ['height', 'height_unit', 'hardware_model', 'antenna_notes', 'distance_accuracy_m', 'external_antenna']) {
                     if (val[key] === null) delete rec[key]; else rec[key] = val[key];
                 }
                 savebuttondiv.appendChild(saveButton);               // reveal Save Floor Plan
@@ -5197,6 +5246,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         return JSON.stringify(stored);
     }
 
+    function receiverHardware(rec) {
+        // Saved MAC/owner proof takes priority over a reused friendly-name slug.
+        if (!rec.scanner_mac) {
+            const option = receiverMatching.options.find(o => o.entity_id === rec.entity_id && !o.identity_ambiguous
+                && (!rec.scanner_config_entry_id || o.config_entry_ids?.includes(rec.scanner_config_entry_id)));
+            return option?.hardware;
+        }
+        const matches = [];
+        for (const option of receiverMatching.options) {
+            for (const proof of option.scanner_identities || []) {
+                const bound = {entity_id: `${option.entity_id}#hardware`, scanner_mac: proof.scanner_mac, scanner_config_entry_id: proof.config_entry_id};
+                if (rec.scanner_config_entry_id && rec.scanner_config_entry_id !== proof.config_entry_id) continue;
+                if (sameReceiverIdentity(rec, bound, receiverMatching.options)) matches.push({owner: proof.config_entry_id, hardware: proof.hardware});
+            }
+        }
+        if (new Set(matches.map(match => match.owner)).size !== 1) return undefined;
+        const values = matches.map(match => match.hardware);
+        return values.length && values.every(value => JSON.stringify(value) === JSON.stringify(values[0])) ? values[0] : undefined;
+    }
+
     function sameReceiverIdentity(left, right, options, addressMap = receiverMatching.runtime_address_map) {
         if (left.entity_id === right.entity_id) return true;
         const leftOption = options.find(o => o.entity_id === left.entity_id);
@@ -5721,6 +5790,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     // =================================================================
 
     const circleToggle = document.getElementById("circleToggle");
+    const trackingDistanceMode = document.getElementById('trackingDistanceMode');
+    if (trackingDistanceMode) {
+        const saved = localStorage.getItem('bpsTrackingDistanceMode');
+        trackingDistanceMode.value = ['both', 'measured', 'estimated'].includes(saved) ? saved : 'both';
+        trackingDistanceMode.addEventListener('change', () => {
+            if (!['both', 'measured', 'estimated'].includes(trackingDistanceMode.value)) trackingDistanceMode.value = 'both';
+            localStorage.setItem('bpsTrackingDistanceMode', trackingDistanceMode.value);
+            if (mapReady()) redrawAll();
+        });
+    }
     circleToggle.checked = localStorage.getItem("bpsCircles") === "on"; // off by default
     circleToggle.addEventListener("change", () => {
         localStorage.setItem("bpsCircles", circleToggle.checked ? "on" : "off");
@@ -5826,8 +5905,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Redraw only when a floor plan is actually loaded; the preference
         // itself always cycles and persists.
         if (img.naturalWidth > 0) {
-            clearCanvas();
-            drawElements();
+            redrawAll();
         }
     });
 
@@ -7155,10 +7233,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             image_size_px: {width: img.naturalWidth, height: img.naturalHeight},
             canvas_size_px: {width: canvas.width, height: canvas.height}, view: {...view},
             selected_tracker: activeDevice, displayed_trackers: [...trackedDevices],
+            distance_display: {enabled: circleToggle.checked, mode: trackingDistanceMode?.value || 'both',
+                unit: gridUnit === 'ft' ? 'ft' : 'm'},
             displayed_positions: [...lastTracks.entries()].map(([entity, position]) => ({entity,
                 floor: position.floor, x_px: position.x, y_px: position.y,
                 raw_uncertainty_m: position.outdoor?.estimated_uncertainty_m,
                 display_uncertainty_m: position.outdoor?.display_uncertainty_m,
+                displayed_receiver_radii: circleToggle.checked ? trackingDistanceMarks(position) : [],
                 received_at: position.receivedAt / 1000})),
             editor_layout: editor};
     }, snapshotLocationTools);

@@ -86,7 +86,8 @@ function receiverProperties(p, id = 'proxy') {
     p.listeners.get('click')({target: {closest: selector => selector === '[data-type="recheight"]' ? button : null}});
     const dialog = p.document.body.children.findLast(e => e.className === 'bps-modal-overlay').children[0];
     return {height: dialog.children[1], unit: dialog.children[2], model: dialog.children[3].children[0], antenna: dialog.children[4].children[0],
-        accuracy: dialog.children[5].children[0], save: dialog.children[6].children[1], cancel: dialog.children[6].children[0]};
+        accuracy: dialog.children[5].children[0], hardware: dialog.children[6], external: dialog.children[7].children[0],
+        save: dialog.children.at(-1).children[1], cancel: dialog.children.at(-1).children[0]};
 }
 
 test('receiver expected distance error converts selected feet and metres, persists canonically and validates atomically', async () => {
@@ -205,6 +206,50 @@ test('receiver property editor persists hardware and antenna notes without alter
     assert.equal(receiver.hardware_model, undefined); assert.equal(receiver.antenna_notes, undefined);
 });
 
+test('receiver properties follow detected hardware and persist only explicit model and antenna overrides', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'old_station', scanner_mac: 'aa:bb:cc:11:22:33',
+        scanner_config_entry_id: 'entry', cords: {x: 100, y: 200}, correction: 1.3}];
+    const hardware = {detected: {manufacturer: 'Synthetic', model: 'ESP32 board'},
+        effective: {manufacturer: 'Synthetic', model: 'ESP32 board', external_antenna: true}, provenance: 'esphome'};
+    const matching = {revision: 'hardware-1', options: [{entity_id: 'current_station', config_entry_ids: ['entry'],
+        scanner_mac: 'aa:bb:cc:11:22:33', selectable: true, hardware,
+        scanner_identities: [{config_entry_id: 'entry', scanner_mac: 'aa:bb:cc:11:22:33', hardware}]}]};
+    const p = await panel(source, undefined, false, matching); p.hooks.select('Property');
+    const receiver = p.hooks.layout().floor[0].receivers[0];
+    let edit = receiverProperties(p, 'old_station');
+    assert.match(edit.hardware.textContent, /Synthetic · ESP32 board/);
+    assert.equal(edit.model.value, ''); assert.equal(edit.model.placeholder, 'Automatic: ESP32 board');
+    assert.equal(edit.external.value, ''); assert.match(edit.external.options[0].textContent, /external/);
+    edit.external.value = 'false'; await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.external_antenna, false); assert.equal(receiver.hardware_model, undefined);
+    assert.equal(receiver.correction, 1.3); assert.equal(receiver.hardware, undefined);
+    edit = receiverProperties(p, 'old_station'); assert.equal(edit.external.value, 'false');
+    edit.external.value = 'true'; edit.model.value = 'Manual board'; await edit.cancel.fire('click'); await Promise.resolve();
+    assert.equal(receiver.external_antenna, false); assert.equal(receiver.hardware_model, undefined);
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[0].receivers[0].external_antenna, false);
+    edit = receiverProperties(p, 'old_station'); edit.external.value = ''; await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.external_antenna, undefined);
+});
+
+test('receiver properties never borrow automatic hardware from a reused slug or another owner', async () => {
+    for (const placement of [
+        {scanner_mac: 'dd:ee:ff:11:22:33', scanner_config_entry_id: 'entry'},
+        {scanner_mac: 'aa:bb:cc:11:22:33', scanner_config_entry_id: 'other'},
+        {scanner_mac: 'invalid'},
+    ]) {
+        const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, ...placement}];
+        const hardware = {effective: {model: 'Wrong board'}};
+        const matching = {revision: 'hardware-1', options: [{entity_id: 'proxy', scanner_mac: 'aa:bb:cc:11:22:33',
+            config_entry_ids: ['entry'], hardware, scanner_identities: [{config_entry_id: 'entry', scanner_mac: 'aa:bb:cc:11:22:33', hardware}]}]};
+        const p = await panel(source, undefined, false, matching); p.hooks.select('Property');
+        const edit = receiverProperties(p);
+        assert.match(edit.hardware.textContent, /unknown/); assert.doesNotMatch(edit.hardware.textContent, /Wrong board/);
+        assert.match(edit.external.options[0].textContent, /unknown/); await edit.cancel.fire('click');
+    }
+});
+
 test('panel Show distances draws same-floor group member ranges once while retaining different ranges', async () => {
     const source = layout(); source.outdoor_tracking = {enabled: true};
     source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a', 'beacon_b', 'beacon_c']}];
@@ -218,12 +263,45 @@ test('panel Show distances draws same-floor group member ranges once while retai
         {ent: 'bps_group_rover', group: true, floor: 'Property', cords: [200, 100], updated: 100,
             outdoor: {estimated_uncertainty_m: 120, display_radius_limit_m: 8, observed: 100}, beacon_positions: [
                 {ent: 'beacon_a', floor: 'Property'}, {ent: 'beacon_b', floor: 'Property', used: false}, {ent: 'beacon_c', floor: 'Barn'}]}];
+    p.el('trackingDistanceMode').value = 'measured';
     await p.intervals.findLast(i => i.ms === 500).cb();
     assert.deepEqual(plain(p.hooks.tracks().get('bps_group_rover').circles), [[0, 0, 90], [30, 40, 100], [30, 40, 110]]);
     const radii = p.canvasCalls.filter(c => c[0] === 'arc' && c[3] > 24).map(c => c[3]);
     assert.deepEqual(radii.sort((a, b) => a - b), [90, 100, 110, 160]);
     p.el('outdoorDiagnostics').checked = true; await p.el('outdoorDiagnostics').fire('change');
     assert.match(p.el('outdoorDiagnosticText').textContent, /capped for display.*displayed 8.0 m/);
+});
+
+test('live distance defaults to dashed measured and solid estimated group circles, using consistent units', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [{id: 'dog', name: 'Dog', beacons: ['beacon_a', 'beacon_b']}];
+    const p = await panel(source); p.hooks.select('Property');
+    p.el('entSelector').value = 'bps_group_dog'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click'); p.el('circleToggle').checked = true;
+    assert.equal(p.el('trackingDistanceMode').value, 'both'); p.canvasCalls.length = 0;
+    p.network.cords = [{ent:'beacon_a',floor:'Property',cords:[45,60],radii:[[0,0,120]]},
+        {ent:'beacon_b',floor:'Property',cords:[35,60],radii:[[0,0,140]]},
+        {ent:'bps_group_dog',group:true,floor:'Property',cords:[40,60],beacon_positions:[
+            {ent:'beacon_a',floor:'Property'},{ent:'beacon_b',floor:'Property'}]}];
+    await p.intervals.findLast(i => i.ms === 500).cb();
+    const atReceiver = () => p.canvasCalls.filter(call => call[0] === 'arc' && call[1] === 0 && call[2] === 0).map(call=>call[3]);
+    assert.deepEqual(atReceiver(),[120,140,Math.hypot(40,60)]);
+    assert.ok(p.canvasCalls.some(call=>JSON.stringify(call) === '["dash",10,7]'));
+    assert.ok(p.canvasCalls.some(call=>JSON.stringify(call) === '["dash"]'));
+    assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'BLE 6.0 m'));
+    assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'Est 3.6 m'));
+    await p.el('gridToggle').fire('click'); p.canvasCalls.length=0; await p.el('gridToggle').fire('click');
+    assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'BLE 19.7 ft'));
+    assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'Est 11.8 ft'));
+    p.el('trackingDistanceMode').value='estimated'; p.canvasCalls.length=0; await p.el('trackingDistanceMode').fire('change');
+    assert.deepEqual(atReceiver(),[Math.hypot(40,60)]);
+    await p.el('diagnosticCopyAll').fire('click');
+    const report = JSON.parse(p.el('diagnosticReportText').value.split('\n').slice(1).join('\n'));
+    assert.deepEqual(plain(report.panel_context.distance_display),{enabled:true,mode:'estimated',unit:'ft'});
+    assert.equal(report.panel_context.displayed_positions[0].displayed_receiver_radii.length,1);
+    p.network.cords[2].outdoor={detection_only:true,direction_known:false}; p.canvasCalls.length=0;
+    await p.intervals.findLast(i => i.ms === 500).cb();
+    assert.deepEqual(atReceiver(),[], 'a one-receiver detection cannot claim an estimated direction');
 });
 
 test('panel marks outside-map positions at the edge without status captions or moving raw ranges', async () => {

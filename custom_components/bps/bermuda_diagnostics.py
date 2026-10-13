@@ -75,7 +75,7 @@ def settings(values, *, compact=False, metadata_budget=None):
             "history_enabled", "history_window_s", "reliability_weighting") if key in toolkit}
         profile_fields = ("hardware_type", "manufacturer", "model", "antenna", "environment", "notes",
             "reference_power", "attenuation", "rssi_offset", "height_m", "antenna_gain_dbi", "antenna_gain_db",
-            "distance_accuracy_m", "reference_power_verified")
+            "distance_accuracy_m", "reference_power_verified", "external_antenna")
         if compact:
             profile_fields = ("reference_power", "attenuation", "rssi_offset", "reference_power_verified")
         if not compact and metadata_budget is None:

@@ -275,6 +275,32 @@ def test_full_copyable_report_has_direct_history_profile_health_and_no_mutations
     assert (data, payloads, coordinator.options) == before and not hass._store_saves
 
 
+def test_hardware_direct_contract_is_allowlisted_identity_scoped_and_in_copyable_report(hass, monkeypatch):
+    from bps.receiver_matching import inventory
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    hardware = {"detected": {"manufacturer": "Synthetic", "model": "ESP32 board", "password": "synthetic-secret"},
+                "effective": {"model": "Manual model", "external_antenna": False, "token": "synthetic-secret"},
+                "provenance": "esphome", "api_key": "synthetic-secret"}
+    payloads["entry"]["scanners"][MAC]["hardware"] = hardware
+    payloads["entry"]["devices"]["synthetic-tracker"]["hardware"] = hardware
+    direct = BermudaDirect(hass)
+    result = inventory(hass, direct)
+    option = next(row for row in result["options"] if row["entity_id"] == "current_station")
+    assert option["hardware"]["detected"]["model"] == "ESP32 board"
+    assert option["hardware"]["effective"]["external_antenna"] is False
+    assert option["scanner_identities"][0]["hardware"] == option["hardware"]
+    assert "synthetic-secret" not in json.dumps((result, direct.snapshots))
+    hass.data["bps"]["layout"] = data
+    report = bps._diagnostic_report_snapshot(hass, 1000.)
+    assert '"model": "ESP32 board"' in bps.diagnostics.format_report(report)
+    before_revision = result["revision"]
+    del payloads["entry"]["scanners"][MAC]["hardware"]
+    fresh = inventory(hass)
+    fresh_option = next(row for row in fresh["options"] if row["entity_id"] == "current_station")
+    assert fresh_option["hardware"]["detected"] == {} and fresh["revision"] != before_revision
+    assert not hass._store_saves
+
+
 def test_direct_scanner_age_precedes_cached_legacy_dump_and_missing_age_stays_unknown(hass, monkeypatch):
     data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
     hass.data["bps"]["layout"] = data
