@@ -179,8 +179,31 @@ test('phone selection stays explicit and late HA poll after cancellation is disc
     await p.click('gpsRefreshPhones'); assert.equal(p.el('gpsPhone').value, '');
     p.el('gpsPhone').value = 'device_tracker.synthetic_phone';
     p.defer(new Promise(r => {resolve = r;})); p.click('gpsCapture'); p.click('gpsCancel');
-    resolve({ok: true, json: async () => ({locations: [{entity_id: 'device_tracker.synthetic_phone', ...at(0, 0), gps_accuracy: 1, last_updated: now/1000}]})});
+    resolve({ok: true, json: async () => ({locations: [{entity_id: 'device_tracker.synthetic_phone', ...at(0, 0), gps_accuracy: 1, last_updated: now/1000, age_s: 0}]})});
     await new Promise(r => setImmediate(r)); assert.equal(p.api.snapshot().chosen_gps, undefined); assert.equal(p.watchers.size, 0);
+});
+
+for (const skew of [-120000, 120000]) test(`HA capture uses server age when browser clock differs by ${skew/1000} seconds`, async () => {
+    const p = ui(), phone = 'device_tracker.synthetic_phone';
+    p.clock(skew); p.el('gpsPhone').value = phone;
+    p.response([{entity_id: phone, ...at(5, 5), gps_accuracy: 1, last_updated: now/1000-3, age_s: 3}]);
+    p.click('gpsCapture'); p.emit(5, 5, 4); await new Promise(r => setImmediate(r));
+    p.clock(30000);
+    p.response([{entity_id: phone, ...at(5.5, 5), gps_accuracy: 1, last_updated: now/1000+27, age_s: 3}]);
+    await p.tick(); await new Promise(r => setImmediate(r)); p.emit(5, 5, 4); p.click('gpsStop');
+    const chosen = p.api.snapshot().chosen_gps;
+    assert.equal(chosen.source, phone); assert.equal(chosen.sample_count, 2);
+    near(chosen.age_s, 3); assert.equal(chosen.timestamp_kind, 'ha_state_update');
+});
+
+test('HA response latency counts toward freshness instead of renewing an old sample', async () => {
+    const p = ui(); let resolve; p.el('gpsPhone').value = 'device_tracker.synthetic_phone';
+    p.defer(new Promise(r => {resolve = r;})); p.click('gpsCapture'); p.clock(61000);
+    resolve({ok: true, json: async () => ({locations: [{entity_id: 'device_tracker.synthetic_phone', ...at(5, 5),
+        gps_accuracy: 1, last_updated: p.currentTime()/1000, age_s: 0}]})});
+    await new Promise(r => setImmediate(r)); p.click('gpsStop');
+    assert.equal(p.api.snapshot().chosen_gps, undefined);
+    assert.match(p.el('gpsStatus').textContent, /No fresh GPS observations/);
 });
 
 test('manual anchor staging is bounded and independent of floor scale/receiver positions', () => {

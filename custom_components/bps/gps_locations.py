@@ -79,7 +79,7 @@ def gps_locations(hass, now=None):
             name = attrs.get("friendly_name")
             rows.append({"entity_id": eid, "name": name[:128] if isinstance(name, str) else eid,
                          "latitude": lat, "longitude": lon, "gps_accuracy": accuracy,
-                         "last_updated": timestamp})
+                         "last_updated": timestamp, "age_s": now - timestamp})
             if len(rows) >= MAX_LOCATIONS:
                 return rows
     return rows

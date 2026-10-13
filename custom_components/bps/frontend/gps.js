@@ -195,6 +195,7 @@
         }
         async function loadLocations(g = null) {
             const requestId = ++locationsRequest;
+            const requestedAt = now();
             try {
                 const response = await hooks.fetch('/api/bps/gps_locations');
                 if (!response.ok) throw new Error('Phone locations unavailable. Check Home Assistant access.');
@@ -215,8 +216,11 @@
                 el('gpsPhone').value = selected;
                 if (g && capture && current(g) && selected) {
                     const row = rows.find(p => p.entity_id === selected);
-                    if (row) capture.samples.add({latitude: row.latitude, longitude: row.longitude,
-                        accuracy_m: row.gps_accuracy, timestamp: row.last_updated*1000}, selected, now());
+                    // HA computes state age on its own clock. Translate it to
+                    // this browser's clock and conservatively include the full
+                    // request duration instead of comparing two wall clocks.
+                    if (row && number(row.age_s, 0, MAX_AGE_MS / 1000)) capture.samples.add({latitude: row.latitude, longitude: row.longitude,
+                        accuracy_m: row.gps_accuracy, timestamp: requestedAt-row.age_s*1000}, selected, now());
                     showCapture();
                 }
             } catch (error) {if (!g || current(g)) status(error.message);}

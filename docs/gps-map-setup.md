@@ -40,7 +40,9 @@ It uses no map tile service and changes no receiver calibration automatically.
 Automatic source preference compares only the browser and your selected HA
 entity. HA freshness uses `last_updated`, which is the state publication time;
 raw GPS measurement time is unknown and unrelated attribute updates cannot prove
-a new GPS measurement. The capture labels this timestamp provenance. It chooses
+a new GPS measurement. HA calculates the state age on its own clock; capture
+includes request duration and uses that age, so phone and HA clocks can differ.
+The capture labels this timestamp provenance. It chooses
 the eligible stationary source with the smaller conservative
 accuracy, and rejects incompatible locations or observations indicating
 movement. It never selects someone else's phone automatically. Missing, denied

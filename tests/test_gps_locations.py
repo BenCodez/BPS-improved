@@ -32,9 +32,11 @@ def test_auth_allowlist_and_location_fields_only():
                      state("device_tracker.synthetic_router", source_type="router"))
     rows = gps_locations(hass, NOW)
     assert len(rows) == 2
-    assert set(rows[0]) == {"entity_id", "name", "latitude", "longitude", "gps_accuracy", "last_updated"}
+    assert set(rows[0]) == {"entity_id", "name", "latitude", "longitude", "gps_accuracy", "last_updated", "age_s"}
     assert rows[0]["gps_accuracy"] == 1
     assert rows[0]["last_updated"] == NOW
+    assert rows[0]["age_s"] == 0
+    assert gps_locations(hass_with(state(age=12.5)), NOW)[0]["age_s"] == 12.5
 
 
 @pytest.mark.parametrize("key,value", [("latitude", float("nan")), ("longitude", float("inf")),
