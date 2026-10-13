@@ -85,6 +85,11 @@ press **Verify and save** to update only that receiver's coordinates. Other save
 settings and radio calibration are retained. Pending candidates remain in private
 Home Assistant storage so you can verify several stations after a walk.
 
+If the verification response is lost, full layout saves pause so they cannot undo
+a receiver move that may already be saved. Use **Retry verification** to confirm
+the result. If newer receiver or alignment edits prevent reconciliation, reload
+the page to read the saved layout; reloading discards unsaved edits.
+
 The optional **Request fresh phone GPS** toggle uses your explicitly selected
 Companion App notification service to send `request_location_update`, at most once
 per minute during the survey. Delivery is a request, not confirmation of a GPS

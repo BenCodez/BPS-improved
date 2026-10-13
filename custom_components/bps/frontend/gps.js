@@ -163,7 +163,7 @@
         const el = id => doc.getElementById(id);
         if (!el('gpsSurveyStart')) return null;
         let active = null, generation = 0, watch = null, timer = null, loading = null;
-        let candidates = [], samples = [], verifying = false;
+        let candidates = [], samples = [], verifying = false, unconfirmed = null;
         const status = text => {el('gpsSurveyStatus').textContent = text;};
         const signature = () => hooks.getContext();
         const valid = g => g === generation && active && active.context === signature() && !doc.hidden;
@@ -175,8 +175,16 @@
             return data;
         };
         function render() {
-            el('gpsSurveyStart').disabled = !!active; el('gpsSurveyStop').disabled = !active;
+            el('gpsSurveyStart').disabled = !!active || verifying || !!unconfirmed; el('gpsSurveyStop').disabled = !active;
             el('gpsSurveyCandidates').replaceChildren();
+            if (unconfirmed) {
+                const row = doc.createElement('div'), details = doc.createElement('p'), retry = doc.createElement('button');
+                details.textContent = 'Receiver verification is not confirmed. Full layout saves are paused. Retry verification, or reload this page to read the saved layout and discard unsaved edits.';
+                retry.type = 'button'; retry.className = 'bps-btn bps-btn-primary';
+                retry.textContent = `Retry verification for ${unconfirmed.candidate.receiver}`;
+                retry.disabled = verifying; retry.addEventListener('click', () => verifyCandidate(unconfirmed));
+                row.appendChild(details); row.appendChild(retry); el('gpsSurveyCandidates').appendChild(row);
+            }
             candidates.filter(c => c.floor === hooks.getFloor()?.name).forEach(c => {
                 const row = doc.createElement('div'), details = doc.createElement('p');
                 const gps = c.gps || {}, position = c.position || {};
@@ -185,30 +193,22 @@
                 if (c.status !== 'verified') {
                     const verify = doc.createElement('button'); verify.type = 'button';
                     verify.className = 'bps-btn bps-btn-primary'; verify.textContent = `Verify and save ${c.receiver}`;
-                    verify.disabled = verifying;
+                    verify.disabled = verifying || !!unconfirmed;
                     verify.addEventListener('click', async () => {
-                        if (verifying) return;
+                        if (verifying || unconfirmed) return;
                         const bounds = hooks.getBounds();
                         if (!number(position.x, 0, bounds.width) || !number(position.y, 0, bounds.height)) {
                             status('GPS candidate is outside the current map. Review saved anchors before verifying.'); return;
                         }
                         try {if (hooks.surveyCanStart?.() === false) {status('Save or discard floor edits before verifying a candidate.'); return;}}
                         catch (error) {status(error.message); return;}
-                        verifying = true; render();
-                        const capturedUIContext = hooks.getContext();
-                        // Stop collection before committing a saved map change.
-                        stop('Verifying receiver position.');
-                        try {
-                            const result = await json({action: 'verify', candidate_id: c.id});
-                            candidates = candidates.map(row => row.id === c.id ? result.candidate : row);
-                            await hooks.surveySaved?.(result.candidate, result, capturedUIContext);
-                            status(result.warning || `${c.receiver} position verified and saved.`);
-                        } catch (error) {status(error.message);}
-                        finally {verifying = false; render(); hooks.redraw();}
+                        await verifyCandidate({candidate: c, context: hooks.getContext()});
                     }); row.appendChild(verify);
                     const remove = doc.createElement('button'); remove.type = 'button'; remove.textContent = 'Discard candidate';
                     remove.className = 'bps-btn bps-btn-outline';
+                    remove.disabled = verifying || !!unconfirmed;
                     remove.addEventListener('click', async () => {
+                        if (verifying || unconfirmed) return;
                         try {await json({action: 'remove', candidate_id: c.id}); candidates = candidates.filter(row => row.id !== c.id); render();}
                         catch (error) {status(error.message);}
                     }); row.appendChild(remove);
@@ -216,6 +216,22 @@
                 }
                 el('gpsSurveyCandidates').appendChild(row);
             });
+        }
+        async function verifyCandidate(operation) {
+            if (verifying || !operation) return;
+            // A failed request may already have committed on the server. Retain
+            // its original editor context and guard until an idempotent retry
+            // returns coordinates that have been merged into the local layout.
+            unconfirmed = operation; verifying = true;
+            stop('Verifying receiver position.');
+            try {
+                const result = await json({action: 'verify', candidate_id: operation.candidate.id});
+                candidates = candidates.map(row => row.id === operation.candidate.id ? result.candidate : row);
+                await hooks.surveySaved?.(result.candidate, result, operation.context);
+                unconfirmed = null;
+                status(result.warning || `${operation.candidate.receiver} position verified and saved.`);
+            } catch (error) {status(`${error.message} Verification remains unconfirmed; retry or reload before saving the layout.`);}
+            finally {verifying = false; render(); hooks.redraw();}
         }
         function stop(reason = 'Auto survey stopped. Saved candidates remain available for verification.') {
             const token = active?.session;
@@ -261,7 +277,7 @@
             if (valid(g)) timer = later(() => {timer = null; poll(g);}, 2000);
         }
         async function start() {
-            if (active || doc.hidden) return;
+            if (active || doc.hidden || verifying || unconfirmed) return;
             try {if (!hooks.getFloor() || hooks.surveyCanStart?.() === false) {status('Save or discard floor edits, including anchors, before starting auto survey.'); return;}}
             catch (error) {status(error.message); return;}
             const phone = el('gpsSurveyPhone').value;
@@ -304,7 +320,7 @@
         doc.addEventListener?.('visibilitychange', () => {if (doc.hidden && active) stop('Page hidden. Auto survey stopped.');});
         win.addEventListener('pagehide', () => stop()); win.addEventListener('beforeunload', () => stop());
         status('Auto survey is off. Averaged GPS candidates require verification before a receiver moves.'); render();
-        return {load, stop, isVerifying: () => verifying,
+        return {load, stop, isVerifying: () => verifying || !!unconfirmed,
             refresh() {if (active && active.context !== signature()) stop('Floor or layout changed. Auto survey stopped.'); render();},
             draw(ctx, zoom = 1) {for (const c of candidates) {
                 if (c.floor !== hooks.getFloor()?.name || c.status === 'verified') continue;

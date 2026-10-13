@@ -796,11 +796,9 @@ class PhoneSurvey:
                 raise ValueError(
                     "Saved floor, anchors or receiver placement changed; recapture before verifying"
                 )
-            if (
-                candidate.get("status") != "verified"
-                and _placement(floor, candidate["receiver"])
-                != candidate["original_position"]
-            ):
+            if candidate.get("status") != "verified" and _placement(
+                floor, candidate["receiver"]
+            ) not in (candidate["original_position"], candidate["position"]):
                 raise ValueError(
                     "Receiver placement changed; recapture before verifying"
                 )
@@ -827,9 +825,12 @@ class PhoneSurvey:
                     "candidate": copy.deepcopy(candidate),
                     "position": _placement(floor, candidate["receiver"]),
                 }
-            rec["cords"] = {**rec.get("cords", {}), **candidate["position"]}
-            await save_bps_data(self.hass, layout)
-            refresh_receivers_from_coords(self.hass, json.dumps(layout))
+            # The layout can commit before an interrupted audit write. Retry
+            # acknowledges that exact position without moving the receiver again.
+            if _placement(floor, candidate["receiver"]) != candidate["position"]:
+                rec["cords"] = {**rec.get("cords", {}), **candidate["position"]}
+                await save_bps_data(self.hass, layout)
+                refresh_receivers_from_coords(self.hass, json.dumps(layout))
         verified = {**candidate, "status": "verified", "verified_at": now}
         candidates = [
             verified if c["id"] == candidate["id"] else c for c in self.candidates

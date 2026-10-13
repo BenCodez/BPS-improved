@@ -561,6 +561,51 @@ def test_committed_position_is_reported_when_audit_save_fails():
     run(check())
 
 
+@pytest.mark.parametrize("restart", [False, True])
+def test_retry_recovers_a_committed_move_after_verification_audit_is_cancelled(restart):
+    f = Fixture()
+
+    async def check():
+        _, result = await f.capture()
+        candidate = result["candidate"]
+        original_save = f.manager.store.async_save
+        entered = asyncio.Event()
+
+        async def interrupted_audit(_payload):
+            entered.set()
+            await asyncio.Future()
+
+        f.manager.store.async_save = interrupted_audit
+        request = asyncio.create_task(
+            f.manager.action(
+                OWNER, {"action": "verify", "candidate_id": candidate["id"]}
+            )
+        )
+        await entered.wait()
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert (
+            get_bps_data(f.hass)["floor"][0]["receivers"][0]["cords"]
+            == candidate["position"]
+        )
+        assert f.manager.candidates[0]["status"] == "pending"
+        f.manager.store.async_save = original_save
+        if restart:
+            f.manager = f.make_manager()
+        response = await f.manager.action(
+            OWNER, {"action": "verify", "candidate_id": candidate["id"]}
+        )
+        assert response["saved"] and response["position"] == candidate["position"]
+        assert response["candidate"]["status"] == "verified"
+        assert (
+            f.hass._store_backing["bps_phone_survey"]["candidates"][0]["status"]
+            == "verified"
+        )
+
+    run(check())
+
+
 def test_multiple_pending_receivers_can_be_verified_in_sequence():
     f = Fixture()
     f.floor["receivers"].append(

@@ -61,6 +61,30 @@ test('verification remains observable until the committed response is merged', a
     assert.equal(p.api.isVerifying(), false);
 });
 
+test('lost verification response blocks full saves until an idempotent retry merges the saved coordinates', async () => {
+    const p = ui(); p.candidates([candidate()]); await p.click('gpsSurveyRefresh');
+    const fetch = p.hooks.fetch; let committed = false;
+    p.hooks.fetch = async (url, options) => {
+        const body = options?.body && JSON.parse(options.body);
+        if (body?.action === 'verify' && !committed) {
+            committed = true; throw new TypeError('Failed to fetch');
+        }
+        return fetch(url, options);
+    };
+    await p.el('gpsSurveyCandidates').children[0].children[1].fire('click');
+    assert.equal(committed, true); assert.equal(p.api.isVerifying(), true);
+    assert.equal(p.saveCalls.length, 0);
+    assert.equal(p.el('gpsSurveyStart').disabled, true);
+    assert.match(p.el('gpsSurveyStatus').textContent, /unconfirmed/);
+    // Refresh and navigation cannot release the guard or replace its context.
+    p.changeFloor(); await p.click('gpsSurveyRefresh');
+    assert.equal(p.api.isVerifying(), true);
+    await p.el('gpsSurveyCandidates').children[0].children[1].fire('click');
+    assert.equal(p.api.isVerifying(), false);
+    assert.deepEqual(p.saveCalls[0][1].position, {x: 300, y: 300});
+    assert.equal(p.saveCalls[0][2], 'synthetic-context');
+});
+
 test('survey accuracy circle uses captured GPS scale even when the displayed floor scale differs', async () => {
     const p = ui();
     const c = candidate();
@@ -152,7 +176,9 @@ test('verification passes the pre-request editor context and retains the saved r
     };
     await p.el('gpsSurveyCandidates').children[0].children[1].fire('click');
     assert.match(p.el('gpsSurveyStatus').textContent, /Position saved; your newer map edits were retained/);
-    assert.match(p.el('gpsSurveyCandidates').children[0].children[0].textContent, /verified and saved/);
+    assert.equal(p.api.isVerifying(), true);
+    assert.match(p.el('gpsSurveyCandidates').children[0].children[0].textContent, /Full layout saves are paused/);
+    assert.match(p.el('gpsSurveyCandidates').children[1].children[0].textContent, /verified and saved/);
 });
 
 test('an explicitly selected placed receiver is sent for colocated stations and changing it stops capture', async () => {
