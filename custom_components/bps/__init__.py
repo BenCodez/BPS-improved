@@ -3130,7 +3130,7 @@ def _diagnostic_inventory(hass):
     data = get_bps_data(hass)
     groups = normalize_groups(data, known)
     return {"trackers": [{"key": key, "name": key} for key in known] + [
-        {"key": "bps_group_" + group["id"], "name": group["name"] + " (group)"}
+        {"key": "bps_group_" + group["id"], "name": group["name"] + " (group)", "group": True}
         for group in groups], "floors": [f["name"] for f in data.get("floor", [])
         if isinstance(f.get("name"), str) and finite_number(f.get("scale"), minimum=1e-6) is not None]
         if isinstance(data, dict) else []}

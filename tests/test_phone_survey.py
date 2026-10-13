@@ -165,10 +165,13 @@ def run(coro):
 def test_authenticated_and_server_membership_rejects_logical_or_wrong_phone():
     assert BPSPhoneSurveyAPI.requires_auth is True
     f = Fixture()
-    f.known = ["bps_group_synthetic"]
+    inventory = f.manager.inventory
+    f.manager.inventory = lambda _: {
+        "trackers": [{"key": "bps_group_synthetic", "group": True}]
+    }
     with pytest.raises(ValueError, match="actual Bermuda"):
         run(f.start(phone="bps_group_synthetic"))
-    f.known = [PHONE]
+    f.manager.inventory = inventory
 
     async def check():
         token = await f.start()
@@ -181,6 +184,54 @@ def test_authenticated_and_server_membership_rejects_logical_or_wrong_phone():
             await f.poll(token)
 
     run(check())
+
+
+def test_real_group_prefixed_phone_remains_selectable():
+    f = Fixture()
+    f.known = ["bps_group_real_phone"]
+    token = run(f.start(phone="bps_group_real_phone"))
+    assert f.manager.sessions[token]["phone"] == "bps_group_real_phone"
+
+
+def test_verified_move_refreshes_running_manual_calibration_geometry(monkeypatch):
+    from bps import calibration
+
+    f = Fixture()
+    f.floor["receivers"].append(
+        {"entity_id": "other_receiver", "cords": {"x": 500, "y": 100}}
+    )
+    original = calibration._build_receiver_map
+    monkeypatch.setattr(
+        calibration,
+        "_build_receiver_map",
+        lambda coords, floor_name=None, hass=None: original(
+            coords, floor_name=floor_name
+        ),
+    )
+    old_map = original(f.hass.data["bps"]["layout"], floor_name=f.floor["name"])
+    cal = f.hass.data["bps"]["calibration"] = {
+        "state": "sampling",
+        "mode": "manual",
+        "floor": f.floor["name"],
+        "receivers": old_map,
+        "samples": {},
+    }
+
+    async def scenario():
+        _, result = await f.capture()
+        await f.manager.action(
+            OWNER, {"action": "verify", "candidate_id": result["candidate"]["id"]}
+        )
+        expected = original(get_bps_data(f.hass), floor_name=f.floor["name"])
+        assert cal["receivers"] == expected and cal["receivers"] != old_map
+        a, b = (
+            cal["receivers"][key] for key in ("synthetic_receiver", "other_receiver")
+        )
+        assert math.hypot(a["x"] - b["x"], a["y"] - b["y"]) / f.floor[
+            "scale"
+        ] == pytest.approx(math.sqrt(200))
+
+    run(scenario())
 
 
 @pytest.mark.parametrize(

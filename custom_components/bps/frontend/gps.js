@@ -15,6 +15,28 @@
         const p = {latitude: Number(match[1]), longitude: Number(match[2])};
         return validGPS(p) ? p : null;
     }
+    function mergeSurveyPosition(layout, candidate, position, beforeContext, afterContext) {
+        let before, after;
+        try {before = JSON.parse(beforeContext); after = JSON.parse(afterContext);} catch (_) {return false;}
+        if (!Array.isArray(before) || !Array.isArray(after) || before.length !== 6 || after.length !== 6) return false;
+        const a = before[5];
+        const floor = (layout.floor || []).filter(f => f.name === candidate.floor);
+        const b = floor.length === 1 ? floor[0] : null;
+        if (!a || !b || a.name !== candidate.floor || a.scale !== b.scale
+            || JSON.stringify(a.georeference) !== JSON.stringify(b.georeference)) return false;
+        // Navigating to another floor cannot leave the old floor's committed
+        // move out of the next full save. Pixel-frame edits on this floor can.
+        if (after[5]?.name === candidate.floor && before.slice(2, 5).some((value, i) => value !== after[i + 2])) return false;
+        const prior = (a.receivers || []).filter(r => r.entity_id === candidate.receiver);
+        const current = (b.receivers || []).filter(r => r.entity_id === candidate.receiver);
+        const targets = floor.length === 1 ? (floor[0].receivers || []).filter(r => r.entity_id === candidate.receiver) : [];
+        if (prior.length !== 1 || current.length !== 1 || targets.length !== 1
+            || !number(position?.x, 0, 1e6) || !number(position?.y, 0, 1e6)) return false;
+        if (['scanner_mac', 'scanner_config_entry_id'].some(k => prior[0][k] !== current[0][k])
+            || ['x', 'y'].some(k => prior[0].cords?.[k] !== current[0].cords?.[k])) return false;
+        targets[0].cords = {...targets[0].cords, x: position.x, y: position.y};
+        return true;
+    }
     function local(p, origin) {
         if (!validGPS(p) || !validGPS(origin)) throw new Error('Use finite latitude (−85 to 85) and longitude (−180 to 180).');
         const east = radians(((p.longitude - origin.longitude + 540) % 360) - 180) * EARTH_M * Math.cos(radians(origin.latitude));
@@ -537,7 +559,7 @@
                 auto_survey: survey?.snapshot()};
         }};
     }
-    const api = {fit, local, fromLocal, project, observation, summarize, choose, collector, parseCoordinates, surveyController, init};
+    const api = {fit, local, fromLocal, project, observation, summarize, choose, collector, parseCoordinates, mergeSurveyPosition, surveyController, init};
     root.BPSGPS = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

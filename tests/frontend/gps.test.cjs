@@ -9,6 +9,46 @@ const near = (actual, expected, tolerance = 1e-6) => assert.ok(Math.abs(actual-e
 const samples = (x, y, accuracy = 1, source = 'browser') => [at(x, y, accuracy, now-30000, source), at(x, y, accuracy, now, source)];
 const anchors = () => [[0, 0], [30, 0], [0, 30]].map(([x, y]) => ({...at(x, y, 1), x: 200+x*20, y: 150+y*20, label: 'Synthetic anchor'}));
 
+function mergeFixture() {
+    const layout = {floor: [{name: 'Yard', scale: 20, georeference: {version: 1, anchors: anchors()},
+        receivers: [{entity_id: 'proxy', scanner_mac: 'aa:bb:cc:dd:ee:ff', scanner_config_entry_id: 'instance',
+            cords: {x: 100, y: 100}, height: 1.5}, {entity_id: 'other', cords: {x: 500, y: 100}}]}]};
+    const context = () => JSON.stringify(['Yard', 'Yard', '/map.svg', 2000, 1000, layout.floor[0]]);
+    return {layout, context, target: {floor: 'Yard', receiver: 'proxy'}, before: context()};
+}
+
+test('confirmed survey coordinates merge with unrelated draft edits and survive the next full save', () => {
+    const f = mergeFixture();
+    f.layout.floor[0].receivers[0].height = 2;
+    f.layout.floor[0].receivers[1].cords.x = 550;
+    assert.equal(gps.mergeSurveyPosition(f.layout, f.target, {x: 300, y: 300}, f.before, f.context()), true);
+    const nextSave = JSON.parse(JSON.stringify(f.layout));
+    assert.deepEqual(nextSave.floor[0].receivers[0].cords, {x: 300, y: 300});
+    assert.equal(nextSave.floor[0].receivers[0].height, 2);
+    assert.equal(nextSave.floor[0].receivers[1].cords.x, 550);
+});
+
+test('a newer target position, identity or alignment edit is retained instead of overwritten', () => {
+    for (const change of [f => f.layout.floor[0].receivers[0].cords.x = 150,
+        f => f.layout.floor[0].receivers[0].scanner_mac = 'aa:bb:cc:dd:ee:00',
+        f => f.layout.floor[0].scale = 10,
+        f => f.layout.floor[0].georeference.anchors[0].x += 20]) {
+        const f = mergeFixture(); change(f);
+        const expected = JSON.stringify(f.layout);
+        assert.equal(gps.mergeSurveyPosition(f.layout, f.target, {x: 300, y: 300}, f.before, f.context()), false);
+        assert.equal(JSON.stringify(f.layout), expected);
+    }
+});
+
+test('navigating to another floor during verification still merges the committed target into the next save', () => {
+    const f = mergeFixture();
+    const other = {name: 'Other floor', scale: 10, receivers: []};
+    f.layout.floor.push(other);
+    const after = JSON.stringify(['Other floor', 'Other floor', '/other.svg', 500, 500, other]);
+    assert.equal(gps.mergeSurveyPosition(f.layout, f.target, {x: 300, y: 300}, f.before, after), true);
+    assert.deepEqual(f.layout.floor[0].receivers[0].cords, {x: 300, y: 300});
+});
+
 test('GPS similarity fit handles north-down pixels, rotation, translation and independent residual', () => {
     const a = anchors();
     const theta = .7, c = Math.cos(theta), s = Math.sin(theta);

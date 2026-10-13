@@ -7324,11 +7324,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         },
         surveySaved(candidate, response, uiContext) {
             // Merge only the confirmed coordinate change; retain unrelated drafts.
-            if (uiContext !== gpsEditorContext()) throw new Error('Position saved; newer map edits were retained. Save or discard those edits, then reload the floor.');
-            const floor = (finalcords.floor || []).find(f => f.name === candidate.floor);
-            const rec = floor?.receivers?.find(r => r.entity_id === candidate.receiver);
-            if (!rec || !response.position) throw new Error('Position saved. Reload the floor to see the updated receiver.');
-            rec.cords = {...rec.cords, x: response.position.x, y: response.position.y};
+            if (!globalThis.BPSGPS.mergeSurveyPosition(finalcords, candidate, response.position, uiContext, gpsEditorContext())) {
+                throw new Error('Position saved; your newer receiver or alignment edit was retained. Reload after resolving that edit to see the saved position.');
+            }
             gpsUI?.refresh();
             if (mapReady()) redrawAll();
         },

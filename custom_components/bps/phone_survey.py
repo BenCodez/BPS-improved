@@ -20,6 +20,7 @@ from homeassistant.helpers.storage import Store
 from .gps_locations import ENTITY_ID, gps_locations, validate_georeference, _number
 from .receiver_sources import ReceiverSources
 from .storage import BPS_FILE_LOCK, get_bps_data, get_bps_data_for_edit, save_bps_data
+from .calibration import refresh_receivers_from_coords
 
 EARTH_M = 6371008.8
 MAX_CANDIDATES = 32
@@ -313,7 +314,7 @@ class PhoneSurvey:
         return [
             r
             for r in self.inventory(self.hass).get("trackers", [])
-            if isinstance(r.get("key"), str) and not r["key"].startswith("bps_group_")
+            if isinstance(r.get("key"), str) and r.get("group") is not True
         ][:128]
 
     def _notify_services(self):
@@ -828,6 +829,7 @@ class PhoneSurvey:
                 }
             rec["cords"] = {**rec.get("cords", {}), **candidate["position"]}
             await save_bps_data(self.hass, layout)
+            refresh_receivers_from_coords(self.hass, json.dumps(layout))
         verified = {**candidate, "status": "verified", "verified_at": now}
         candidates = [
             verified if c["id"] == candidate["id"] else c for c in self.candidates
