@@ -126,6 +126,7 @@ def test_online_renamed_scanner_uses_proven_name_without_rewriting_layout(hass, 
 def test_authenticated_linking_and_read_text_include_matching_read_only(hass, monkeypatch):
     entries, states, devices, add = configure(hass, monkeypatch)
     add("sensor.tag_distance_to_workshop_112233", "3")
+    states["sensor.tag_distance_to_workshop_112233"].attributes["unit_of_measurement"] = "ft"
     request = NS(app={"hass": hass})
     before = copy.deepcopy(hass.data["bps"]["layout"])
     for api in (bps.BPSScannerLinkingAPI(), bps.BPSReadAPIText()):
@@ -134,6 +135,9 @@ def test_authenticated_linking_and_read_text_include_matching_read_only(hass, mo
         data = response.json_body
         matching = data.get("matching", data.get("receiver_matching"))
         assert matching["read_only"] and matching["options"][0]["entity_id"] == "workshop_112233"
+    placed = json.dumps({"floor": [{"name": "Ground", "receivers": [{"entity_id": "workshop_112233"}]}]})
+    reading = bps._scanner_linking(hass, placed)["placed"][0]["sensors"][0]
+    assert reading["state"] == "3" and reading["unit"] == "ft"
     assert hass.data["bps"]["layout"] == before and not hass._store_saves
 
 

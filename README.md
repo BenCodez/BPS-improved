@@ -1130,8 +1130,10 @@ visible at a glance.
 
 - Each receiver's **icon takes the color of its circle**, so you can tell which
   circle belongs to which receiver even when they overlap.
-- Each receiver carries a **pill showing the measured distance** (in the grid's
-  unit — meters or feet).
+- Receiver distance labels and live receiver/beacon readings default to **metres**.
+  Choose **View → Distances → Feet (ft)** to show feet instead. The choice is saved
+  in your browser and is independent of the grid. BLE, map and difference labels
+  use the same unit; stored ranges and tracking calculations remain in metres.
 - The circles and distances are the **exact radii the solver used**, including
   any calibration corrections — not a separate estimate.
 
@@ -1230,8 +1232,9 @@ Select **BLE ranges** or **Estimated position** to see just one view. With
 multiple devices shown, lines replace circles; select a beacon to isolate it.
 Receiver icons become smaller on screen as you zoom in, with click targets scaled
 to match. Hover a receiver in the sidebar to highlight its map icon in blue.
-Live-tracker labels use the selected grid unit. Receiver-to-receiver labels show
-both feet and metres for the BLE distance and the map distance.
+Live-tracker and receiver-to-receiver labels default to metres. The **Distances**
+selector under **View** changes BLE, map and difference labels to feet together,
+independently of the grid. The selection persists in this browser.
 The **Δ** value is BLE distance minus the comparison distance: positive means
 the range reads farther, negative means closer. Live tracking compares against
 the estimated beacon/group position, so its disagreement does not prove a bad
@@ -1276,7 +1279,7 @@ links) stands out of the mesh.
   without the surrounding mesh. Click it again, or an empty spot, to show all.
 - The values come from the **latest calibration solve** for the floor (run one
   from the Calibration tab, or leave auto calibration on to keep them fresh);
-  distances honour the grid's unit (meters or feet), and the pills stay a fixed
+  distances use the **Distances** display unit (metres by default, optionally feet), and the pills stay a fixed
   on-screen size while you zoom, like every other distance pill.
 - Unlike the two toggles above it needs **no active tracking session**; it is
   off by default and remembers its state.

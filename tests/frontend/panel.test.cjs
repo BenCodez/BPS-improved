@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const directory = join(__dirname, '../../custom_components/bps/frontend');
 const plain = x => JSON.parse(JSON.stringify(x));
 
-async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false, matching = null, gpsEnabled = false, heightEnabled = false) {
+async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = false, matching = null, gpsEnabled = false, heightEnabled = false, preferences = new Map()) {
     const ids = new Map(), listeners = new Map(), requests = [], intervals = [], canvasCalls = [];
     const network = {cords: [], cordsStatus: 200, failCords: false, calibration: {}, matching, matchingRequest: null};
     let clock = Date.now();
@@ -49,7 +49,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date: ClockDate, URL, FormData, Response, TextEncoder,
         navigator: {geolocation: {watchPosition(done) {gpsWatchers.set(++gpsWatchId, done); return gpsWatchId;}, clearWatch(id) {gpsWatchers.delete(id);}}},
         Image: class {constructor() {this.naturalWidth = iconsLoaded ? 24 : 0; this.complete = iconsLoaded;}}, setTimeout: () => 1, clearTimeout() {}, setInterval: (cb, ms) => {intervals.push({cb, ms}); return intervals.length;}, clearInterval() {},
-        requestAnimationFrame: () => 1, localStorage: {getItem: () => null, setItem() {}},
+        requestAnimationFrame: () => 1, localStorage: {getItem: key => preferences.get(key) ?? null, setItem: (key, value) => preferences.set(key, value)},
         fetch: async (url, options) => {
             requests.push({url, options});
             if (url === '/api/bps/cords' && network.failCords) throw new Error('connection lost');
@@ -81,7 +81,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     listeners.get('window:message')({origin: window.location.origin, data: {type: 'bps-auth', token: 'test-token'}});
     await ready;
     await new Promise(resolve => setImmediate(resolve));
-    return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests, intervals, canvasCalls, network, document, listeners,
+    return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests, intervals, canvasCalls, network, document, listeners, preferences,
         setClock: now => {clock = now;}, clock: () => clock, gpsWatchers,
         emitGPS: (coordinates, accuracy = 1) => {for (const callback of gpsWatchers.values()) callback({coords: {...coordinates, accuracy}, timestamp: clock});}};
 }
@@ -297,14 +297,48 @@ test('Debugging refresh updates detected model and inherited antenna without rew
     assert.equal(p.hooks.layout().floor[0].receivers[0].correction,1.2);
 });
 
-test('receiver-to-receiver labels show measured and map distances in both feet and metres', async () => {
+test('receiver distances default to metres and switch to persisted feet without changing the layout', async () => {
     const source=layout(); source.floor[0].receivers=[{entity_id:'a',cords:{x:0,y:0}},
         {entity_id:'b',cords:{x:60,y:80}},{entity_id:'c',cords:{x:200,y:200}}];
     const p=await panel(source); p.hooks.select('Property');
     p.hooks.setCalibration({Property:{floor:'Property',matrix:[{tx:'a',rx:'b',corrected_m:3,measured_m:4,true_m:5}]}});
     p.el('recDistToggle').checked=true; p.el('recDistColor').value='all'; p.el('recDistMode').value='calibrated';
     p.listeners.get('click')({target:{closest:selector=>selector==='[data-type="focusrec"]'?{getAttribute:()=> 'a'}:null}});
-    assert.ok(p.canvasCalls.some(call=>call[0]==='text'&&call[1]==='BLE 9.8 ft / 3.0 m · Map 16.4 ft / 5.0 m · Δ −6.6 ft / 2.0 m'));
+    assert.ok(p.canvasCalls.some(call=>call[0]==='text'&&call[1]==='BLE 3.0 m · Map 5.0 m · Δ −2.0 m'));
+    const before=plain(p.hooks.layout());
+    p.el('distanceUnit').value='ft'; p.canvasCalls.length=0; await p.el('distanceUnit').fire('change');
+    assert.ok(p.canvasCalls.some(call=>call[0]==='text'&&call[1]==='BLE 9.8 ft · Map 16.4 ft · Δ −6.6 ft'));
+    assert.deepEqual(plain(p.hooks.layout()),before);
+    assert.equal(p.preferences.get('bpsDistanceUnit'),'ft');
+    const next=await panel(source,undefined,false,null,false,false,p.preferences);
+    assert.equal(next.el('distanceUnit').value,'ft');
+    assert.equal(p.requests.some(r=>r.options?.method==='POST'),false);
+});
+
+test('receiver and beacon live tables convert mixed source units and preserve missing values', async () => {
+    const p=await panel(layout());
+    p.network.matchingRequest=async()=>({ok:true,json:async()=>({placed:[{entity_id:'station',status:'live',sensors:[
+        {device:'a',entity_id:'sensor.a',state:'10',unit:'ft'},
+        {device:'b',entity_id:'sensor.b',state:'3.048',unit:'m'},
+        {device:'c',entity_id:'sensor.c',state:'unavailable',unit:'ft'}]}],unplaced:[],
+        beacons:[{device:'tag',receivers:[{scanner:'station',distance:10,unit:'ft'}]}]})});
+    p.listeners.get('click')({target:{closest:selector=>selector==='[data-type="refreshlinking"]'?{}:null}});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal((p.el('debuglinking').innerHTML.match(/3\.0 m/g)||[]).length,2);
+    assert.match(p.el('debuglinking').innerHTML,/unavailable/);
+    p.el('distanceUnit').value='ft'; await p.el('distanceUnit').fire('change');
+    assert.equal((p.el('debuglinking').innerHTML.match(/10\.0 ft/g)||[]).length,2);
+    p.listeners.get('click')({target:{closest:selector=>selector==='[data-type="debugsubtab"]'
+        ?{dataset:{tab:'beacons'},getAttribute:()=> 'beacons'}:null}});
+    assert.match(p.el('debuglinking').innerHTML,/10\.0 ft/);
+    p.el('distanceUnit').value='m'; await p.el('distanceUnit').fire('change');
+    assert.match(p.el('debuglinking').innerHTML,/3\.0 m/);
+});
+
+test('legacy grid feet and an invalid distance preference still default to metres', async () => {
+    const p=await panel(layout(),undefined,false,null,false,false,new Map([
+        ['bpsGridUnit','ft'],['bpsDistanceUnit','invalid']]));
+    assert.equal(p.el('distanceUnit').value,'m');
 });
 
 test('panel Show distances draws same-floor group member ranges once while retaining different ranges', async () => {
@@ -348,6 +382,8 @@ test('live distance defaults to dashed measured and solid estimated group circle
     assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'BLE 6.0 m · Δ +2.4 m'));
     assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'Est 3.6 m'));
     await p.el('gridToggle').fire('click'); p.canvasCalls.length=0; await p.el('gridToggle').fire('click');
+    assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'BLE 6.0 m · Δ +2.4 m'), 'grid feet does not change receiver units');
+    p.el('distanceUnit').value='ft'; p.canvasCalls.length=0; await p.el('distanceUnit').fire('change');
     assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'BLE 19.7 ft · Δ +7.9 ft'));
     assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'Est 11.8 ft'));
     p.el('trackingDistanceMode').value='estimated'; p.canvasCalls.length=0; await p.el('trackingDistanceMode').fire('change');

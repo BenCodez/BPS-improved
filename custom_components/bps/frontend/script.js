@@ -2,6 +2,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const outdoor = globalThis.BPSOutdoor;
+    let distanceUnit = localStorage.getItem('bpsDistanceUnit') === 'ft' ? 'ft' : 'm';
+    const distanceUnitSelect = document.getElementById('distanceUnit');
+    if (distanceUnitSelect) {
+        distanceUnitSelect.value = distanceUnit;
+        distanceUnitSelect.addEventListener('change', () => {
+            distanceUnit = distanceUnitSelect.value === 'ft' ? 'ft' : 'm';
+            distanceUnitSelect.value = distanceUnit;
+            localStorage.setItem('bpsDistanceUnit', distanceUnit);
+            if (img.naturalWidth > 0) redrawAll();
+            renderDebugView();
+        });
+    }
+    function receiverDistanceText(value, sourceUnit = 'm') {
+        const factors = {m: 1, ft: .3048, cm: .01, mm: .001, km: 1000, in: .0254, yd: .9144, mi: 1609.344};
+        const factor = factors[sourceUnit || 'm'];
+        if (!Object.prototype.hasOwnProperty.call(factors, sourceUnit || 'm')) return `${value} ${sourceUnit}`;
+        if (value === null || value === undefined || String(value).trim() === '' || !Number.isFinite(Number(value))) return '—';
+        const metres = Number(value) * factor;
+        return `${(distanceUnit === 'ft' ? metres / .3048 : metres).toFixed(1)} ${distanceUnit}`;
+    }
     let availableBeaconKeys = [];
     let outdoorFloorSignature = '';
     let gpsUI = null;
@@ -1316,13 +1336,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // The measured distance for radius `r` (pixels) as a display string in the
-    // active grid unit, or null when the floor has no scale set.
+    // selected distance unit, or null when the floor has no scale set.
     function distanceLabel(r) {
         const floor = finalcords.floor.find(f => sameFloorName(f.name, SelMapName));
         const scale = floor && floor.scale;
         if (!scale) return null;
         const meters = r / scale;
-        return gridUnit === "ft" ? `${(meters * 3.28084).toFixed(1)} ft` : `${meters.toFixed(1)} m`;
+        return receiverDistanceText(meters);
     }
 
     // Draw the distance circles/lines for every shown device and return the
@@ -1622,7 +1642,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const links = shownRecDistLinks();
         if (!links.length) return;
         if (recDistLegend) recDistLegend.style.display = "";
-        const fmt = meters => `${(meters / .3048).toFixed(1)} ft / ${meters.toFixed(1)} m`;
+        const fmt = receiverDistanceText;
         const mismatch = (measured, mapped) => `${measured < mapped ? '−' : '+'}${fmt(Math.abs(measured - mapped))}`;
         // While actively hovering a line or a receiver, the link(s) being
         // inspected stay full strength and every other line dims to 10% so the
@@ -5527,7 +5547,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         // sensor with no value yet (amber, usually just no BLE contact).
                         const st = (s.state === null || s.state === undefined) ? "" : String(s.state);
                         let cls, val;
-                        if (linkingHasReading(s.state)) { cls = "is-live"; val = st; }
+                        if (linkingHasReading(s.state)) { cls = "is-live"; val = receiverDistanceText(st, s.unit); }
                         else if (st.toLowerCase() === "unavailable") { cls = "is-unavailable"; val = st; }
                         else { cls = "is-silent"; val = st === "" ? "—" : st; }
                         return '<span class="bps-debug-reading ' + cls + '" title="' + escHtml(s.entity_id) + '">'
@@ -5609,7 +5629,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 cell = '<div class="bps-debug-readings">' + recs.map(r =>
                     '<span class="bps-debug-reading is-live" title="' + escHtml(r.scanner) + '">'
                     + '<span class="bps-debug-dev">' + escHtml(r.scanner) + '</span>'
-                    + '<span class="bps-debug-val">' + escHtml(String(r.distance)) + ' ' + escHtml(r.unit || 'm') + '</span></span>'
+                    + '<span class="bps-debug-val">' + escHtml(receiverDistanceText(r.distance, r.unit)) + '</span></span>'
                 ).join("") + '</div>';
             }
             html += '<tr class="bps-debug-row bps-status-' + status + '">'
@@ -7328,7 +7348,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             canvas_size_px: {width: canvas.width, height: canvas.height}, view: {...view},
             selected_tracker: activeDevice, displayed_trackers: [...trackedDevices],
             distance_display: {enabled: circleToggle.checked, mode: trackingDistanceMode?.value || 'both',
-                unit: gridUnit === 'ft' ? 'ft' : 'm'},
+                unit: distanceUnit},
             displayed_positions: [...lastTracks.entries()].map(([entity, position]) => ({entity,
                 floor: position.floor, x_px: position.x, y_px: position.y,
                 raw_uncertainty_m: position.outdoor?.estimated_uncertainty_m,

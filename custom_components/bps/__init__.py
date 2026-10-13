@@ -998,7 +998,9 @@ def _scanner_linking(hass, coordinates_json):
         device_part, slug = eid.split("_distance_to_", 1)
         device = device_part[len("sensor."):] if device_part.startswith("sensor.") else device_part
         state = None if st.state is None else str(st.state)
-        by_slug.setdefault(slug, []).append({"device": device, "entity_id": eid, "state": state})
+        unit = st.attributes.get("unit_of_measurement")
+        by_slug.setdefault(slug, []).append({"device": device, "entity_id": eid, "state": state,
+            "unit": unit if isinstance(unit, str) and unit else "m"})
 
     def _reporting(sensors):
         return [s for s in sensors if s["state"] not in _NO_DISTANCE_STATES]
