@@ -83,8 +83,10 @@ test('movement, mutually inconsistent phones and old/single cached fixes are rej
 
 test('movement from a late phone source blocks placement even before its observation span is eligible', () => {
     const phone = 'device_tracker.synthetic_phone';
-    const late = [at(0, 0, 1, now-10000, phone), at(200, 0, 1, now, phone)];
-    assert.throws(() => gps.choose([samples(0, 0, 1), late], now), /moved or jumped/);
+    for (const distance of [200, 10000]) {
+        const late = [at(0, 0, 1, now-10000, phone), at(distance, 0, 1, now, phone)];
+        assert.throws(() => gps.choose([samples(0, 0, 1), late], now), /moved or jumped/);
+    }
     const lateStationary = [at(0, 0, 1, now-10000, phone), at(.5, 0, 1, now, phone)];
     assert.equal(gps.choose([samples(0, 0, 1), lateStationary], now).source, 'browser');
 });

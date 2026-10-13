@@ -71,7 +71,12 @@
         if (!samples.length) throw new Error('No fresh GPS observations. Check permissions or your selected phone entity.');
         const recent = samples.filter(s => observation(s, s.source, now));
         if (!recent.length) throw new Error('GPS observations are stale. Capture again.');
-        const origin = recent[0], points = recent.map(p => local(p, origin));
+        const origin = recent[0], points = recent.map(p => {
+            // Every observation already has valid GPS. Exceeding the local
+            // property limit here is a jump, rather than an unavailable source.
+            try {return local(p, origin);}
+            catch {throw new Error('GPS moved or jumped during capture. Stand still and capture again.');}
+        });
         const center = {x: median(points.map(p => p.x)), y: median(points.map(p => p.y))};
         const spread_m = Math.max(...points.map(p => Math.hypot(p.x-center.x, p.y-center.y)));
         const reported_accuracy_m = Math.max(...recent.map(p => p.accuracy_m));
