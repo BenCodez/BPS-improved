@@ -71,8 +71,6 @@
         if (!samples.length) throw new Error('No fresh GPS observations. Check permissions or your selected phone entity.');
         const recent = samples.filter(s => observation(s, s.source, now));
         if (!recent.length) throw new Error('GPS observations are stale. Capture again.');
-        if (recent.length < 2 || Math.max(...recent.map(p => p.timestamp))-Math.min(...recent.map(p => p.timestamp)) < 20000)
-            throw new Error('Need distinct GPS fixes spanning at least 20 seconds. Capture again or use a more frequently updated source.');
         const origin = recent[0], points = recent.map(p => local(p, origin));
         const center = {x: median(points.map(p => p.x)), y: median(points.map(p => p.y))};
         const spread_m = Math.max(...points.map(p => Math.hypot(p.x-center.x, p.y-center.y)));
@@ -80,6 +78,8 @@
         // Repeated correlated GPS fixes do not buy sqrt(N) precision. Movement
         // outside the reported noise envelope makes this stationary capture unusable.
         if (spread_m > Math.max(5, reported_accuracy_m * 2)) throw new Error('GPS moved or jumped during capture. Stand still and capture again.');
+        if (recent.length < 2 || Math.max(...recent.map(p => p.timestamp))-Math.min(...recent.map(p => p.timestamp)) < 20000)
+            throw new Error('Need distinct GPS fixes spanning at least 20 seconds. Capture again or use a more frequently updated source.');
         const timestamp = Math.max(...recent.map(p => p.timestamp));
         return {...fromLocal(center, origin), timestamp, source: origin.source,
             sample_count: recent.length, spread_m, reported_accuracy_m,
