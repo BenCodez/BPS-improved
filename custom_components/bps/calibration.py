@@ -839,7 +839,7 @@ async def _dump_devices(hass) -> dict:
     # indefinitely; the caller counts a timeout as a normal sampling failure.
     direct = BermudaDirect(hass, include_scanner_devices=True)
     if not direct.needs_legacy:
-        return direct.dump_devices()
+        return direct.calibration_dump(hass, {})
     try:
         response = await asyncio.wait_for(
             hass.services.async_call(

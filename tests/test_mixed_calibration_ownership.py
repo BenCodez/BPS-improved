@@ -10,7 +10,7 @@ import pytest
 import bps
 from bps import calibration as C
 from bps import bermuda_calibration as B
-from test_bermuda_direct import MAC, OTHER, calibration_setup
+from test_bermuda_direct import MAC, OTHER, calibration_setup, measurement, scanner
 
 LEGACY_A = "aa:bb:cc:77:88:01"
 LEGACY_B = "aa:bb:cc:77:88:02"
@@ -145,6 +145,39 @@ def test_fully_legacy_service_response_is_returned_unchanged_without_owner_proof
     service[UNKNOWN] = row(UNKNOWN, "Unknown", {MAC: advert(MAC)})
     service["legacy_scalar"] = 42
     assert asyncio.run(C._dump_devices(hass)) is service
+
+
+@pytest.mark.parametrize("owner", ["entry", "replacement-owner"])
+def test_all_direct_sampling_rechecks_owner_when_ble_sources_change(hass, monkeypatch, owner):
+    data, payloads, cal = calibration_setup(hass, monkeypatch)
+    assert all(receiver["scanner_owner_unique"] for receiver in cal["receivers"].values())
+    source = copy.deepcopy(payloads["entry"])
+    source["entry_id"] = owner
+    source["scanners"] = {LEGACY_A: scanner(LEGACY_A, retained=MAC),
+                          LEGACY_B: scanner(LEGACY_B, retained=OTHER)}
+    source["devices"] = {sid: {"device_id": sid, "owner_id": sid, "address": sid,
+        "unique_id": sid, "name": "Synthetic replacement scanner", "tracked": False,
+        "source_aliases": [], "scanners": {partner: measurement(partner, retained=retained, device=sid)}}
+        for sid, partner, retained in ((LEGACY_A, LEGACY_B, OTHER), (LEGACY_B, LEGACY_A, MAC))}
+    if owner == "entry":
+        payloads["entry"] = source
+    else:
+        payloads["entry"]["scanners"] = {}
+        payloads["entry"]["devices"] = {}
+        payloads[owner] = source
+        configs = hass.config_entries.async_entries("bermuda") + [NS(entry_id=owner, state="loaded", runtime_data=None)]
+        hass.config_entries.async_entries = lambda _domain: configs
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("An all-direct calibration needs no legacy service")
+    hass.services.async_call = forbidden
+    dump = asyncio.run(C._dump_devices(hass))
+    C._ingest_dump(cal, dump)
+    if owner == "entry":
+        assert set(dump) == {LEGACY_A, LEGACY_B}
+        assert {key: list(values) for key, values in cal["samples"].items()} == {
+            "old_station|other_station": [9.], "other_station|old_station": [9.]}
+    else:
+        assert dump == {} and not cal["samples"]
 
 
 @pytest.mark.parametrize("direct_model", ["missing", "available"])
