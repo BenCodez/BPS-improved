@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const outdoor = globalThis.BPSOutdoor;
     let availableBeaconKeys = [];
     let outdoorFloorSignature = '';
+    let gpsUI = null;
 
     // --- API auth token (see bps-panel.js) ---------------------------------
     // The BPS panel element couriers the HA access token in via postMessage;
@@ -2877,7 +2878,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             Array.from(mapSelector.options).forEach(o => {
                 if (o.value) o.textContent = mapOptionLabel(o.value);
             });
-            console.log("Coordinates loaded:", finalcords);
+            console.log("BPS floor layout loaded");
             let ents = Array.isArray(data.entities) ? data.entities : [];
             availableBeaconKeys = ents.filter(e => typeof e === 'string');
             console.log("Entities to track:", ents);
@@ -3217,6 +3218,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     //Reset all buttons
     function buttonreset(){
+        gpsUI?.cancel('Map editing session changed. Capture GPS again.');
         cancelSnapshotMapPick();
         receiverPlacementSession++;
         cancelAdjust(); // starting any other tool drops an open adjust preview
@@ -4476,9 +4478,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     // =================================================================
 
     function placeReceiver(event) {
+        placeReceiverAt(zoneMousePos(event));
+    }
 
+    function placeReceiverAt(pos) {
         clearCanvas(); // Remove all drawn elements from canvas
-        const pos = zoneMousePos(event);
 
         drawElements(pos.x, pos.y, "receiver");
 
@@ -5183,6 +5187,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         drawReceiverDistances();
         drawAdjustGhost();
+        gpsUI?.refresh();
+        gpsUI?.draw(ctx, view.zoom || 1);
         renderEntityTree(floor);
         renderOutdoorFloor(floor);
         renderScannerIssues();
@@ -6366,7 +6372,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         if(saveresult){
             bpsToast("The floor named "+SelMapName+" has been removed!");
-            console.log("Updated data:", finalcords); // Control the updated data
+            console.log("BPS floor layout updated");
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             mapname.value = "";
             getSavedMaps();
@@ -7237,6 +7243,56 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
+    // GPS uses the existing receiver placement/identity path; it only stages
+    // map pixels after the user confirms a guarded preview.
+    if (globalThis.BPSGPS) gpsUI = globalThis.BPSGPS.init({
+        getFloor: currentFloor,
+        getContext: () => JSON.stringify([SelMapName, mapname.value, img.src, canvas.width, canvas.height,
+            currentFloor() && {...currentFloor(), receivers: (currentFloor().receivers || []).map(rec => JSON.parse(receiverPlacementSignature(rec)))}]),
+        getBounds: () => ({width: canvas.width, height: canvas.height}),
+        fetch: bpsFetch, redraw: () => {if (mapReady()) redrawAll();},
+        stageChange: () => savebuttondiv.appendChild(saveButton),
+        pickMapPoint(done) {
+            if (!mapReady() || anyLayoutToolActive() || adjustPreview || dragReceiverRef) throw new Error('Open a floor and finish or cancel the map editing tool first.');
+            cancelSnapshotMapPick(); panState = null; clickCandidate = null; clickDeviceCandidate = null; clickLinkCandidate = null;
+            let owner;
+            const cleanup = () => {canvas.removeEventListener('click', pick); if (snapshotMapPick === owner) snapshotMapPick = null;};
+            const pick = event => {
+                if (event.button !== undefined && event.button !== 0) return;
+                const point = zoneMousePos(event); cleanup(); done(point);
+            };
+            owner = {cancel: cleanup}; snapshotMapPick = owner; canvas.addEventListener('click', pick);
+            return cleanup;
+        },
+        getTarget(value) {
+            const floor = currentFloor();
+            if (!floor || value === '') return null;
+            if (value === 'draft') {
+                const name = getPickedReceiverName();
+                if (addDeviceButton.dataset.active !== 'true' || !name || receiverPlacementSaving) return null;
+                return {kind: 'draft', floor, label: name, session: receiverPlacementSession, name,
+                    choice: receiverSelect.value, custom: receiverCustomInput.value, cords: JSON.stringify(tmpcords)};
+            }
+            const index = Number(value), receiver = floor.receivers?.[index];
+            if (!Number.isInteger(index) || !receiver) return null;
+            return {kind: 'existing', floor, index, receiver, label: receiver.entity_id,
+                signature: receiverPlacementSignature(receiver)};
+        },
+        stageReceiver(target, point) {
+            if (currentFloor() !== target.floor) return false;
+            if (target.kind === 'existing') {
+                if (target.floor.receivers[target.index] !== target.receiver || receiverPlacementSignature(target.receiver) !== target.signature) return false;
+                target.receiver.cords = {...point};
+            } else {
+                if (addDeviceButton.dataset.active !== 'true' || receiverPlacementSaving || receiverPlacementSession !== target.session
+                    || getPickedReceiverName() !== target.name || receiverSelect.value !== target.choice
+                    || receiverCustomInput.value !== target.custom || JSON.stringify(tmpcords) !== target.cords) return false;
+                placeReceiverAt(point);
+            }
+            return true;
+        },
+    });
+
     if (globalThis.BPSBermudaCalibration) globalThis.BPSBermudaCalibration.init(bpsFetch);
     if (globalThis.BPSDiagnostics) globalThis.BPSDiagnostics.init(bpsFetch, () => {
         const keys = ['outdoor_tracking', 'tracker_groups', 'tracker_height', 'tracker_heights', 'tracker_hardware',
@@ -7244,7 +7300,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             'history_min_interval', 'history_min_move_m', 'history_max_points', 'history_heartbeat'];
         const editor = Object.fromEntries(keys.filter(key => finalcords[key] !== undefined).map(key => [key, finalcords[key]]));
         editor.floor = (finalcords.floor || []).map(floor => Object.fromEntries(
-            ['name', 'scale', 'receivers', 'zones', 'subzones', 'environment'].filter(key => floor[key] !== undefined).map(key => [key, floor[key]])));
+            ['name', 'scale', 'receivers', 'zones', 'subzones', 'environment', 'georeference'].filter(key => floor[key] !== undefined).map(key => [key, floor[key]])));
         return {collected_at: Date.now() / 1000, selected_floor: SelMapName, selected_map: mapSelector.value,
             image_size_px: {width: img.naturalWidth, height: img.naturalHeight},
             canvas_size_px: {width: canvas.width, height: canvas.height}, view: {...view},
@@ -7257,7 +7313,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 display_uncertainty_m: position.outdoor?.display_uncertainty_m,
                 displayed_receiver_radii: circleToggle.checked ? trackingDistanceMarks(position) : [],
                 received_at: position.receivedAt / 1000})),
-            editor_layout: editor};
+            editor_layout: editor, gps_setup: gpsUI?.snapshot()};
     }, snapshotLocationTools);
 
     // With a single configured floor there is nothing to choose: open it
