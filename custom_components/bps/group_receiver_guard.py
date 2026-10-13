@@ -51,14 +51,15 @@ def _direct_absence_known(direct, info, now, limit):
     if not rows:
         return info.get("reason") == "measurement_missing"
     age = finite_number(info.get("source_age_s"), minimum=0)
-    return age is not None and age <= direct.now and age + now - direct.now >= limit
+    return limit > 0 and age is not None and age <= direct.now and age + now - direct.now >= limit
 
 
-def receiver_constraints(floor, members, sources, health, now, max_age_s):
+def receiver_constraints(floor, members, sources, health, now, max_age_s, *, reading_max_age_s=None):
     """Use proven online identities and supported pairs; unknown evidence is neutral."""
-    limit = min(HEALTH_MAX_AGE_S, max_age_s)
+    health_limit = min(HEALTH_MAX_AGE_S, max_age_s)
+    range_limit = finite_number(max_age_s if reading_max_age_s is None else reading_max_age_s, minimum=0)
     scale = finite_number(floor.get("scale"), minimum=1e-6, maximum=1e6)
-    if scale is None or not members:
+    if scale is None or range_limit is None or not members:
         return []
     constraints = []
     for rec, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
@@ -75,14 +76,14 @@ def receiver_constraints(floor, members, sources, health, now, max_age_s):
         captured = finite_number(cached.get("captured"), minimum=0)
         same_identity = list(key) == cached.get("identity")
         evidence_age = finite_number(cached.get("source_age_s", 0.0), minimum=0)
-        current_health = same_identity and captured is not None and 0 <= now - captured < limit \
-            and evidence_age is not None and evidence_age + now - captured < limit
+        current_health = same_identity and captured is not None and 0 <= now - captured < health_limit \
+            and evidence_age is not None and evidence_age + now - captured < health_limit
         scanner_age = sources.direct.scanner_age(key)
         if key in sources.direct.scanners:
             age = finite_number(scanner_age, minimum=0)
             captured_at = finite_number(sources.direct.now, minimum=0)
-            online = age is not None and captured_at is not None and 0 <= now - captured_at < limit \
-                and age + now - captured_at < limit
+            online = age is not None and captured_at is not None and 0 <= now - captured_at < health_limit \
+                and age + now - captured_at < health_limit
             if current_health and cached.get("online") is False \
                     and (not online or captured_at - age <= captured):
                 online = False
@@ -97,12 +98,12 @@ def receiver_constraints(floor, members, sources, health, now, max_age_s):
                 break  # missing/disabled entities and ambiguous tracker proofs are unknown
             value = _range(getattr(state, "state", None))
             age = _age(state, now)
-            if value is not None and (age is None or age < limit):
+            if value is not None and (age is None or not range_limit or age < range_limit):
                 break
             info = getattr(state, "attributes", {}).get("bps_source", {})
             raw_age = finite_number(info.get("source_age_s"), minimum=0)
             if info.get("path") == "direct" and info.get("source_status") == "current" \
-                    and raw_age is not None and raw_age + now - sources.direct.now < limit:
+                    and raw_age is not None and (not range_limit or raw_age + now - sources.direct.now < range_limit):
                 break  # a pending/rejected filter does not mean the radio hears nothing
             absent = str(getattr(state, "state", "")).lower() in ("unknown", "unavailable")
             if value is None and not absent:
@@ -111,7 +112,7 @@ def receiver_constraints(floor, members, sources, health, now, max_age_s):
                     "invalid_observation_clock", "accepted_stamp_unavailable", "filtered_measurement_unavailable"):
                 break
             if info.get("path") == "direct":
-                if not _direct_absence_known(sources.direct, info, now, limit):
+                if not _direct_absence_known(sources.direct, info, now, range_limit):
                     break
             elif age is None:
                 break  # unclocked legacy unavailability cannot prove absence

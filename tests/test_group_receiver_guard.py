@@ -364,3 +364,69 @@ def test_real_legacy_adapter_unavailability_with_an_invalid_clock_is_neutral(has
     assert health["old_station"]["online"] is True
     source = ReceiverSources(hass)
     assert receiver_constraints(data["floor"][0], ["tag"], source, health, NOW, 30) == []
+
+
+@pytest.mark.parametrize("cutoff,age,accepted", [(120, 40, True), (120, 120, False),
+                                                (120, 121, False), (0, 400, True)])
+def test_real_legacy_ranges_honor_configured_freshness(hass, monkeypatch, cutoff, age, accepted):
+    import asyncio
+    import bps
+    from test_receiver_aliases import aliases, timestamp
+    from test_bermuda_direct import install
+    from bps.receiver_sources import ReceiverSources
+
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch, outdoor=True)
+    install(monkeypatch, {"entry": None})
+    data["reading_max_age"] = cutoff
+    hass.data["bps"]["layout"] = data
+    states[new].last_updated = timestamp(NOW - age)
+    states["binary_sensor.current_station_status"] = NS(state="on", attributes={"device_class": "connectivity"})
+    asyncio.run(bps.update_receiver_radii(hass, {"entity": "tag", "data": data}))
+    receiver = data["floor"][0]["receivers"][0]
+    assert ("distance" in receiver) is accepted
+    asyncio.run(bps.update_receiver_liveness(hass))
+    source = ReceiverSources(hass)
+    result = receiver_constraints(data["floor"][0], ["tag"], source,
+        hass.data["bps"]["rl_status_snapshot"], NOW, cutoff or 180, reading_max_age_s=cutoff)
+    assert bool(result) is (not accepted)
+
+
+@pytest.mark.parametrize("cutoff,age", [(120, 40), (0, 400)])
+def test_group_publication_passes_the_configured_range_age_gate(monkeypatch, cutoff, age):
+    import asyncio
+    import bps
+    from conftest import make_hass
+
+    hass = make_hass()
+    hass.data["bps"] = {"layout": {"outdoor_tracking": {"enabled": True},
+        "reading_max_age": cutoff, "floor": [copy.deepcopy(FLOOR)],
+        "tracker_groups": [{"id": "rover", "beacons": ["a", "b"]}]}}
+    source = sources(first=state("3", age=age), second=state("4", age=age))
+    source.direct_trackers = lambda: {"a", "b"}
+    monkeypatch.setattr(bps, "ReceiverSources", lambda _: source)
+    monkeypatch.setattr(bps, "get_position_history", lambda _: NS(record=lambda *a: None, mark_gap=lambda *a: None))
+    monkeypatch.setattr(bps.time, "time", lambda: NOW)
+    monkeypatch.setattr(bps, "apitricords", [{"ent": ent, "floor": "Yard", "cords": [0, 0], "updated": NOW,
+        "outdoor": {"observed": NOW, "estimated_uncertainty_m": 4, "receivers_used": 4}} for ent in ("a", "b")])
+    asyncio.run(bps.update_tracker_groups(hass))
+    group = next(p for p in bps.apitricords if p.get("group"))
+    assert group["cords"] == [0, 0]
+    assert not hass.data["bps"]["group_receiver_guards"]
+
+
+@pytest.mark.parametrize("cutoff,age", [(120, 40), (0, 400)])
+def test_real_direct_ranges_honor_configured_freshness(hass, monkeypatch, cutoff, age):
+    import asyncio
+    import bps
+    from test_bermuda_direct import prepared, MAC
+    from bps.receiver_sources import ReceiverSources
+
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch, outdoor=True)
+    data["reading_max_age"] = cutoff
+    hass.data["bps"]["layout"] = data
+    payloads["entry"]["devices"]["synthetic-tracker"]["scanners"][MAC]["age"] = age
+    asyncio.run(bps.update_receiver_radii(hass, {"entity": "tag", "data": data}))
+    assert "distance" in data["floor"][0]["receivers"][0]
+    source = ReceiverSources(hass)
+    assert receiver_constraints(data["floor"][0], ["tag"], source, {}, NOW,
+        cutoff or 180, reading_max_age_s=cutoff) == []

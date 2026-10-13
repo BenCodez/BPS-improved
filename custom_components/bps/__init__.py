@@ -2038,7 +2038,8 @@ async def update_tracker_groups(hass):
     for position in fused:
         floor = next(f for f in layout["floor"] if f["name"] == position["floor"])
         constraints = receiver_constraints(floor, group_definitions[position["ent"]]["beacons"],
-            sources, dom.get("rl_status_snapshot", {}), fusion_time, group_max_age)
+            sources, dom.get("rl_status_snapshot", {}), fusion_time, group_max_age,
+            reading_max_age_s=_reading_max_age(layout))
         # A changed membership, floor, scale or detection mode invalidates the
         # old point in fusion and must invalidate it in this publication check.
         signature = stability.get(position["ent"], {}).get("signature")
