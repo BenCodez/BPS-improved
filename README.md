@@ -1223,8 +1223,15 @@ not independently verify its accuracy. Walls, trees and fences affect the
 position solver's trust rather than inventing a new range correction.
 Select **BLE ranges** or **Estimated position** to see just one view. With
 multiple devices shown, lines replace circles; select a beacon to isolate it.
+Receiver icons keep a constant size as you zoom in, with click targets scaled
+to match. Hover a receiver in the sidebar to highlight its map icon in blue.
 Live-tracker labels use the selected grid unit. Receiver-to-receiver labels show
 both feet and metres for the BLE distance and the map distance.
+The **Δ** value is BLE distance minus the comparison distance: positive means
+the range reads farther, negative means closer. Live tracking compares against
+the estimated beacon/group position, so its disagreement does not prove a bad
+receiver. Receiver pairs compare against placed map positions. Moved pairs are
+marked for recalibration instead of showing a fresh calibration error.
 
 A **Receiver distances** toggle in the Tracking column draws a line between
 every pair of receivers that measure each other, straight on the floor plan.

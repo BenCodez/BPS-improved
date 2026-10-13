@@ -69,7 +69,8 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             select: name => {SelMapName = name; mapname.value = name; img.naturalWidth = 2000; new_floor = false;},
             setPoints: points => {zonePoints = points;}, editing: () => editTarget,
             tracks: () => lastTracks, tracked: () => trackedDevices, hitDeviceAt, addDeviceButton, saveReceiver,
-            setCalibration: results => {calibLastResults=results;}};
+            setCalibration: results => {calibLastResults=results;},
+            zoom: value => {view.zoom=value;}, receiverIconSize, hitReceiverAt, tintCache: () => beaconTintCache};
     // With a single configured floor`);
     vm.runInContext(code, sandbox);
     const ready = listeners.get('DOMContentLoaded')();
@@ -239,6 +240,8 @@ test('receiver properties never borrow automatic hardware from a reused slug or 
         {scanner_mac: 'dd:ee:ff:11:22:33', scanner_config_entry_id: 'entry'},
         {scanner_mac: 'aa:bb:cc:11:22:33', scanner_config_entry_id: 'other'},
         {scanner_mac: 'invalid'},
+        {scanner_mac: ''}, {scanner_mac: false}, {scanner_mac: null},
+        {scanner_config_entry_id: 0}, {scanner_config_entry_id: false},
     ]) {
         const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, ...placement}];
         const hardware = {effective: {model: 'Wrong board'}};
@@ -249,6 +252,26 @@ test('receiver properties never borrow automatic hardware from a reused slug or 
         assert.match(edit.hardware.textContent, /unknown/); assert.doesNotMatch(edit.hardware.textContent, /Wrong board/);
         assert.match(edit.external.options[0].textContent, /unknown/); await edit.cancel.fire('click');
     }
+});
+
+test('receiver icons cancel zoom-in and sidebar hover recolors only the matching map station', async () => {
+    const source=layout(); source.floor[0].receivers=[{entity_id:'proxy',cords:{x:200,y:200}},
+        {entity_id:'other',cords:{x:400,y:400}}];
+    const p=await panel(source,undefined,true); p.hooks.select('Property'); p.hooks.zoom(4);
+    assert.equal(p.hooks.receiverIconSize(),20);
+    p.canvasCalls.length=0; p.hooks.redrawAll();
+    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[4]===20&&call[5]===20));
+    assert.equal(p.hooks.hitReceiverAt({x:212,y:200}).entity_id,'proxy');
+    assert.equal(p.hooks.hitReceiverAt({x:220,y:200}),null,'smaller glyph has a matching click target');
+    const row={getAttribute:()=> 'proxy'};
+    p.canvasCalls.length=0;
+    p.listeners.get('mouseover')({target:{closest:selector=>selector==='[data-type="focusrec"]'?row:null}});
+    assert.ok(p.hooks.tintCache().has('#0ea5e9|20'));
+    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]===undefined&&call[2]===190&&call[3]===190));
+    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[2]===390&&call[3]===390));
+    p.canvasCalls.length=0;
+    p.listeners.get('mouseout')({target:{closest:()=>row},relatedTarget:null});
+    assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[2]===190&&call[3]===190));
 });
 
 test('Debugging refresh updates detected model and inherited antenna without rewriting placement metadata', async () => {
@@ -275,7 +298,7 @@ test('receiver-to-receiver labels show measured and map distances in both feet a
     p.hooks.setCalibration({Property:{floor:'Property',matrix:[{tx:'a',rx:'b',corrected_m:3,measured_m:4,true_m:5}]}});
     p.el('recDistToggle').checked=true; p.el('recDistColor').value='all'; p.el('recDistMode').value='calibrated';
     p.listeners.get('click')({target:{closest:selector=>selector==='[data-type="focusrec"]'?{getAttribute:()=> 'a'}:null}});
-    assert.ok(p.canvasCalls.some(call=>call[0]==='text'&&call[1]==='BLE 9.8 ft / 3.0 m · Map 16.4 ft / 5.0 m'));
+    assert.ok(p.canvasCalls.some(call=>call[0]==='text'&&call[1]==='BLE 9.8 ft / 3.0 m · Map 16.4 ft / 5.0 m · Δ −6.6 ft / 2.0 m'));
 });
 
 test('panel Show distances draws same-floor group member ranges once while retaining different ranges', async () => {
@@ -316,10 +339,10 @@ test('live distance defaults to dashed measured and solid estimated group circle
     assert.deepEqual(atReceiver(),[120,140,Math.hypot(40,60)]);
     assert.ok(p.canvasCalls.some(call=>JSON.stringify(call) === '["dash",10,7]'));
     assert.ok(p.canvasCalls.some(call=>JSON.stringify(call) === '["dash"]'));
-    assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'BLE 6.0 m'));
+    assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'BLE 6.0 m · Δ +2.4 m'));
     assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'Est 3.6 m'));
     await p.el('gridToggle').fire('click'); p.canvasCalls.length=0; await p.el('gridToggle').fire('click');
-    assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'BLE 19.7 ft'));
+    assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'BLE 19.7 ft · Δ +7.9 ft'));
     assert.ok(p.canvasCalls.some(call=>call[0] === 'text' && call[1] === 'Est 11.8 ft'));
     p.el('trackingDistanceMode').value='estimated'; p.canvasCalls.length=0; await p.el('trackingDistanceMode').fire('change');
     assert.deepEqual(atReceiver(),[Math.hypot(40,60)]);

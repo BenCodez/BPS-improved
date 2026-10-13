@@ -958,6 +958,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         return pollTrackActive ? base / Math.pow(view.zoom || 1, 2 / 3) : base;
     }
 
+    function receiverIconSize() {
+        // Fully cancel zoom-in for receivers, so nearby stations remain
+        // distinguishable. Tracker markers retain their existing sizing.
+        return canvas.width * .04 / Math.max(1, view.zoom || 1);
+    }
+
     function drawTrackOverlay() {
         if (!pollTrackActive || lastTracks.size === 0) return;
         // A focus on a device that's gone (removed/stale) reverts to showing all.
@@ -1096,9 +1102,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     // label) so a dead node stands out; otherwise the plain black glyph. The hue
     // tint is gated on an active tracking session because that is the only time
     // the distance-lines toggle is shown.
-    function drawReceiverIcon(x, y, iconSize, offline) {
+    function drawReceiverIcon(x, y, iconSize, offline, highlighted = false) {
         let fill = null;
-        if (circleToggle.checked && pollTrackActive) {
+        if (highlighted) {
+            fill = '#0ea5e9';
+        } else if (circleToggle.checked && pollTrackActive) {
             fill = `hsl(${floorReceiverHue(x, y)}, 90%, 42%)`;
         } else if (offline) {
             fill = OFFLINE_RED;
@@ -1325,9 +1333,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!Array.isArray(t.circles)) return [];
         const measured = validRadii(t.circles);
         const mode = document.getElementById('trackingDistanceMode')?.value || 'both';
-        const valid = mode === 'estimated' ? [] : measured.map(c => [...c, 'measured']);
-        if (mode !== 'measured' && Number.isFinite(t.x) && Number.isFinite(t.y)
-            && !t.payload?.outdoor?.detection_only && t.payload?.outdoor?.direction_known !== false) {
+        const hasPosition = Number.isFinite(t.x) && Number.isFinite(t.y)
+            && !t.payload?.outdoor?.detection_only && t.payload?.outdoor?.direction_known !== false;
+        const valid = mode === 'estimated' ? [] : measured.map(c => [...c, 'measured',
+            hasPosition ? c[2] - Math.hypot(t.x - c[0], t.y - c[1]) : null]);
+        if (mode !== 'measured' && hasPosition) {
             const seen = new Set();
             for (const c of measured) {
                 const key = JSON.stringify(c.slice(0, 2));
@@ -1392,7 +1402,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             valid.forEach((c) => {
                 const distance = distanceLabel(c[2]);
                 if (!distance) return;
-                const text = `${c[3] === 'estimated' ? 'Est' : 'BLE'} ${distance}`;
+                const delta = Number.isFinite(c[4]) ? distanceLabel(Math.abs(c[4])) : null;
+                const text = `${c[3] === 'estimated' ? 'Est' : 'BLE'} ${distance}`
+                    + (delta ? ` · Δ ${c[4] < 0 ? '−' : '+'}${delta}` : '');
                 const key = `${Math.round(c[0])},${Math.round(c[1])}`;
                 let arr = labels.get(key);
                 if (!arr) { arr = []; labels.set(key, arr); }
@@ -1412,7 +1424,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         (floor.receivers || []).forEach(r => {
             if (!r.cords) return;
             if (focusedReceiver && r.entity_id !== focusedReceiver) return;
-            drawReceiverIcon(r.cords.x, r.cords.y, iconSize, isReceiverOffline(r.entity_id));
+            drawReceiverIcon(r.cords.x, r.cords.y, receiverIconSize(), isReceiverOffline(r.entity_id), r.entity_id === hoveredReceiver);
         });
     }
 
@@ -1625,6 +1637,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!links.length) return;
         if (recDistLegend) recDistLegend.style.display = "";
         const fmt = meters => `${(meters / .3048).toFixed(1)} ft / ${meters.toFixed(1)} m`;
+        const mismatch = (measured, mapped) => `${measured < mapped ? '−' : '+'}${fmt(Math.abs(measured - mapped))}`;
         // While actively hovering a line or a receiver, the link(s) being
         // inspected stay full strength and every other line dims to 10% so the
         // hovered path stands out of a dense mesh. A hovered receiver lights up
@@ -1668,11 +1681,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         // receivers entirely while one is focused.
         const endpoints = new Set();
         links.forEach(l => { endpoints.add(l.a); endpoints.add(l.b); });
-        const iconSize = mapIconSize();
+        const iconSize = receiverIconSize();
         ((floor && floor.receivers) || []).forEach(r => {
             if (!r.cords || !endpoints.has(r.entity_id)) return;
             const recOffline = isReceiverOffline(r.entity_id);
-            drawReceiverIcon(r.cords.x, r.cords.y, iconSize, recOffline);
+            drawReceiverIcon(r.cords.x, r.cords.y, iconSize, recOffline, r.entity_id === hoveredReceiver);
             if (r.entity_id === hoveredReceiver && r.entity_id !== focusedReceiver) {
                 let labelY = r.cords.y - iconSize / 2 - 8;
                 if (labelY < 24) labelY = r.cords.y + iconSize / 2 + 24;
@@ -1700,7 +1713,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const mx = (l.A.x + l.B.x) / 2, my = (l.A.y + l.B.y) / 2;
                 pill = l.stale
                     ? drawLabelPill(`BLE ${fmt(l.detected)} · Map ${fmt(l.liveM)} — recalibrate`, mx, my, 0, RECDIST_STALE)
-                    : drawLabelPill(`BLE ${fmt(l.detected)} · Map ${fmt(l.trueM)}`, mx, my, l.hue);
+                    : drawLabelPill(`BLE ${fmt(l.detected)} · Map ${fmt(l.trueM)} · Δ ${mismatch(l.detected, l.trueM)}`, mx, my, l.hue);
             }
             recDistDrawn.push({ key, A: l.A, B: l.B, pill });
         });
@@ -4638,7 +4651,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (receiversHidden()) return null;
         const floor = finalcords.floor.find(f => sameFloorName(f.name, SelMapName));
         if (!floor) return null;
-        const hitRadius = canvas.width * 0.02 + 10; // icon radius plus slack
+        const hitRadius = receiverIconSize() / 2 + 10 / (view.zoom || 1);
         // When one receiver is focused, only what's drawn is hittable: normally
         // just the focused receiver — but with the receiver-distances overlay on,
         // its link neighbours are drawn too (drawReceiverDistances), so clicking
@@ -4986,6 +4999,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function drawElements(xp, yp, type){
         const tmpdrawcords = [];
         const iconSize = mapIconSize(); // zoom-compensated while tracking (see mapIconSize)
+        const receiverSize = receiverIconSize();
         deleteButton.remove();
         drawGrid();
 
@@ -5083,7 +5097,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const x = item.cords.x;
                 const y = item.cords.y;
                 const recOffline = isReceiverOffline(item.entity_id);
-                drawReceiverIcon(x, y, iconSize, recOffline);
+                drawReceiverIcon(x, y, receiverSize, recOffline, item.entity_id === hoveredReceiver);
 
                 // Names are hidden by default (too many receivers overlap);
                 // show one only when it's hovered or focused. The full list of
@@ -5091,9 +5105,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (item.entity_id === hoveredReceiver || item.entity_id === focusedReceiver) {
                     // Name centered above the icon; below it when too close to
                     // the top edge.
-                    let labelY = y - iconSize / 2 - 8;
+                    let labelY = y - receiverSize / 2 - 8;
                     if (labelY < 24) {
-                        labelY = y + iconSize / 2 + 24;
+                        labelY = y + receiverSize / 2 + 24;
                     }
                     drawCenteredLabel(receiverStatusLabel(item.entity_id) + item.entity_id, x, labelY,
                         "600 22px system-ui, sans-serif", recOffline ? OFFLINE_RED : "#111111");
@@ -5246,6 +5260,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function receiverHardware(rec) {
+        if (Object.hasOwn(rec, 'scanner_mac') && (typeof rec.scanner_mac !== 'string'
+            || !/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(rec.scanner_mac))) return undefined;
+        if (Object.hasOwn(rec, 'scanner_config_entry_id') && (typeof rec.scanner_config_entry_id !== 'string'
+            || !rec.scanner_config_entry_id.trim())) return undefined;
         // Saved MAC/owner proof takes priority over a reused friendly-name slug.
         if (!rec.scanner_mac) {
             const option = receiverMatching.options.find(o => o.entity_id === rec.entity_id && !o.identity_ambiguous
