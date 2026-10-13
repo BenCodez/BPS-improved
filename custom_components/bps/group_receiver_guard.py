@@ -110,8 +110,11 @@ def receiver_constraints(floor, members, sources, health, now, max_age_s):
             if info.get("path") == "direct" and info.get("reason") in (
                     "invalid_observation_clock", "accepted_stamp_unavailable", "filtered_measurement_unavailable"):
                 break
-            if info.get("path") == "direct" and not _direct_absence_known(sources.direct, info, now, limit):
-                break
+            if info.get("path") == "direct":
+                if not _direct_absence_known(sources.direct, info, now, limit):
+                    break
+            elif age is None:
+                break  # unclocked legacy unavailability cannot prove absence
             missing.append(member)
         if len(missing) == len(members):
             constraints.append({"receiver": rec["entity_id"], "cords": point,

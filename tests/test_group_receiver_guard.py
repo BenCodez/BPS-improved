@@ -339,3 +339,28 @@ def test_changed_group_signature_cannot_hold_a_fix_from_the_old_group(monkeypatc
     else:
         assert not any(p.get("group") for p in bps.apitricords)
         assert report["state"] == "unavailable"
+
+
+@pytest.mark.parametrize("clock", ["missing", "malformed", "future", "nonfinite", "negative"])
+def test_real_legacy_adapter_unavailability_with_an_invalid_clock_is_neutral(hass, monkeypatch, clock):
+    import asyncio
+    import bps
+    from test_receiver_aliases import aliases, timestamp
+    from test_bermuda_direct import install
+    from bps.receiver_sources import ReceiverSources
+
+    data, entries, states, devices, add, old, new = aliases(hass, monkeypatch)
+    install(monkeypatch, {"entry": None})
+    states[new].state = "unavailable"
+    states[old].state = "unknown"
+    states[old].last_updated = {
+        "missing": None, "malformed": NS(timestamp=lambda: "bad timestamp"),
+        "future": timestamp(NOW + 1), "nonfinite": NS(timestamp=lambda: float("nan")),
+        "negative": timestamp(-1),
+    }[clock]
+    states["binary_sensor.current_station_status"] = NS(state="on", attributes={"device_class": "connectivity"})
+    asyncio.run(bps.update_receiver_liveness(hass))
+    health = hass.data["bps"]["rl_status_snapshot"]
+    assert health["old_station"]["online"] is True
+    source = ReceiverSources(hass)
+    assert receiver_constraints(data["floor"][0], ["tag"], source, health, NOW, 30) == []
