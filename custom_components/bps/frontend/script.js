@@ -6472,6 +6472,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (response.ok) {
                 const committedRevision = response.headers?.get('X-BPS-Layout-Revision');
                 if (/^[a-f0-9]{64}$/.test(committedRevision)) layoutRevision = committedRevision;
+                const saveWarning = response.headers?.get('X-BPS-Save-Warning');
+                if (saveWarning) bpsToast(saveWarning);
                 if (removefile) {
                     drawAreaButton.remove();
                     addDeviceButton.remove();

@@ -872,11 +872,12 @@ class PhoneSurvey:
         except Exception:
             # The layout commit already happened. Never report this as an
             # unsaved retryable move merely because audit persistence failed.
-            self.candidates = candidates
-            warning = "Position saved; phone survey verification record could not be persisted"
+            # Keep the durable pending status so verification retries the audit
+            # after storage recovers, without moving the receiver a second time.
+            warning = "Position saved; phone survey verification record could not be persisted. Retry verification after storage recovers or old records are removed."
         return {
             "saved": True,
-            "candidate": copy.deepcopy(verified),
+            "candidate": copy.deepcopy(verified if warning is None else candidate),
             "position": copy.deepcopy(verified["position"]),
             "warning": warning,
             "previous_layout_revision": previous_revision,

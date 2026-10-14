@@ -572,16 +572,38 @@ def test_stale_real_ha_gps_can_be_selected_for_recovery_but_cached_states_are_no
     run(check())
 
 
-def test_committed_position_is_reported_when_audit_save_fails():
+@pytest.mark.parametrize("failure", ["raised", "silent", "capacity"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_failed_audit_remains_retryable_without_repeating_receiver_move(
+    monkeypatch, failure, restart
+):
+    import json
+
+    import bps.phone_survey as survey_module
+
     f = Fixture()
 
     async def check():
         _, result = await f.capture()
+        pending = copy.deepcopy(f.manager.candidates)
+        durable = copy.deepcopy(f.hass._store_backing["bps_phone_survey"])
+        original_save = f.manager.store.async_save
+        original_limit = survey_module.MAX_STORE_BYTES
 
         async def fail(_payload):
             raise OSError("synthetic audit failure")
 
-        f.manager.store.async_save = fail
+        async def drop(_payload):
+            pass
+
+        if failure == "capacity":
+            monkeypatch.setattr(
+                survey_module,
+                "MAX_STORE_BYTES",
+                len(json.dumps(durable).encode()),
+            )
+        else:
+            f.manager.store.async_save = fail if failure == "raised" else drop
         response = await f.manager.action(
             OWNER, {"action": "verify", "candidate_id": result["candidate"]["id"]}
         )
@@ -592,6 +614,31 @@ def test_committed_position_is_reported_when_audit_save_fails():
             get_bps_data(f.hass)["floor"][0]["receivers"][0]["cords"]
             == response["position"]
         )
+        assert response["candidate"]["status"] == "pending"
+        assert f.manager.candidates == pending
+        assert f.hass._store_backing["bps_phone_survey"] == durable
+        moved = copy.deepcopy(get_bps_data(f.hass))
+
+        async def no_second_move(*_args):
+            pytest.fail("Audit recovery must not write the receiver layout again")
+
+        monkeypatch.setattr(survey_module, "save_bps_data", no_second_move)
+        f.manager.store.async_save = original_save
+        monkeypatch.setattr(survey_module, "MAX_STORE_BYTES", original_limit)
+        if restart:
+            f.manager = f.make_manager()
+        recovered = await f.manager.action(
+            OWNER, {"action": "verify", "candidate_id": result["candidate"]["id"]}
+        )
+        assert recovered["saved"] and recovered["warning"] is None
+        assert recovered["candidate"]["status"] == "verified"
+        assert f.manager.candidates == [recovered["candidate"]]
+        assert f.hass._store_backing["bps_phone_survey"]["candidates"] == [
+            recovered["candidate"]
+        ]
+        assert get_bps_data(f.hass) == moved
+        reloaded = f.make_manager()
+        assert (await reloaded.get(OWNER))["candidates"] == [recovered["candidate"]]
 
     run(check())
 

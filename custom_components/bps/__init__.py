@@ -2937,13 +2937,18 @@ class BPSSaveAPIText(HomeAssistantView):
                 if data.get("layout_revision") != layout_revision(get_bps_data(hass)):
                     return web.Response(status=409, text="Saved layout changed or its revision is missing. Reload the page before saving; retain any unsaved edits separately.")
                 async def commit():
-                    error = await self._write_save(hass, maps_path, data, coords_obj)
-                    if error is not None:
-                        return error
+                    result = await self._write_save(hass, maps_path, data, coords_obj)
+                    if result is not None and not isinstance(result, str):
+                        return result
                     committed_revision = layout_revision(get_bps_data(hass))
                     refresh_receivers_from_coords(hass, coordinates)
                     _LOGGER.info("Saved BPS floor layout")
-                    return web.json_response({"saved": True, "layout_revision": committed_revision}, headers={"X-BPS-Layout-Revision": committed_revision})
+                    payload = {"saved": True, "layout_revision": committed_revision}
+                    headers = {"X-BPS-Layout-Revision": committed_revision}
+                    if result:
+                        payload["warning"] = result
+                        headers["X-BPS-Save-Warning"] = result
+                    return web.json_response(payload, headers=headers)
                 return await finish_persistence(commit())
 
         except Exception as e:
@@ -2951,7 +2956,7 @@ class BPSSaveAPIText(HomeAssistantView):
             return web.Response(status=500, text="Failed to save coordinates")
 
     async def _write_save(self, hass, maps_path, data, coords_obj):
-        """Validate all inputs, THEN persist; returns an error Response or None.
+        """Validate, then persist; return an error, cleanup warning, or None.
 
         Ordering matters: the new-floor map upload and the removal target are
         validated (and the upload read + size-checked) BEFORE the layout is
@@ -3024,7 +3029,7 @@ class BPSSaveAPIText(HomeAssistantView):
                 _LOGGER.info(f"Removed file: {remove_target.name}")
             except Exception as e:
                 _LOGGER.error(f"Failed to remove file {remove_target.name}: {e}")
-                return web.Response(status=500, text="Failed to remove file")
+                return "Layout saved, but the old map file could not be removed."
         return None
 
 

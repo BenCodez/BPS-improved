@@ -92,6 +92,9 @@ If the verification response is lost, full layout saves pause so they cannot und
 a receiver move that may already be saved. Use **Retry verification** to confirm
 the result. If newer receiver or alignment edits prevent reconciliation, reload
 the page to read the saved layout; reloading discards unsaved edits.
+If the receiver position saves but its survey audit cannot be persisted, BPS
+shows a warning and keeps verification available. Retry after storage recovers
+or old records are removed; recovery does not move the receiver again.
 Full layout saves also reject an older browser tab's data if another client or
 calibration updated the saved layout. Retain your unsaved edits separately and
 reload the page before saving again. After upgrading, refresh old BPS tabs so
@@ -106,6 +109,8 @@ the revision reconstructed with that receiver's original coordinates, allowing
 the frontend to reconcile that coordinate change without assuming other fields
 are still current. Shared survey capacity rejects overflow without evicting other
 users' records; remove one of your retained records to free space.
+Failure to remove an obsolete map file after a successful layout commit returns
+the new revision with a cleanup warning, allowing subsequent edits to save.
 
 The optional **Request fresh phone GPS** toggle uses your explicitly selected
 Companion App notification service to send `request_location_update`, at most once

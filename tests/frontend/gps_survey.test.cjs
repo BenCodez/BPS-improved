@@ -61,6 +61,31 @@ test('verification remains observable until the committed response is merged', a
     assert.equal(p.api.isVerifying(), false);
 });
 
+test('a committed move with a failed audit merges coordinates and leaves verification retryable', async () => {
+    const p = ui(); const c = candidate();
+    p.candidates([c]); await p.click('gpsSurveyRefresh');
+    const fetch = p.hooks.fetch;
+    const warning = 'Position saved; phone survey verification record could not be persisted. Retry verification after storage recovers.';
+    p.hooks.fetch = async (url, options) => {
+        const body = options?.body && JSON.parse(options.body);
+        if (body?.action === 'verify') return {ok: true, json: async () => ({saved: true, candidate: c, position: c.position, warning})};
+        return fetch(url, options);
+    };
+    await p.el('gpsSurveyCandidates').children[0].children[1].fire('click');
+    assert.equal(p.api.isVerifying(), false);
+    assert.equal(p.el('gpsSurveyStatus').textContent, warning);
+    assert.deepEqual(p.saveCalls[0][1].position, c.position);
+    const retry = p.el('gpsSurveyCandidates').children[0].children[1];
+    assert.match(retry.textContent, /Verify and save/);
+    assert.equal(retry.disabled, false);
+    p.hooks.fetch = fetch;
+    await retry.fire('click');
+    assert.equal(p.saveCalls.length, 2);
+    assert.deepEqual(p.saveCalls[1][1].position, c.position);
+    assert.equal(p.api.isVerifying(), false);
+    assert.equal(p.el('gpsSurveyCandidates').children[0].children[1].textContent, 'Remove survey record');
+});
+
 test('verified survey records can be removed without changing saved receiver coordinates', async () => {
     const p = ui(); const c = {...candidate(), status: 'verified'};
     p.candidates([c]); await p.click('gpsSurveyRefresh');

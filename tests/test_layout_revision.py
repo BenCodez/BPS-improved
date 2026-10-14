@@ -79,6 +79,54 @@ def test_missing_or_stale_revision_rejects_layout_and_map_mutation(tmp_path, rev
     asyncio.run(check())
 
 
+def test_committed_layout_cleanup_failure_returns_revision_and_refreshes_geometry(
+    tmp_path, monkeypatch
+):
+    async def check():
+        hass = make_hass()
+        hass.config.path = lambda _path: str(tmp_path)
+        old = {"floor": [{"name": "Synthetic floor", "receivers": []}]}
+        await save_bps_data(hass, old)
+        baseline = layout_revision(old)
+        image = tmp_path / "obsolete.png"
+        image.write_bytes(b"synthetic old map")
+        original_unlink = type(image).unlink
+        refreshed = []
+
+        def fail_cleanup(path, *args, **kwargs):
+            if path == image:
+                raise OSError("synthetic map cleanup failure")
+            return original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(type(image), "unlink", fail_cleanup)
+        monkeypatch.setattr(
+            bps,
+            "refresh_receivers_from_coords",
+            lambda _hass, coordinates: refreshed.append(json.loads(coordinates)),
+        )
+        changed = copy.deepcopy(old)
+        changed["floor"][0]["scale"] = 20
+        response = await bps.BPSSaveAPIText().post(
+            request(hass, changed, baseline, remove=image.name)
+        )
+        assert response.status == 200 and response.json_body["saved"]
+        assert "could not be removed" in response.json_body["warning"]
+        assert response.headers["X-BPS-Save-Warning"] == response.json_body["warning"]
+        revision = response.json_body["layout_revision"]
+        assert response.headers["X-BPS-Layout-Revision"] == revision
+        assert revision == layout_revision(changed) and revision != baseline
+        assert get_bps_data(hass) == hass._store_backing["bps"] == changed
+        assert refreshed == [changed] and image.exists()
+        # The same browser can keep editing after a partial cleanup failure.
+        first_save = copy.deepcopy(changed)
+        changed["floor"][0]["scale"] = 25
+        retry = await bps.BPSSaveAPIText().post(request(hass, changed, revision))
+        assert retry.status == 200 and "warning" not in retry.json_body
+        assert get_bps_data(hass) == changed and refreshed == [first_save, changed]
+
+    asyncio.run(check())
+
+
 def test_full_save_queued_behind_verification_cannot_undo_its_committed_position(
     tmp_path, monkeypatch
 ):
