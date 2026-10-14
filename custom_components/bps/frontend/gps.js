@@ -37,6 +37,13 @@
         targets[0].cords = {...targets[0].cords, x: position.x, y: position.y};
         return true;
     }
+    function surveyLayoutRevision(response, expected) {
+        if (response.layout_revision == null) return expected; // Older BPS API.
+        if (typeof expected === 'string' && /^[a-f0-9]{64}$/.test(expected)
+            && /^[a-f0-9]{64}$/.test(response.layout_revision)
+            && (expected === response.layout_revision || expected === response.previous_layout_revision)) return response.layout_revision;
+        throw new Error('Position saved, but the layout changed elsewhere. Reload the saved layout before making a full save.');
+    }
     function local(p, origin) {
         if (!validGPS(p) || !validGPS(origin)) throw new Error('Use finite latitude (−85 to 85) and longitude (−180 to 180).');
         const east = radians(((p.longitude - origin.longitude + 540) % 360) - 180) * EARTH_M * Math.cos(radians(origin.latitude));
@@ -583,7 +590,7 @@
                 auto_survey: survey?.snapshot()};
         }};
     }
-    const api = {fit, local, fromLocal, project, observation, summarize, choose, collector, parseCoordinates, mergeSurveyPosition, surveyController, init};
+    const api = {fit, local, fromLocal, project, observation, summarize, choose, collector, parseCoordinates, mergeSurveyPosition, surveyLayoutRevision, surveyController, init};
     root.BPSGPS = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

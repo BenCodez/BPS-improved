@@ -46,6 +46,7 @@ from .storage import (
     BPS_FILE_LOCK,
     get_bps_data,
     get_bps_data_for_edit,
+    layout_revision,
     load_bps_data,
     migrate_legacy,
     save_bps_data,
@@ -2932,7 +2933,10 @@ class BPSSaveAPIText(HomeAssistantView):
             # Serialized with the calibration writers so read-modify-write
             # cycles on the layout cannot interleave.
             async with BPS_FILE_LOCK:
+                if data.get("layout_revision") != layout_revision(get_bps_data(hass)):
+                    return web.Response(status=409, text="Saved layout changed or its revision is missing. Reload the page before saving; retain any unsaved edits separately.")
                 error = await self._write_save(hass, maps_path, data, coords_obj)
+                committed_revision = layout_revision(get_bps_data(hass))
             if error is not None:
                 return error
             # A calibration window may be sampling right now; hand it the
@@ -2940,7 +2944,7 @@ class BPSSaveAPIText(HomeAssistantView):
             # on the next dump instead of after the next window/solve cycle.
             refresh_receivers_from_coords(hass, coordinates)
             _LOGGER.info("Saved BPS floor layout")
-            return web.Response(status=200, text="Coordinates saved successfully")
+            return web.json_response({"saved": True, "layout_revision": committed_revision}, headers={"X-BPS-Layout-Revision": committed_revision})
 
         except Exception as e:
             _LOGGER.error(f"Failed to save coordinates: {e}")
@@ -3108,6 +3112,7 @@ class BPSReadAPIText(HomeAssistantView):
             matching = diagnostics["matching"]
             return web.json_response({
                 "coordinates": content,
+                "layout_revision": layout_revision(layout),
                 "entities": entities,
                 "receivers": [row["entity_id"] for row in matching["options"]],
                 "receiver_matching": matching,

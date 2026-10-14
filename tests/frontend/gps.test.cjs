@@ -9,6 +9,16 @@ const near = (actual, expected, tolerance = 1e-6) => assert.ok(Math.abs(actual-e
 const samples = (x, y, accuracy = 1, source = 'browser') => [at(x, y, accuracy, now-30000, source), at(x, y, accuracy, now, source)];
 const anchors = () => [[0, 0], [30, 0], [0, 30]].map(([x, y]) => ({...at(x, y, 1), x: 200+x*20, y: 150+y*20, label: 'Synthetic anchor'}));
 
+test('survey revisions advance only for known coordinate changes or an already loaded current layout', () => {
+    const before = 'a'.repeat(64), after = 'b'.repeat(64), external = 'c'.repeat(64);
+    const response = {previous_layout_revision: before, layout_revision: after};
+    assert.equal(gps.surveyLayoutRevision(response, before), after);
+    assert.equal(gps.surveyLayoutRevision(response, after), after);
+    assert.throws(() => gps.surveyLayoutRevision(response, external), /changed elsewhere/);
+    assert.throws(() => gps.surveyLayoutRevision({...response, previous_layout_revision: null}, null), /changed elsewhere/);
+    assert.equal(gps.surveyLayoutRevision({}, before), before);
+});
+
 function mergeFixture() {
     const layout = {floor: [{name: 'Yard', scale: 20, georeference: {version: 1, anchors: anchors()},
         receivers: [{entity_id: 'proxy', scanner_mac: 'aa:bb:cc:dd:ee:ff', scanner_config_entry_id: 'instance',

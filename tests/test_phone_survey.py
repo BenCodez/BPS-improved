@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bps.phone_survey import BPSPhoneSurveyAPI, PhoneSurvey
+from bps.phone_survey import BPSPhoneSurveyAPI, MAX_CANDIDATES, PhoneSurvey
 from bps.storage import get_bps_data
 from conftest import make_hass
 
@@ -629,6 +629,109 @@ def test_removing_own_verified_record_frees_storage_without_moving_receiver(
         assert get_bps_data(f.hass) == saved_layout
         await f.manager._persist([additional])
         assert f.manager.candidates == [additional]
+
+    run(check())
+
+
+@pytest.mark.parametrize("oldest_status", ["pending", "verified"])
+def test_full_candidate_store_preserves_other_owners_and_recovers_after_own_removal(
+    oldest_status,
+):
+    f = Fixture()
+    other_owner = "synthetic_other_user"
+
+    async def check():
+        _, result = await f.capture()
+        pending = result["candidate"]
+        verified = (
+            await f.manager.action(
+                OWNER, {"action": "verify", "candidate_id": pending["id"]}
+            )
+        )["candidate"]
+        templates = {"pending": pending, "verified": verified}
+        other_status = "verified" if oldest_status == "pending" else "pending"
+        shared = [
+            {
+                **copy.deepcopy(
+                    templates[oldest_status if i % 2 == 0 else other_status]
+                ),
+                "id": f"synthetic_shared_record_{i}",
+                "owner": other_owner,
+            }
+            for i in range(MAX_CANDIDATES - 1)
+        ]
+        own_old = {
+            **copy.deepcopy(pending),
+            "id": "synthetic_own_old_record",
+            "phone": "synthetic_other_phone",
+        }
+        retained = [*shared, own_old]
+        await f.manager._persist(retained)
+        saved_layout = copy.deepcopy(get_bps_data(f.hass))
+        saved_store = copy.deepcopy(f.hass._store_backing["bps_phone_survey"])
+
+        token, blocked = await f.capture()
+        assert "candidate" not in blocked
+        assert blocked["status"] == (
+            "Phone survey storage is full; remove an old candidate"
+        )
+        assert f.manager.candidates == retained
+        assert f.hass._store_backing["bps_phone_survey"] == saved_store
+        assert get_bps_data(f.hass) == saved_layout
+        assert (await f.manager.get(other_owner))["candidates"] == shared
+
+        await f.manager.action(
+            OWNER, {"action": "remove", "candidate_id": shared[0]["id"]}
+        )
+        assert f.manager.candidates == retained
+        await f.manager.action(
+            OWNER, {"action": "remove", "candidate_id": own_old["id"]}
+        )
+        recovered = await f.poll(token)
+        assert recovered["candidate"]["owner"] == OWNER
+        assert recovered["candidate"]["phone"] == PHONE
+        assert len(f.manager.candidates) == MAX_CANDIDATES
+        assert get_bps_data(f.hass) == saved_layout
+        restarted = f.make_manager()
+        assert (await restarted.get(other_owner))["candidates"] == shared
+        assert (await restarted.get(OWNER))["candidates"] == [recovered["candidate"]]
+
+    run(check())
+
+
+@pytest.mark.parametrize("previous_status", ["pending", "verified"])
+def test_full_candidate_store_allows_same_owner_receiver_phone_floor_replacement(
+    previous_status,
+):
+    f = Fixture()
+
+    async def check():
+        _, result = await f.capture()
+        previous = result["candidate"]
+        if previous_status == "verified":
+            previous = (
+                await f.manager.action(
+                    OWNER, {"action": "verify", "candidate_id": previous["id"]}
+                )
+            )["candidate"]
+        shared = [
+            {
+                **copy.deepcopy(previous),
+                "id": f"synthetic_shared_record_{i}",
+                "owner": "synthetic_other_user",
+            }
+            for i in range(MAX_CANDIDATES - 1)
+        ]
+        await f.manager._persist([previous, *shared])
+
+        _, replacement = await f.capture()
+        assert replacement["candidate"]["id"] != previous["id"]
+        assert replacement["candidate"]["status"] == "pending"
+        assert f.manager.candidates == [*shared, replacement["candidate"]]
+        assert len(f.manager.candidates) == MAX_CANDIDATES
+        restarted = f.make_manager()
+        assert (await restarted.get("synthetic_other_user"))["candidates"] == shared
+        assert (await restarted.get(OWNER))["candidates"] == [replacement["candidate"]]
 
     run(check())
 

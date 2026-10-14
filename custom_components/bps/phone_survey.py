@@ -19,7 +19,13 @@ from homeassistant.helpers.storage import Store
 
 from .gps_locations import ENTITY_ID, gps_locations, validate_georeference, _number
 from .receiver_sources import ReceiverSources
-from .storage import BPS_FILE_LOCK, get_bps_data, get_bps_data_for_edit, save_bps_data
+from .storage import (
+    BPS_FILE_LOCK,
+    get_bps_data,
+    get_bps_data_for_edit,
+    layout_revision,
+    save_bps_data,
+)
 from .calibration import refresh_receivers_from_coords
 
 EARTH_M = 6371008.8
@@ -718,7 +724,7 @@ class PhoneSurvey:
                     and old["phone"] == s["phone"]
                 )
             ]
-            await self._persist((candidates + [candidate])[-MAX_CANDIDATES:])
+            await self._persist(candidates + [candidate])
             s["completed"].add(tuple(c["identity"]))
             s["capture"] = None
             return {
@@ -820,6 +826,13 @@ class PhoneSurvey:
                     "Receiver hardware identity changed; recapture before verifying"
                 )
             rec = matches[0][0]
+            # The browser may adopt the revision only if its prior saved layout
+            # differs from this one solely at these receiver coordinates. This
+            # also safely reconciles lost responses and interrupted audit writes.
+            saved_position = copy.deepcopy(rec.get("cords", {}))
+            rec["cords"] = {**saved_position, **candidate["original_position"]}
+            previous_revision = layout_revision(layout)
+            rec["cords"] = saved_position
             if candidate.get("status") == "verified":
                 # A retry acknowledges the committed occurrence while returning
                 # current saved coordinates if a later map edit moved it again.
@@ -827,6 +840,8 @@ class PhoneSurvey:
                     "saved": True,
                     "candidate": copy.deepcopy(candidate),
                     "position": _placement(floor, candidate["receiver"]),
+                    "previous_layout_revision": previous_revision,
+                    "layout_revision": layout_revision(layout),
                 }
             # The layout can commit before an interrupted audit write. Retry
             # acknowledges that exact position without moving the receiver again.
@@ -834,6 +849,7 @@ class PhoneSurvey:
                 rec["cords"] = {**rec.get("cords", {}), **candidate["position"]}
                 await save_bps_data(self.hass, layout)
                 refresh_receivers_from_coords(self.hass, json.dumps(layout))
+            committed_revision = layout_revision(layout)
         verified = {**candidate, "status": "verified", "verified_at": now}
         candidates = [
             verified if c["id"] == candidate["id"] else c for c in self.candidates
@@ -851,6 +867,8 @@ class PhoneSurvey:
             "candidate": copy.deepcopy(verified),
             "position": copy.deepcopy(verified["position"]),
             "warning": warning,
+            "previous_layout_revision": previous_revision,
+            "layout_revision": committed_revision,
         }
 
 

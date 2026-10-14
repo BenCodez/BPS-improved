@@ -27,6 +27,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let gpsUI = null;
     let truthUI = null;
     let layoutSavePending = false;
+    let layoutRevision = null;
     let heightUI = null;
 
     // --- API auth token (see bps-panel.js) ---------------------------------
@@ -2883,6 +2884,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // fresh install bpsdata.txt is empty and JSON.parse would throw,
             // yet the receiver picker is needed exactly then.
             receiverInventoryLoaded = true;
+            layoutRevision = data.layout_revision || null;
             receiverMatching = data.receiver_matching || {revision: null, options: []};
             receiverOptions = Array.isArray(data.receivers) ? [...data.receivers].sort() : [];
             offlineReceivers = Array.isArray(data.offline_receivers) ? data.offline_receivers : [];
@@ -6431,6 +6433,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         removeListeners();
         const data = new FormData();
         data.append('coordinates', JSON.stringify(finalcords)); 
+        if (layoutRevision) data.append('layout_revision', layoutRevision);
         data.append('new_floor', new_floor);
 
         if(removefile === true && new_floor === false){
@@ -6467,6 +6470,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 body: data,
             });
             if (response.ok) {
+                const committedRevision = response.headers?.get('X-BPS-Layout-Revision');
+                if (/^[a-f0-9]{64}$/.test(committedRevision)) layoutRevision = committedRevision;
                 if (removefile) {
                     drawAreaButton.remove();
                     addDeviceButton.remove();
@@ -6477,7 +6482,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 new_floor = false;
                 return true;
             } else {
-                bpsToast('Error saving data!');
+                bpsToast(response.status === 409 ? 'The saved layout changed elsewhere. Reload the page before saving; retain any unsaved edits separately.' : 'Error saving data!');
             }
         } catch (error) {
             console.error('Error saving data:', error);
@@ -7333,9 +7338,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         },
         surveySaved(candidate, response, uiContext) {
             // Merge only the confirmed coordinate change; retain unrelated drafts.
+            const committedRevision = globalThis.BPSGPS.surveyLayoutRevision(response, layoutRevision);
             if (!globalThis.BPSGPS.mergeSurveyPosition(finalcords, candidate, response.position, uiContext, gpsEditorContext())) {
                 throw new Error('Position saved; your newer receiver or alignment edit was retained. Reload after resolving that edit to see the saved position.');
             }
+            layoutRevision = committedRevision;
             gpsUI?.refresh();
             if (mapReady()) redrawAll();
         },

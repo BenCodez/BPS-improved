@@ -14,6 +14,7 @@ the single owner of that data and imports nothing from the rest of the package
 """
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -73,6 +74,12 @@ def get_bps_data(hass):
     behaviour (a populated layout is a dict; consumers guard with isinstance).
     """
     return _bucket(hass).get("layout", [])
+
+
+def layout_revision(layout) -> str:
+    """Content revision shared by every layout writer, including calibration."""
+    canonical = json.dumps(layout, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def get_bps_data_for_edit(hass):

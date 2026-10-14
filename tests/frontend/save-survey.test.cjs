@@ -11,11 +11,11 @@ function productionSave() {
     let release, fail = false;
     const pending = new Promise(resolve => {release = resolve;});
     const requests = [], messages = [];
-    const state = vm.createContext({layoutSavePending: false, gpsUI: {isVerifying: () => false},
+    const state = vm.createContext({layoutSavePending: false, layoutRevision: 'a'.repeat(64), gpsUI: {isVerifying: () => false},
         myScaleVal: 20, removefile: false, new_floor: false, finalcords: {floor: []},
-        removeListeners() {}, FormData: class {append() {}}, saveButton: {remove() {}},
+        removeListeners() {}, FormData: class {constructor() {this.values = new Map();} append(k, v) {this.values.set(k, v);}}, saveButton: {remove() {}},
         bpsToast: value => messages.push(value), console: {error() {}},
-        bpsFetch: async () => {requests.push(true); await pending; if (fail) throw new Error('synthetic failure'); return {ok: true};},
+        bpsFetch: async (url, options) => {requests.push(options.body); await pending; if (fail) throw new Error('synthetic failure'); return {ok: true, headers: {get: () => 'b'.repeat(64)}};},
         savebuttondiv: {contains: () => false}, mapReady: () => true, anyLayoutToolActive: () => false});
     vm.runInContext(source.slice(start, end) + '\nfunction canSurvey() {' + method + '\n}', state);
     return {state, requests, messages, release, fail() {fail = true;}};
@@ -36,6 +36,8 @@ test('an in-flight floor save blocks verification and duplicate full saves until
     assert.equal(await p.state.savedata(), false);
     assert.equal(p.requests.length, 1);
     p.release(); assert.equal(await save, true);
+    assert.equal(p.requests[0].values.get('layout_revision'), 'a'.repeat(64));
+    assert.equal(p.state.layoutRevision, 'b'.repeat(64));
     assert.equal(p.state.layoutSavePending, false); assert.equal(p.state.canSurvey(), true);
 });
 
