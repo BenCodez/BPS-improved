@@ -96,6 +96,32 @@ async def save_verified_store(hass, store, data, *, key, version=1):
         raise OSError(f"Persistence could not be confirmed for {key}; saved data was not acknowledged")
 
 
+async def finish_persistence(operation):
+    """Finish a transaction before propagating HTTP caller cancellation.
+
+    Call after acquiring the writer's serialization lock. Retaining that lock
+    until disk and cache agree prevents another writer accepting a stale revision.
+    """
+    task = asyncio.create_task(operation)
+    cancelled = False
+    try:
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+    except BaseException:
+        if cancelled:
+            raise asyncio.CancelledError from None
+        raise
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 def get_bps_data_for_edit(hass):
     """A deep copy of the layout for read-modify-write callers (calibration).
 
@@ -137,8 +163,10 @@ async def save_bps_data(hass, data) -> None:
     Persist first so a raising write leaves the cache matching what survives a
     restart rather than running ahead of disk.
     """
-    await save_verified_store(hass, _layout_store(hass), data, key=STORAGE_KEY_LAYOUT, version=STORAGE_VERSION)
-    _bucket(hass)["layout"] = data
+    async def commit():
+        await save_verified_store(hass, _layout_store(hass), data, key=STORAGE_KEY_LAYOUT, version=STORAGE_VERSION)
+        _bucket(hass)["layout"] = data
+    await finish_persistence(commit())
 
 
 # --- Calibration state -------------------------------------------------------

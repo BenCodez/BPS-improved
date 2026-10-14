@@ -21,6 +21,7 @@ from .gps_locations import ENTITY_ID, gps_locations, validate_georeference, _num
 from .receiver_sources import ReceiverSources
 from .storage import (
     BPS_FILE_LOCK,
+    finish_persistence,
     get_bps_data,
     get_bps_data_for_edit,
     layout_revision,
@@ -317,10 +318,14 @@ class PhoneSurvey:
             or len(json.dumps(payload, allow_nan=False).encode()) > MAX_STORE_BYTES
         ):
             raise ValueError("Phone survey storage is full; remove an old candidate")
-        await save_verified_store(
-            self.hass, self.store, payload, key="bps_phone_survey"
-        )
-        self.candidates = candidates
+
+        async def commit():
+            await save_verified_store(
+                self.hass, self.store, payload, key="bps_phone_survey"
+            )
+            self.candidates = candidates
+
+        await finish_persistence(commit())
 
     def _known(self):
         return [
@@ -788,6 +793,10 @@ class PhoneSurvey:
         return {"status": "requested", "requested_at": now, "gps_response": "unknown"}
 
     async def _verify(self, owner, candidate_id, now):
+        # action() retains the manager lock until this transaction completes.
+        return await finish_persistence(self._verify_commit(owner, candidate_id, now))
+
+    async def _verify_commit(self, owner, candidate_id, now):
         candidate = next(
             (
                 c

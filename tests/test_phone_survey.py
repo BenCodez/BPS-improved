@@ -764,18 +764,19 @@ def test_full_candidate_store_allows_same_owner_receiver_phone_floor_replacement
 
 
 @pytest.mark.parametrize("restart", [False, True])
-def test_retry_recovers_a_committed_move_after_verification_audit_is_cancelled(restart):
+def test_cancelled_http_waits_for_audit_and_retry_acknowledges_committed_move(restart):
     f = Fixture()
 
     async def check():
         _, result = await f.capture()
         candidate = result["candidate"]
         original_save = f.manager.store.async_save
-        entered = asyncio.Event()
+        entered, release = asyncio.Event(), asyncio.Event()
 
-        async def interrupted_audit(_payload):
+        async def interrupted_audit(payload):
             entered.set()
-            await asyncio.Future()
+            await release.wait()
+            await original_save(payload)
 
         f.manager.store.async_save = interrupted_audit
         request = asyncio.create_task(
@@ -785,13 +786,19 @@ def test_retry_recovers_a_committed_move_after_verification_audit_is_cancelled(r
         )
         await entered.wait()
         request.cancel()
+        await asyncio.sleep(0)
+        assert not request.done() and f.manager.lock.locked()
+        request.cancel()
+        await asyncio.sleep(0)
+        assert not request.done() and f.manager.lock.locked()
+        release.set()
         with pytest.raises(asyncio.CancelledError):
             await request
         assert (
             get_bps_data(f.hass)["floor"][0]["receivers"][0]["cords"]
             == candidate["position"]
         )
-        assert f.manager.candidates[0]["status"] == "pending"
+        assert f.manager.candidates[0]["status"] == "verified"
         f.manager.store.async_save = original_save
         if restart:
             f.manager = f.make_manager()

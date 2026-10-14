@@ -44,6 +44,7 @@ from .calibration import (
 )
 from .storage import (
     BPS_FILE_LOCK,
+    finish_persistence,
     get_bps_data,
     get_bps_data_for_edit,
     layout_revision,
@@ -2935,16 +2936,15 @@ class BPSSaveAPIText(HomeAssistantView):
             async with BPS_FILE_LOCK:
                 if data.get("layout_revision") != layout_revision(get_bps_data(hass)):
                     return web.Response(status=409, text="Saved layout changed or its revision is missing. Reload the page before saving; retain any unsaved edits separately.")
-                error = await self._write_save(hass, maps_path, data, coords_obj)
-                committed_revision = layout_revision(get_bps_data(hass))
-            if error is not None:
-                return error
-            # A calibration window may be sampling right now; hand it the
-            # edited placements so a re-linked/added receiver starts matching
-            # on the next dump instead of after the next window/solve cycle.
-            refresh_receivers_from_coords(hass, coordinates)
-            _LOGGER.info("Saved BPS floor layout")
-            return web.json_response({"saved": True, "layout_revision": committed_revision}, headers={"X-BPS-Layout-Revision": committed_revision})
+                async def commit():
+                    error = await self._write_save(hass, maps_path, data, coords_obj)
+                    if error is not None:
+                        return error
+                    committed_revision = layout_revision(get_bps_data(hass))
+                    refresh_receivers_from_coords(hass, coordinates)
+                    _LOGGER.info("Saved BPS floor layout")
+                    return web.json_response({"saved": True, "layout_revision": committed_revision}, headers={"X-BPS-Layout-Revision": committed_revision})
+                return await finish_persistence(commit())
 
         except Exception as e:
             _LOGGER.error(f"Failed to save coordinates: {e}")

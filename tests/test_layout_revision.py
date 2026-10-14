@@ -8,10 +8,18 @@ from types import SimpleNamespace as NS
 import pytest
 
 import bps
-from bps import phone_survey
-from bps.storage import BPS_FILE_LOCK, get_bps_data, layout_revision, save_bps_data
+from bps import calibration, phone_survey, storage
+from bps.storage import get_bps_data, layout_revision, save_bps_data
 from conftest import make_hass
 from test_phone_survey import Fixture, OWNER
+
+
+@pytest.fixture(autouse=True)
+def isolated_layout_lock(monkeypatch):
+    """Each asyncio.run owns a loop; every layout writer must share its lock."""
+    lock = asyncio.Lock()
+    for module in (bps, calibration, phone_survey, storage):
+        monkeypatch.setattr(module, "BPS_FILE_LOCK", lock)
 
 
 def request(hass, layout, revision, **extra):
@@ -135,7 +143,7 @@ def test_retry_revision_cannot_hide_other_clients_layout_changes():
             == baseline
         )
         assert first["layout_revision"] == retry["layout_revision"]
-        async with BPS_FILE_LOCK:
+        async with storage.BPS_FILE_LOCK:
             changed = copy.deepcopy(get_bps_data(f.hass))
             changed["floor"][0]["receivers"][0]["height"] = 3
             await save_bps_data(f.hass, changed)
@@ -143,5 +151,70 @@ def test_retry_revision_cannot_hide_other_clients_layout_changes():
         assert retry["previous_layout_revision"] != baseline
         assert retry["layout_revision"] == layout_revision(changed)
         assert get_bps_data(f.hass) == changed
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("writer", ["survey", "full_save"])
+def test_disconnect_during_readback_retains_commit_locks_and_rejects_stale_client(
+    tmp_path, monkeypatch, writer
+):
+    async def check():
+        f = Fixture()
+        _, result = await f.capture()
+        candidate = result["candidate"]
+        f.hass.config.path = lambda _path: str(tmp_path)
+        old = copy.deepcopy(get_bps_data(f.hass))
+        await save_bps_data(f.hass, old)
+        baseline = layout_revision(old)
+        entered, release = asyncio.Event(), asyncio.Event()
+        base_store = storage.Store
+
+        class ReadbackGate(base_store):
+            async def async_load(self):
+                if self._key == storage.STORAGE_KEY_LAYOUT:
+                    entered.set()
+                    await release.wait()
+                return await super().async_load()
+
+        monkeypatch.setattr(storage, "Store", ReadbackGate)
+        if writer == "survey":
+            operation = f.manager.action(
+                OWNER, {"action": "verify", "candidate_id": candidate["id"]}
+            )
+        else:
+            moved = copy.deepcopy(old)
+            moved["floor"][0]["receivers"][0]["cords"] = candidate["position"]
+            operation = bps.BPSSaveAPIText().post(request(f.hass, moved, baseline))
+        committing = asyncio.create_task(operation)
+        await entered.wait()
+        assert (
+            f.hass._store_backing["bps"]["floor"][0]["receivers"][0]["cords"]
+            == candidate["position"]
+        )
+        committing.cancel()
+        await asyncio.sleep(0)
+        assert not committing.done() and storage.BPS_FILE_LOCK.locked()
+        if writer == "survey":
+            assert f.manager.lock.locked()
+        stale = asyncio.create_task(
+            bps.BPSSaveAPIText().post(request(f.hass, old, baseline))
+        )
+        await asyncio.sleep(0)
+        assert not stale.done()
+        committing.cancel()
+        await asyncio.sleep(0)
+        assert not committing.done() and storage.BPS_FILE_LOCK.locked()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await committing
+        assert (await stale).status == 409
+        assert get_bps_data(f.hass) == f.hass._store_backing["bps"]
+        assert (
+            get_bps_data(f.hass)["floor"][0]["receivers"][0]["cords"]
+            == candidate["position"]
+        )
+        if writer == "survey":
+            assert f.manager.candidates[0]["status"] == "verified"
 
     asyncio.run(check())
