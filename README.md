@@ -846,6 +846,29 @@ lives.)
 
 ---
 
+## Live actual-location marks
+
+In **Map & Setup**, start live tracking and select a dog group in the tracking
+list. Press **Mark actual location**, then click or tap where the dog actually
+is. Repeat whenever needed. Each click saves an independent full BLE snapshot,
+the group and individual positions, captured group membership, map/environment
+context, source timestamps and a measured comparison. It does not declare the
+dog stationary between marks or change tracking/calibration.
+
+The latest five marks show their measured position errors. **Copy marked
+history** exports all retained snapshots for analysis, including both members of
+a group. Marks survive integration/HA restarts in private `.storage/bps_ground_truth`
+and retain up to 100 snapshots and 16 MiB. Marks older than seven days are removed
+when history is accessed; expired and evicted counts are reported.
+Use the map's **Live** mode when marking. Existing stationary recording labels
+remain available for calibration validation.
+
+Authenticated APIs: `GET /api/bps/ground_truth` lists marks;
+`GET /api/bps/ground_truth?download=1` exports their captured data. A local monitor
+can use these point labels to distinguish position error from range disagreement.
+See [OpenCode monitoring suggestions](docs/opencode-tracking-monitor.md) and
+[GPS map alignment and receiver surveys](docs/gps-map-setup.md).
+
 ## Diagnostic recordings
 
 For an easy copy/paste report, open **BPS → Debugging → Full diagnostics** and

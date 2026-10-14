@@ -8,7 +8,7 @@ import pytest
 
 import bps
 from bps.outdoor_config import MAX_RECEIVERS_PER_FLOOR, MAX_RECEIVER_PLACEMENTS
-from bps.storage import save_bps_data
+from bps.storage import save_bps_data, layout_revision
 from bps.receiver_sources import ReceiverSources
 from bps import calibration as C
 from test_receiver_matching import configure, MAC
@@ -117,7 +117,7 @@ def test_save_receiver_limits_before_layout_or_map_mutation(hass, tmp_path, coun
             {"entity_id": f"station_{index}_{receiver}"} for receiver in range(count)]}
             for index, count in enumerate(counts)]}
         async def post():
-            return {"coordinates": json.dumps(layout), "remove": "existing.png"}
+            return {"coordinates": json.dumps(layout), "remove": "existing.png", "layout_revision": layout_revision(original)}
         hass.config.path = lambda _path: str(tmp_path)
         response = await bps.BPSSaveAPIText().post(NS(app={"hass": hass}, post=post))
         assert response.status == (200 if accepted else 400)

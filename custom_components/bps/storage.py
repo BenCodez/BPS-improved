@@ -14,8 +14,10 @@ the single owner of that data and imports nothing from the rest of the package
 """
 import asyncio
 import copy
+import hashlib
 import json
 import logging
+import operator
 from pathlib import Path
 
 import aiofiles
@@ -75,6 +77,82 @@ def get_bps_data(hass):
     return _bucket(hass).get("layout", [])
 
 
+def layout_revision(layout) -> str:
+    """Content revision shared by every layout writer, including calibration."""
+    canonical = json.dumps(layout, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def layout_needs_reload(hass) -> bool:
+    """A failed write/readback may leave disk newer than the live cache."""
+    return _bucket(hass).get("layout_needs_reload", False)
+
+
+def assert_layout_writable(hass):
+    """Reject every layout writer while its durable revision is unknown."""
+    if layout_needs_reload(hass):
+        raise OSError("Saved layout could not be verified. Reload the BPS page before making changes.")
+
+
+async def reload_unverified_layout(hass):
+    """Reconcile from a fresh Store under BPS_FILE_LOCK; never trust pending data."""
+    if not layout_needs_reload(hass):
+        return False
+    try:
+        data = await Store(hass, STORAGE_VERSION, STORAGE_KEY_LAYOUT).async_load()
+        if data is None and _bucket(hass).get("layout_reload_allows_missing"):
+            # A failed first write may never create a Store. Recover only the
+            # original empty state; missing established layouts stay guarded.
+            data = []
+        if not isinstance(data, (dict, list)):
+            raise ValueError("Saved layout is missing or invalid")
+    except Exception as exc:
+        raise OSError("Saved layout could not be reloaded. Check Home Assistant storage and refresh the BPS page again.") from exc
+    _bucket(hass)["layout"] = data
+    _bucket(hass).pop("layout_needs_reload", None)
+    _bucket(hass).pop("layout_reload_allows_missing", None)
+    return True
+
+
+async def save_verified_store(hass, store, data, *, key, version=1):
+    """Confirm disk contents: HA logs some save failures instead of raising.
+
+    A separate Store avoids the original instance's pending-write/load future.
+    Store invalidates its startup cache when writing, so this load reads disk.
+    All callers serialize their writes until verification has completed.
+    """
+    await store.async_save(data)
+    persisted = await Store(hass, version, key).async_load()
+    if not await hass.async_add_executor_job(operator.eq, persisted, data):
+        raise OSError(f"Persistence could not be confirmed for {key}; saved data was not acknowledged")
+
+
+async def finish_persistence(operation):
+    """Finish a transaction before propagating HTTP caller cancellation.
+
+    Call after acquiring the writer's serialization lock. Retaining that lock
+    until disk and cache agree prevents another writer accepting a stale revision.
+    """
+    task = asyncio.create_task(operation)
+    cancelled = False
+    try:
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+    except BaseException:
+        if cancelled:
+            raise asyncio.CancelledError from None
+        raise
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 def get_bps_data_for_edit(hass):
     """A deep copy of the layout for read-modify-write callers (calibration).
 
@@ -92,6 +170,10 @@ async def load_bps_data(hass):
     A corrupt/unreadable store must not abort setup — the old flat-file reader
     tolerated bad JSON and ran with an empty layout, so keep that resilience.
     """
+    if layout_needs_reload(hass):
+        async with BPS_FILE_LOCK:
+            await finish_persistence(reload_unverified_layout(hass))
+        return get_bps_data(hass)
     try:
         data = await _layout_store(hass).async_load()
     except Exception as e:
@@ -116,8 +198,15 @@ async def save_bps_data(hass, data) -> None:
     Persist first so a raising write leaves the cache matching what survives a
     restart rather than running ahead of disk.
     """
-    await _layout_store(hass).async_save(data)
-    _bucket(hass)["layout"] = data
+    async def commit():
+        assert_layout_writable(hass)
+        _bucket(hass)["layout_reload_allows_missing"] = get_bps_data(hass) == []
+        _bucket(hass)["layout_needs_reload"] = True
+        await save_verified_store(hass, _layout_store(hass), data, key=STORAGE_KEY_LAYOUT, version=STORAGE_VERSION)
+        _bucket(hass)["layout"] = data
+        _bucket(hass).pop("layout_needs_reload", None)
+        _bucket(hass).pop("layout_reload_allows_missing", None)
+    await finish_persistence(commit())
 
 
 # --- Calibration state -------------------------------------------------------
@@ -132,7 +221,7 @@ async def load_calib_state(hass):
 
 
 async def save_calib_state(hass, payload) -> None:
-    await _calib_store(hass).async_save(payload)
+    await save_verified_store(hass, _calib_store(hass), payload, key=STORAGE_KEY_CALIB, version=STORAGE_VERSION)
 
 
 # --- One-time migration of the old flat files -------------------------------

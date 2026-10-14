@@ -1,5 +1,6 @@
 """Executor suspension, failure, and lifecycle regressions for live refreshes."""
 import asyncio
+import operator
 import copy
 import datetime
 import threading
@@ -176,6 +177,8 @@ def test_outdoor_result_cannot_publish_after_layout_or_lifecycle_change(hass, mo
         publications = []
 
         async def executor(func, *args):
+            if func is operator.eq:
+                return func(*args)
             started.set()
             await release.wait()
             return func(*args)
@@ -218,6 +221,8 @@ def test_group_executor_owns_private_layout_and_rejects_outdated_result(hass, mo
         publications = []
 
         async def executor(func, *args):
+            if func is operator.eq:
+                return func(*args)
             assert func is bps._assign_group_zone
             assert args[0] not in bps.apitricords
             assert args[1][0]["data"] == data

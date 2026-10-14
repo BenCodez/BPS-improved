@@ -8,6 +8,8 @@ hand the store a complete dict, via async_save, never async_delay_save).
 import asyncio
 from pathlib import Path
 
+import pytest
+
 import bps.storage as st
 from conftest import make_hass
 
@@ -107,6 +109,51 @@ def test_get_for_edit_returns_a_copy(tmp_path):
     editable["floor"].append({"name": "Injected"})
     # Mutating the editable copy must not touch the live cache the loop reads.
     assert st.get_bps_data(hass) == {"floor": [{"name": "Home"}]}
+
+
+def test_silent_store_write_failure_does_not_advance_layout_cache(tmp_path):
+    async def check():
+        hass = make_hass(tmp_path)
+        original = {"floor": [{"name": "Original"}]}
+        await st.save_bps_data(hass, original)
+
+        async def drop(_payload):
+            return None
+
+        st._layout_store(hass).async_save = drop
+        with pytest.raises(OSError, match="Persistence could not be confirmed"):
+            await st.save_bps_data(hass, {"floor": [{"name": "Unconfirmed"}]})
+        assert st.get_bps_data(hass) == original
+        assert hass._store_backing["bps"] == original
+
+    run(check())
+
+
+def test_setup_reload_recovers_unverified_disk_without_trusting_pending_store_data(tmp_path):
+    async def check():
+        hass = make_hass(tmp_path)
+        old = {"floor": [{"name": "Synthetic old floor"}]}
+        changed = {"floor": [{"name": "Synthetic committed floor"}]}
+        await st.save_bps_data(hass, old)
+        hass._store_raise_on_load.add("bps")
+        with pytest.raises(ValueError, match="corrupt store"):
+            await st.save_bps_data(hass, changed)
+        assert st.layout_needs_reload(hass) and st.get_bps_data(hass) == old
+        with pytest.raises(OSError, match="could not be reloaded"):
+            await st.load_bps_data(hass)
+        assert st.layout_needs_reload(hass) and st.get_bps_data(hass) == old
+        hass._store_raise_on_load.clear()
+
+        async def pending():
+            return old
+
+        st._layout_store(hass).async_load = pending
+        await st.load_bps_data(hass)
+        assert st.get_bps_data(hass) == changed and not st.layout_needs_reload(hass)
+        await st.save_bps_data(hass, {"floor": []})
+        assert st.get_bps_data(hass) == {"floor": []}
+
+    run(check())
 
 
 # --- calibration state ------------------------------------------------------

@@ -9,6 +9,7 @@
     <div class="bps-app">
         <nav class="bps-tabs" role="tablist">
             <button type="button" class="bps-tab active" data-tab="map" role="tab">Map &amp; Setup</button>
+            <button type="button" class="bps-tab" data-tab="alignment" role="tab">Map alignment</button>
             <button type="button" class="bps-tab" data-tab="calibration" role="tab">Receiver Calibration</button>
             <button type="button" class="bps-tab" data-tab="debugging" role="tab">Debugging</button>
             <button type="button" id="themeToggle" class="bps-theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">🌙</button>
@@ -96,45 +97,7 @@
                                 <p id="heightStatus" class="bps-hint" role="status"></p>
                                 <p class="bps-hint">Keep the phone still for 30–45 seconds per capture. Pressure spread measures precision, not proven absolute accuracy; weather and ventilation can shift it. GPS vertical uncertainty over 2 m is blocked. Confirmed heights are staged until Save Floor Plan; survey details stay in private storage and full diagnostic downloads.</p>
                             </details>
-                            <details id="gpsSetup">
-                                <summary>GPS map alignment &amp; receiver placement</summary>
-                                <p class="bps-hint">Use known GPS/map points across the property. Two anchors align the map; a third checks agreement. GPS works best outdoors. Repeated fixes do not guarantee 1 m accuracy.</p>
-                                <label class="bps-label" for="gpsReceiver">Receiver / anchor point</label>
-                                <select id="gpsReceiver" class="bps-input"></select>
-                                <div class="bps-btnrow">
-                                    <button type="button" id="gpsUseReceiver" class="bps-btn bps-btn-outline">Use receiver map point</button>
-                                    <button type="button" id="gpsPickPoint" class="bps-btn bps-btn-outline">Pick map point</button>
-                                </div>
-                                <p id="gpsMapPoint" class="bps-hint">Choose a known point on the map.</p>
-                                <label class="bps-label" for="gpsAnchorLabel">Anchor label</label>
-                                <input id="gpsAnchorLabel" maxlength="80" class="bps-input" placeholder="Known property corner">
-                                <div class="bps-field-row">
-                                    <div class="bps-field"><label for="gpsLatitude">Latitude</label><input id="gpsLatitude" type="number" min="-85" max="85" step="any" class="bps-input"></div>
-                                    <div class="bps-field"><label for="gpsLongitude">Longitude</label><input id="gpsLongitude" type="number" min="-180" max="180" step="any" class="bps-input"></div>
-                                </div>
-                                <label class="bps-label" for="gpsAccuracy">Anchor accuracy (m; 0 only for surveyed coordinates)</label>
-                                <input id="gpsAccuracy" type="number" min="0" max="1000" step="any" class="bps-input">
-                                <div class="bps-btnrow">
-                                    <button type="button" id="gpsUseFix" class="bps-btn bps-btn-outline" disabled>Use captured GPS</button>
-                                    <button type="button" id="gpsAddAnchor" class="bps-btn bps-btn-outline">Add anchor</button>
-                                </div>
-                                <div id="gpsAnchors"></div><p id="gpsFit" class="bps-hint"></p>
-                                <label class="bps-label" for="gpsPhone">Your Companion App location entity (optional)</label>
-                                <select id="gpsPhone" class="bps-input"><option value="">Browser only</option></select>
-                                <button type="button" id="gpsRefreshPhones" class="bps-btn bps-btn-outline">Load phone locations</button>
-                                <p class="bps-hint">Select your own phone explicitly. Capture compares its fresh reported accuracy with this browser. Stand at the receiver and stay still for 30–60 seconds.</p>
-                                <div class="bps-btnrow">
-                                    <button type="button" id="gpsCapture" class="bps-btn bps-btn-outline">Capture stationary GPS</button>
-                                    <button type="button" id="gpsStop" class="bps-btn bps-btn-outline" disabled>Stop capture</button>
-                                    <button type="button" id="gpsCancel" class="bps-btn bps-btn-outline">Cancel GPS</button>
-                                </div>
-                                <div class="bps-btnrow">
-                                    <button type="button" id="gpsPreview" class="bps-btn bps-btn-outline" disabled>Preview receiver position</button>
-                                    <button type="button" id="gpsConfirm" class="bps-btn bps-btn-primary" disabled>Confirm receiver position</button>
-                                </div>
-                                <p id="gpsStatus" class="bps-hint" role="status"></p>
-                                <p class="bps-hint">Anchors and confirmed positions are staged until Save Floor Plan. Map scale and calibration stay unchanged. GPS coordinates stay in private Home Assistant storage and are included in full local diagnostic downloads; inspect before sharing.</p>
-                            </details>
+
                         </div>
 
                         <div id="trackdiv" class="bps-setup-col" style="display: none">
@@ -216,6 +179,17 @@
                                  click a row to make the tracker-icon controls target it, × to
                                  stop tracking it. Populated by renderTrackLegend(). -->
                             <div id="trackLegend" class="bps-track-legend" style="display: none"></div>
+                            <div id="liveTruthPanel" hidden>
+                                <div class="bps-btnrow"><button id="liveTruthMark" type="button" class="bps-btn bps-btn-primary">Mark actual location</button><button id="liveTruthCopy" type="button" class="bps-btn bps-btn-outline">Copy marked history</button></div>
+                                <p id="liveTruthStatus" class="bps-hint" role="status">Select a dog, then mark where it actually is. Each click saves one instant with BLE diagnostics.</p>
+                                <div id="liveTruthHistory" class="bps-hint"></div>
+                                <details><summary>Location mark options</summary>
+                                    <label for="liveTruthAccuracy">Location tolerance (m)</label><input id="liveTruthAccuracy" class="bps-input" type="number" min="0" max="100" step="any" value="1">
+                                    <label for="liveTruthLabel">Note (optional)</label><input id="liveTruthLabel" class="bps-input" maxlength="240" placeholder="Inside barn; standing still">
+                                    <button id="liveTruthClear" type="button" class="bps-btn bps-btn-outline">Clear actual-location marks</button>
+                                    <textarea id="liveTruthReport" hidden readonly rows="12" spellcheck="false" class="bps-input"></textarea>
+                                </details>
+                            </div>
                             <div class="bps-viewrow">
                                 <!-- Unlike the two tracking-session toggles below, receiver
                                      distances need no session — they compare the latest
@@ -462,6 +436,60 @@
         </section>
 
         <!-- ============================ CALIBRATION ============================ -->
+        <section class="bps-tabpanel" data-tabpanel="alignment">
+            <div class="bps-card">
+                            <div id="gpsSetup">
+                                <h2>Map alignment</h2>
+                                <p class="bps-hint">Select a floor in Map &amp; Setup first. On a desktop, pick a map point and enter its known latitude/longitude. Phone GPS is optional.</p>
+                                <p class="bps-hint">Use known GPS/map points across the property. Two anchors align the map; a third checks agreement. GPS works best outdoors. Repeated fixes do not guarantee 1 m accuracy.</p>
+                                <label class="bps-label" for="gpsReceiver">Receiver / anchor point</label>
+                                <select id="gpsReceiver" class="bps-input"></select>
+                                <div class="bps-btnrow">
+                                    <button type="button" id="gpsUseReceiver" class="bps-btn bps-btn-outline">Use receiver map point</button>
+                                    <button type="button" id="gpsPickPoint" class="bps-btn bps-btn-outline">Pick map point</button>
+                                </div>
+                                <p id="gpsMapPoint" class="bps-hint">Choose a known point on the map.</p>
+                                <label class="bps-label" for="gpsAnchorLabel">Anchor label</label>
+                                <input id="gpsAnchorLabel" maxlength="80" class="bps-input" placeholder="Known property corner">
+                                <div class="bps-field-row">
+                                    <div class="bps-field"><label for="gpsLatitude">Latitude (or paste latitude, longitude)</label><input id="gpsLatitude" type="number" min="-85" max="85" step="any" class="bps-input"></div>
+                                    <div class="bps-field"><label for="gpsLongitude">Longitude</label><input id="gpsLongitude" type="number" min="-180" max="180" step="any" class="bps-input"></div>
+                                </div>
+                                <label class="bps-label" for="gpsAccuracy">Anchor accuracy (m; 0 only for surveyed coordinates)</label>
+                                <input id="gpsAccuracy" type="number" min="0" max="1000" step="any" value="2" class="bps-input">
+                                <div class="bps-btnrow">
+                                    <button type="button" id="gpsUseFix" class="bps-btn bps-btn-outline" disabled>Use captured GPS</button>
+                                    <button type="button" id="gpsAddAnchor" class="bps-btn bps-btn-outline">Add anchor</button>
+                                </div>
+                                <div id="gpsAnchors"></div><p id="gpsFit" class="bps-hint"></p>
+                                <button id="gpsSaveAlignment" type="button" class="bps-btn bps-btn-primary">Save alignment</button>
+                                <label class="bps-label" for="gpsPhone">Your Companion App location entity (optional)</label>
+                                <select id="gpsPhone" class="bps-input"><option value="">Browser only</option></select>
+                                <button type="button" id="gpsRefreshPhones" class="bps-btn bps-btn-outline">Load phone locations</button>
+                                <p class="bps-hint">Select your own phone explicitly. Capture compares its fresh reported accuracy with this browser. Stand at the receiver and stay still for 30–60 seconds.</p>
+                                <div class="bps-btnrow">
+                                    <button type="button" id="gpsCapture" class="bps-btn bps-btn-outline">Capture stationary GPS</button>
+                                    <button type="button" id="gpsStop" class="bps-btn bps-btn-outline" disabled>Stop capture</button>
+                                    <button type="button" id="gpsCancel" class="bps-btn bps-btn-outline">Cancel GPS</button>
+                                </div>
+                                <div class="bps-btnrow">
+                                    <button type="button" id="gpsPreview" class="bps-btn bps-btn-outline" disabled>Preview receiver position</button>
+                                    <button type="button" id="gpsConfirm" class="bps-btn bps-btn-primary" disabled>Confirm receiver position</button>
+                                </div>
+                                <details><summary>Automatic phone receiver survey</summary>
+                                    <p class="bps-hint">Collect and average GPS while fresh Bermuda readings place your selected phone within 1 m of a receiver. Keep the phone near it for at least 30 seconds. Verify each preview before saving a position.</p>
+                                    <label for="gpsSurveyPhone">Phone BLE tracker in Bermuda</label><select id="gpsSurveyPhone" class="bps-input"></select>
+                                    <label class="bps-switch"><input id="gpsSurveyRequestGPS" type="checkbox"><span>Request fresh phone GPS</span></label>
+                                    <label for="gpsSurveyNotify">Your phone's Companion App notification service</label><select id="gpsSurveyNotify" class="bps-input"></select>
+                                    <div class="bps-btnrow"><button id="gpsSurveyRefresh" type="button" class="bps-btn bps-btn-outline">Load phones / surveys</button><button id="gpsSurveyStart" type="button" class="bps-btn bps-btn-primary">Start auto survey</button><button id="gpsSurveyStop" type="button" class="bps-btn bps-btn-outline" disabled>Stop auto survey</button></div>
+                                    <p id="gpsSurveyStatus" class="bps-hint" role="status"></p><div id="gpsSurveyCandidates"></div>
+                                </details>
+                                <p id="gpsStatus" class="bps-hint" role="status"></p>
+                                <p class="bps-hint">Anchors and confirmed positions are staged until Save Floor Plan. Map scale and calibration stay unchanged. GPS coordinates stay in private Home Assistant storage and are included in full local diagnostic downloads; inspect before sharing.</p>
+                            </div>
+            </div>
+        </section>
+
         <section class="bps-tabpanel" data-tabpanel="calibration">
             <div id="calibrationdiv" class="bps-card">
                 <div class="bps-section-head">
@@ -571,6 +599,7 @@
 
     <script src="outdoor.js"></script>
     <script src="diagnostics.js"></script>
+    <script src="ground-truth.js"></script>
     <script src="calibration.js"></script>
     <script src="gps.js"></script>
     <script src="height.js"></script>

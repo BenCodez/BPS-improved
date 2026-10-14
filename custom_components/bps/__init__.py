@@ -44,10 +44,15 @@ from .calibration import (
 )
 from .storage import (
     BPS_FILE_LOCK,
+    assert_layout_writable,
+    finish_persistence,
     get_bps_data,
     get_bps_data_for_edit,
+    layout_revision,
+    layout_needs_reload,
     load_bps_data,
     migrate_legacy,
+    reload_unverified_layout,
     save_bps_data,
 )
 from .const import ACCURACY_ENTITY_ID
@@ -62,6 +67,8 @@ from .tracker_groups import fuse_groups, normalize_groups, GROUP_MAX_SPEED_MS, G
 from .group_receiver_guard import receiver_constraints, constrain_group
 from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
+from .ground_truth import BPSGroundTruthAPI
+from .phone_survey import BPSPhoneSurveyAPI
 from .receiver_matching import inventory as receiver_inventory
 from .receiver_sources import ReceiverSources
 from .gps_locations import BPSGPSLocationsAPI, validate_georeference
@@ -2638,6 +2645,8 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSTrackerTuneAPI())
             hass.http.register_view(BPSHistoryAPI(hass))
             hass.http.register_view(BPSDiagnosticsAPI(_diagnostic_snapshot, _diagnostic_inventory, _diagnostic_report_snapshot))
+            hass.http.register_view(BPSGroundTruthAPI(_diagnostic_report_snapshot))
+            hass.http.register_view(BPSPhoneSurveyAPI(_diagnostic_snapshot, _diagnostic_inventory))
             hass.data["bps_views_registered"] = True
 
         config_path = hass.config.path()
@@ -2928,22 +2937,32 @@ class BPSSaveAPIText(HomeAssistantView):
             # Serialized with the calibration writers so read-modify-write
             # cycles on the layout cannot interleave.
             async with BPS_FILE_LOCK:
-                error = await self._write_save(hass, maps_path, data, coords_obj)
-            if error is not None:
-                return error
-            # A calibration window may be sampling right now; hand it the
-            # edited placements so a re-linked/added receiver starts matching
-            # on the next dump instead of after the next window/solve cycle.
-            refresh_receivers_from_coords(hass, coordinates)
-            _LOGGER.info("Saved BPS floor layout")
-            return web.Response(status=200, text="Coordinates saved successfully")
+                assert_layout_writable(hass)
+                if data.get("layout_revision") != layout_revision(get_bps_data(hass)):
+                    return web.Response(status=409, text="Saved layout changed or its revision is missing. Reload the page before saving; retain any unsaved edits separately.")
+                async def commit():
+                    result = await self._write_save(hass, maps_path, data, coords_obj)
+                    if result is not None and not isinstance(result, str):
+                        return result
+                    committed_revision = layout_revision(get_bps_data(hass))
+                    refresh_receivers_from_coords(hass, coordinates)
+                    _LOGGER.info("Saved BPS floor layout")
+                    payload = {"saved": True, "layout_revision": committed_revision}
+                    headers = {"X-BPS-Layout-Revision": committed_revision}
+                    if result:
+                        payload["warning"] = result
+                        headers["X-BPS-Save-Warning"] = result
+                    return web.json_response(payload, headers=headers)
+                return await finish_persistence(commit())
 
         except Exception as e:
             _LOGGER.error(f"Failed to save coordinates: {e}")
+            if layout_needs_reload(hass):
+                return web.Response(status=503, text="Saved layout could not be verified. Reload the BPS page before making changes.")
             return web.Response(status=500, text="Failed to save coordinates")
 
     async def _write_save(self, hass, maps_path, data, coords_obj):
-        """Validate all inputs, THEN persist; returns an error Response or None.
+        """Validate, then persist; return an error, cleanup warning, or None.
 
         Ordering matters: the new-floor map upload and the removal target are
         validated (and the upload read + size-checked) BEFORE the layout is
@@ -2953,6 +2972,7 @@ class BPSSaveAPIText(HomeAssistantView):
         write+delete). The layout goes to the Store (atomic); only the map
         images live under maps_path.
         """
+        assert_layout_writable(hass)
         error = await hass.async_add_executor_job(validate_georeference, coords_obj)
         if error:
             return web.Response(status=400, text=error)
@@ -3016,7 +3036,7 @@ class BPSSaveAPIText(HomeAssistantView):
                 _LOGGER.info(f"Removed file: {remove_target.name}")
             except Exception as e:
                 _LOGGER.error(f"Failed to remove file {remove_target.name}: {e}")
-                return web.Response(status=500, text="Failed to remove file")
+                return "Layout saved, but the old map file could not be removed."
         return None
 
 
@@ -3095,6 +3115,11 @@ class BPSReadAPIText(HomeAssistantView):
         offline_receivers = list(hass.data.get(DOMAIN, {}).get("rl_offline", []))
 
         try:
+            async with BPS_FILE_LOCK:
+                async def recover():
+                    if await reload_unverified_layout(hass):
+                        refresh_receivers_from_coords(hass, json.dumps(get_bps_data(hass)))
+                await finish_persistence(recover())
             # The layout now lives in the Store; a fresh install has none, and
             # the frontend's `if (data.coordinates)` guard expects "" (not "[]")
             # in that case so it never JSON.parses an empty layout.
@@ -3104,6 +3129,7 @@ class BPSReadAPIText(HomeAssistantView):
             matching = diagnostics["matching"]
             return web.json_response({
                 "coordinates": content,
+                "layout_revision": layout_revision(layout),
                 "entities": entities,
                 "receivers": [row["entity_id"] for row in matching["options"]],
                 "receiver_matching": matching,
@@ -3117,6 +3143,8 @@ class BPSReadAPIText(HomeAssistantView):
 
         except Exception as e:
             _LOGGER.error(f"Failed to read coordinates: {e}")
+            if layout_needs_reload(hass):
+                return web.Response(status=503, text="Saved layout could not be reloaded. Check Home Assistant storage and refresh the BPS page again.")
             return web.Response(status=500, text="Failed to read coordinates")
 
 def _diagnostic_inventory(hass):
@@ -3126,7 +3154,7 @@ def _diagnostic_inventory(hass):
     data = get_bps_data(hass)
     groups = normalize_groups(data, known)
     return {"trackers": [{"key": key, "name": key} for key in known] + [
-        {"key": "bps_group_" + group["id"], "name": group["name"] + " (group)"}
+        {"key": "bps_group_" + group["id"], "name": group["name"] + " (group)", "group": True}
         for group in groups], "floors": [f["name"] for f in data.get("floor", [])
         if isinstance(f.get("name"), str) and finite_number(f.get("scale"), minimum=1e-6) is not None]
         if isinstance(data, dict) else []}

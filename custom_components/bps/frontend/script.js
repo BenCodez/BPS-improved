@@ -25,6 +25,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     let availableBeaconKeys = [];
     let outdoorFloorSignature = '';
     let gpsUI = null;
+    let truthUI = null;
+    let layoutSavePending = false;
+    let layoutRevision = null;
     let heightUI = null;
 
     // --- API auth token (see bps-panel.js) ---------------------------------
@@ -831,6 +834,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         function startTrackfunc(){
             stoptrackstat = false;
             pollTrackActive = true;
+            truthUI?.sync();
             tracePointsByDevice.clear(); // each session traces from its own start
             lastTracks.clear();
             focusedDevice = null;
@@ -846,6 +850,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (stoptrackstat) {
                     clearInterval(interval);
                     pollTrackActive = false;
+                    truthUI?.sync();
                     stoptrackstat = false;
                     lastTracks.clear();
                     focusedDevice = null;
@@ -2870,6 +2875,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         
             if (!response.ok) {
                 console.error("Failed to fetch BPS data:", response.statusText); // Handle error status
+                if (response.status === 503) bpsToast('Saved layout could not be reloaded. Check Home Assistant storage and refresh this page again.');
                 return;
             }
         
@@ -2879,6 +2885,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // fresh install bpsdata.txt is empty and JSON.parse would throw,
             // yet the receiver picker is needed exactly then.
             receiverInventoryLoaded = true;
+            layoutRevision = data.layout_revision || null;
             receiverMatching = data.receiver_matching || {revision: null, options: []};
             receiverOptions = Array.isArray(data.receivers) ? [...data.receivers].sort() : [];
             offlineReceivers = Array.isArray(data.offline_receivers) ? data.offline_receivers : [];
@@ -2965,6 +2972,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // last tracked device is removed - that must not blank the record
             // you were looking at.
             if (follow) historyFollowDevice(activeDevice);
+            truthUI?.sync();
         }
 
         // Start/stop button visibility follows whether anything is tracked (but
@@ -6157,7 +6165,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // Save data
-    saveButton.addEventListener('click', async () => {
+    async function saveFloorPlan() {
         let saveresult = await savedata();
         if(saveresult){
             tmpfinalcords = finalcords;
@@ -6171,6 +6179,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             pollCalibration();
             if (!scannerLinkingLoading) loadScannerLinking();
         }
+        return saveresult;
+    }
+    saveButton.addEventListener('click', saveFloorPlan);
+    document.getElementById('gpsSaveAlignment')?.addEventListener('click', async event => {
+        const button = event.currentTarget;
+        if (button.disabled) return;
+        button.disabled = true;
+        try {await saveFloorPlan(); gpsUI?.refresh();}
+        finally {button.disabled = false;}
     });
 
     // =================================================================
@@ -6403,6 +6420,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     async function savedata(skipScaleCheck = false){
+        if (layoutSavePending || gpsUI?.isVerifying?.()) {
+            bpsToast('Wait for the current map save or receiver verification to finish.');
+            return false;
+        }
+        layoutSavePending = true;
+        try {
         if(!skipScaleCheck && myScaleVal == null){
             bpsToast("You have not added a scale, it won't work without it!");
             return;
@@ -6411,6 +6434,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         removeListeners();
         const data = new FormData();
         data.append('coordinates', JSON.stringify(finalcords)); 
+        if (layoutRevision) data.append('layout_revision', layoutRevision);
         data.append('new_floor', new_floor);
 
         if(removefile === true && new_floor === false){
@@ -6447,6 +6471,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 body: data,
             });
             if (response.ok) {
+                const committedRevision = response.headers?.get('X-BPS-Layout-Revision');
+                if (/^[a-f0-9]{64}$/.test(committedRevision)) layoutRevision = committedRevision;
+                const saveWarning = response.headers?.get('X-BPS-Save-Warning');
+                if (saveWarning) bpsToast(saveWarning);
                 if (removefile) {
                     drawAreaButton.remove();
                     addDeviceButton.remove();
@@ -6457,12 +6485,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 new_floor = false;
                 return true;
             } else {
-                bpsToast('Error saving data!');
+                bpsToast(response.status === 409 ? 'The saved layout changed elsewhere. Reload the page before saving; retain any unsaved edits separately.' : response.status === 503 ? 'Saved layout could not be verified. Reload the page before making changes; retain any unsaved edits separately.' : 'Error saving data!');
             }
         } catch (error) {
             console.error('Error saving data:', error);
             bpsToast('Error saving data!');
         }
+        } finally {layoutSavePending = false;}
     }
 
     // =================================================================
@@ -6529,12 +6558,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         validate() {
             if (savebuttondiv.contains(saveButton)) throw new Error('Save Floor Plan before a known-position snapshot.');
         },
-        pick(done, cancelled) {
+        pick(done, cancelled, returnToDebugging = true) {
             if (!mapReady()) throw new Error('Open a saved floor map before picking the dog’s location.');
             if (savebuttondiv.contains(saveButton)) throw new Error('Save Floor Plan before picking the dog’s actual location.');
             if (anyLayoutToolActive() || adjustPreview || dragReceiverRef) throw new Error('Finish or cancel the map editing tool first.');
             cancelSnapshotMapPick(); panState = null; clickCandidate = null; clickDeviceCandidate = null; clickLinkCandidate = null;
-            const cleanup = () => {canvas.removeEventListener('click', pick); snapshotMapPick = null;};
+            if (historyBar) historyBar.style.display = 'none';
+            const cleanup = () => {
+                canvas.removeEventListener('click', pick); snapshotMapPick = null;
+                if (historyBar) historyBar.style.display = historyOn() ? '' : 'none';
+            };
             const pick = event => {
                 if (event.button !== undefined && event.button !== 0) return;
                 const floor = (finalcords.floor || []).find(f => sameFloorName(f.name, SelMapName));
@@ -6544,7 +6577,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const point = zoneMousePos(event);
                 cleanup(); snapshotMapMarker = {floor: floor.name, x_m: point.x / floor.scale, y_m: point.y / floor.scale};
                 done(snapshotMapMarker); redrawAll();
-                const debug = [...tabButtons].find(b => b.dataset.tab === 'debugging'); debug?.click();
+                if (returnToDebugging) {
+                    const debug = [...tabButtons].find(b => b.dataset.tab === 'debugging'); debug?.click();
+                }
             };
             snapshotMapPick = {cancel() {cleanup(); cancelled();}};
             canvas.addEventListener('click', pick);
@@ -7268,10 +7303,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // GPS uses the existing receiver placement/identity path; it only stages
     // map pixels after the user confirms a guarded preview.
+    function gpsEditorContext() {
+        return JSON.stringify([SelMapName, mapname.value, img.src, canvas.width, canvas.height,
+            currentFloor() && {...currentFloor(), receivers: (currentFloor().receivers || []).map(rec => JSON.parse(receiverPlacementSignature(rec)))}]);
+    }
     if (globalThis.BPSGPS) gpsUI = globalThis.BPSGPS.init({
         getFloor: currentFloor,
-        getContext: () => JSON.stringify([SelMapName, mapname.value, img.src, canvas.width, canvas.height,
-            currentFloor() && {...currentFloor(), receivers: (currentFloor().receivers || []).map(rec => JSON.parse(receiverPlacementSignature(rec)))}]),
+        getContext: gpsEditorContext,
         getBounds: () => ({width: canvas.width, height: canvas.height}),
         fetch: bpsFetch, redraw: () => {if (mapReady()) redrawAll();},
         stageChange: () => savebuttondiv.appendChild(saveButton),
@@ -7279,13 +7317,37 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!mapReady() || anyLayoutToolActive() || adjustPreview || dragReceiverRef) throw new Error('Open a floor and finish or cancel the map editing tool first.');
             cancelSnapshotMapPick(); panState = null; clickCandidate = null; clickDeviceCandidate = null; clickLinkCandidate = null;
             let owner;
-            const cleanup = () => {canvas.removeEventListener('click', pick); if (snapshotMapPick === owner) snapshotMapPick = null;};
+            if (historyBar) historyBar.style.display = 'none';
+            const cleanup = () => {
+                canvas.removeEventListener('click', pick);
+                if (snapshotMapPick === owner) snapshotMapPick = null;
+                if (historyBar) historyBar.style.display = historyOn() ? '' : 'none';
+            };
             const pick = event => {
                 if (event.button !== undefined && event.button !== 0) return;
                 const point = zoneMousePos(event); cleanup(); done(point);
+                [...tabButtons].find(b => b.dataset.tab === 'alignment')?.click();
             };
             owner = {cancel: cleanup}; snapshotMapPick = owner; canvas.addEventListener('click', pick);
+            [...tabButtons].find(b => b.dataset.tab === 'map')?.click();
+            bpsToast('Click the map point matching your GPS coordinates.');
             return cleanup;
+        },
+        surveyCanStart() {
+            if (layoutSavePending) throw new Error('Wait for the current floor-plan save to finish.');
+            if (savebuttondiv.contains(saveButton)) throw new Error('Save Floor Plan before starting the phone survey.');
+            if (!mapReady() || anyLayoutToolActive()) throw new Error('Open a saved map and finish the map editing tool first.');
+            return true;
+        },
+        surveySaved(candidate, response, uiContext) {
+            // Merge only the confirmed coordinate change; retain unrelated drafts.
+            const committedRevision = globalThis.BPSGPS.surveyLayoutRevision(response, layoutRevision);
+            if (!globalThis.BPSGPS.mergeSurveyPosition(finalcords, candidate, response.position, uiContext, gpsEditorContext())) {
+                throw new Error('Position saved; your newer receiver or alignment edit was retained. Reload after resolving that edit to see the saved position.');
+            }
+            layoutRevision = committedRevision;
+            gpsUI?.refresh();
+            if (mapReady()) redrawAll();
         },
         getTarget(value) {
             const floor = currentFloor();
@@ -7335,6 +7397,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         },
     });
 
+    if (globalThis.BPSGroundTruth) truthUI = globalThis.BPSGroundTruth.init(bpsFetch, {
+        getTarget: () => pollTrackActive ? activeDevice : null,
+        validate() {
+            snapshotLocationTools.validate();
+            if (!pollTrackActive) throw new Error('Start live tracking before marking an actual location.');
+            if (historyOn() && !historyState.live) throw new Error('Return the position history to Live before marking a location.');
+        },
+        pick: (done, cancelled) => snapshotLocationTools.pick(done, cancelled, false),
+        clearPoint: () => snapshotLocationTools.clearPoint(),
+        confirmClear: () => bpsConfirm('Clear every saved actual-location mark and its BLE snapshot?',
+            {confirmText: 'Clear marks', danger: true}),
+    });
     if (globalThis.BPSBermudaCalibration) globalThis.BPSBermudaCalibration.init(bpsFetch);
     if (globalThis.BPSDiagnostics) globalThis.BPSDiagnostics.init(bpsFetch, () => {
         const keys = ['outdoor_tracking', 'tracker_groups', 'tracker_height', 'tracker_heights', 'tracker_hardware',

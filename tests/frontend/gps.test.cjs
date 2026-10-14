@@ -9,6 +9,56 @@ const near = (actual, expected, tolerance = 1e-6) => assert.ok(Math.abs(actual-e
 const samples = (x, y, accuracy = 1, source = 'browser') => [at(x, y, accuracy, now-30000, source), at(x, y, accuracy, now, source)];
 const anchors = () => [[0, 0], [30, 0], [0, 30]].map(([x, y]) => ({...at(x, y, 1), x: 200+x*20, y: 150+y*20, label: 'Synthetic anchor'}));
 
+test('survey revisions advance only for known coordinate changes or an already loaded current layout', () => {
+    const before = 'a'.repeat(64), after = 'b'.repeat(64), external = 'c'.repeat(64);
+    const response = {previous_layout_revision: before, layout_revision: after};
+    assert.equal(gps.surveyLayoutRevision(response, before), after);
+    assert.equal(gps.surveyLayoutRevision(response, after), after);
+    assert.throws(() => gps.surveyLayoutRevision(response, external), /changed elsewhere/);
+    assert.throws(() => gps.surveyLayoutRevision({...response, previous_layout_revision: null}, null), /changed elsewhere/);
+    assert.equal(gps.surveyLayoutRevision({}, before), before);
+});
+
+function mergeFixture() {
+    const layout = {floor: [{name: 'Yard', scale: 20, georeference: {version: 1, anchors: anchors()},
+        receivers: [{entity_id: 'proxy', scanner_mac: 'aa:bb:cc:dd:ee:ff', scanner_config_entry_id: 'instance',
+            cords: {x: 100, y: 100}, height: 1.5}, {entity_id: 'other', cords: {x: 500, y: 100}}]}]};
+    const context = () => JSON.stringify(['Yard', 'Yard', '/map.svg', 2000, 1000, layout.floor[0]]);
+    return {layout, context, target: {floor: 'Yard', receiver: 'proxy'}, before: context()};
+}
+
+test('confirmed survey coordinates merge with unrelated draft edits and survive the next full save', () => {
+    const f = mergeFixture();
+    f.layout.floor[0].receivers[0].height = 2;
+    f.layout.floor[0].receivers[1].cords.x = 550;
+    assert.equal(gps.mergeSurveyPosition(f.layout, f.target, {x: 300, y: 300}, f.before, f.context()), true);
+    const nextSave = JSON.parse(JSON.stringify(f.layout));
+    assert.deepEqual(nextSave.floor[0].receivers[0].cords, {x: 300, y: 300});
+    assert.equal(nextSave.floor[0].receivers[0].height, 2);
+    assert.equal(nextSave.floor[0].receivers[1].cords.x, 550);
+});
+
+test('a newer target position, identity or alignment edit is retained instead of overwritten', () => {
+    for (const change of [f => f.layout.floor[0].receivers[0].cords.x = 150,
+        f => f.layout.floor[0].receivers[0].scanner_mac = 'aa:bb:cc:dd:ee:00',
+        f => f.layout.floor[0].scale = 10,
+        f => f.layout.floor[0].georeference.anchors[0].x += 20]) {
+        const f = mergeFixture(); change(f);
+        const expected = JSON.stringify(f.layout);
+        assert.equal(gps.mergeSurveyPosition(f.layout, f.target, {x: 300, y: 300}, f.before, f.context()), false);
+        assert.equal(JSON.stringify(f.layout), expected);
+    }
+});
+
+test('navigating to another floor during verification still merges the committed target into the next save', () => {
+    const f = mergeFixture();
+    const other = {name: 'Other floor', scale: 10, receivers: []};
+    f.layout.floor.push(other);
+    const after = JSON.stringify(['Other floor', 'Other floor', '/other.svg', 500, 500, other]);
+    assert.equal(gps.mergeSurveyPosition(f.layout, f.target, {x: 300, y: 300}, f.before, after), true);
+    assert.deepEqual(f.layout.floor[0].receivers[0].cords, {x: 300, y: 300});
+});
+
 test('GPS similarity fit handles north-down pixels, rotation, translation and independent residual', () => {
     const a = anchors();
     const theta = .7, c = Math.cos(theta), s = Math.sin(theta);
@@ -117,7 +167,7 @@ function ui() {
         const events = new Map();
         return {value: '', children: [], disabled: false, validity: {}, textContent: '',
             get options() {return this.children;}, appendChild(e) {this.children.push(e);}, replaceChildren(...rows) {this.children = rows;},
-            addEventListener(name, f) {events.set(name, f);}, fire(name) {return events.get(name)?.();}};
+            addEventListener(name, f) {events.set(name, f);}, fire(name, event) {return events.get(name)?.(event);}};
     }
     const document = {getElementById(id) {if (!ids.has(id)) ids.set(id, element()); return ids.get(id);}, createElement: element};
     document.getElementById('gpsPhone').value = '';
@@ -142,7 +192,7 @@ function ui() {
         clock: ms => {clock += ms;}, currentTime: () => clock, tick: async () => {for (const cb of [...intervals.values()]) await cb();},
         replaceFloor: () => {floor = {...floor, name: 'Other synthetic floor'};}, editFloor: () => {floor.receivers[0].cords.x += 1;},
         changeTarget: () => {targetRevision++;}, point: p => pointCallback?.(p), unload: () => windowEvents.get('pagehide')(),
-        response: rows => {response = {locations: rows};}, defer: promise => {deferred = promise;}};
+        response: rows => {response = {locations: rows};}, defer: promise => {deferred = promise;}, floor: () => floor};
 }
 
 test('browser permissions start only on explicit capture and stop clears watches/timers', () => {
@@ -223,4 +273,42 @@ test('manual anchor staging is bounded and independent of floor scale/receiver p
     p.click('gpsAddAnchor'); assert.match(p.el('gpsStatus').textContent, /staged/); assert.equal(p.staged.length, 0);
     p.click('gpsPickPoint'); p.point({x: 20, y: 20}); p.el('gpsLatitude').value = ''; p.click('gpsAddAnchor');
     assert.match(p.el('gpsStatus').textContent, /Enter GPS/);
+});
+
+for (const accuracy of [0, 2]) test(`desktop map-point picker accepts anchor accuracy ${accuracy}`, () => {
+    const p = ui(), location = at(10, 10);
+    p.click('gpsPickPoint'); p.point({x: 400, y: 350});
+    assert.match(p.el('gpsMapPoint').textContent, /400.0, 350.0/);
+    p.el('gpsLatitude').value = String(location.latitude); p.el('gpsLongitude').value = String(location.longitude);
+    p.el('gpsAccuracy').value = String(accuracy); p.el('gpsAnchorLabel').value = 'Synthetic measured corner';
+    p.click('gpsAddAnchor');
+    assert.match(p.el('gpsStatus').textContent, /anchor staged/);
+    assert.equal(p.floor().georeference.anchors.length, 4);
+    assert.equal(p.floor().georeference.anchors[3].accuracy_m, accuracy);
+    assert.deepEqual(p.floor().receivers[0].cords, {x: 100, y: 100});
+});
+
+test('desktop anchor errors identify the invalid coordinate field rather than blaming valid accuracy', () => {
+    const p = ui(); p.click('gpsPickPoint'); p.point({x: 400, y: 350});
+    p.el('gpsLatitude').value = '100'; p.el('gpsLongitude').value = '20'; p.el('gpsAccuracy').value = '2';
+    p.click('gpsAddAnchor'); assert.match(p.el('gpsStatus').textContent, /latitude between -85 and 85/);
+    p.el('gpsLatitude').value = '10'; p.el('gpsLongitude').value = '200';
+    p.click('gpsAddAnchor'); assert.match(p.el('gpsStatus').textContent, /longitude between -180 and 180/);
+    p.el('gpsLongitude').value = '20'; p.el('gpsAccuracy').value = '-1';
+    p.click('gpsAddAnchor'); assert.match(p.el('gpsStatus').textContent, /accuracy in metres between 0 and 1000/);
+});
+
+test('desktop coordinate-pair paste fills latitude and longitude safely', () => {
+    const p = ui(); let prevented = false;
+    p.el('gpsLatitude').fire('paste', {clipboardData: {getData: () => '10.12345, -20.54321'}, preventDefault: () => {prevented = true;}});
+    assert.equal(prevented, true); assert.equal(p.el('gpsLatitude').value, '10.12345'); assert.equal(p.el('gpsLongitude').value, '-20.54321');
+    assert.equal(gps.parseCoordinates('javascript:alert(1)'), null); assert.equal(gps.parseCoordinates('100, 20'), null);
+});
+
+test('manual HA polling remains single-flight while an earlier GPS response is pending', async () => {
+    const p = ui(); let resolve; p.el('gpsPhone').value = 'device_tracker.synthetic_phone';
+    p.defer(new Promise(r => {resolve = r;})); p.click('gpsCapture');
+    await p.tick(); await p.tick(); assert.equal(p.requests.length, 1);
+    resolve({ok: true, json: async () => ({locations: []})}); await new Promise(r => setImmediate(r));
+    p.click('gpsCancel'); assert.equal(p.intervals.size, 0);
 });

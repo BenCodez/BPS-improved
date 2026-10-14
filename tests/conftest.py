@@ -101,10 +101,11 @@ class _Response:
     def __init__(self, status=200, text="", **k):
         self.status = status
         self.body_text = text
+        self.headers = k.get("headers", {})
 
 
-def _json_response(data=None, status=200):
-    r = _Response(status=status)
+def _json_response(data=None, status=200, **kwargs):
+    r = _Response(status=status, **kwargs)
     r.json_body = data
     return r
 

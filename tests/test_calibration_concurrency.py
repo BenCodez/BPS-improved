@@ -77,6 +77,8 @@ def test_concurrent_manual_api_solve_is_rejected_without_queueing(hass):
 
         async def executor(func, *args):
             nonlocal jobs
+            if func is not C.solve:
+                return func(*args)
             jobs += 1
             started.set()
             await release.wait()
@@ -111,6 +113,8 @@ def test_pending_manual_result_is_discarded_after_state_changes(hass, change):
         started, release = asyncio.Event(), asyncio.Event()
 
         async def executor(func, *args):
+            if func is not C.solve:
+                return func(*args)
             started.set()
             await release.wait()
             return func(*args)
@@ -154,6 +158,8 @@ def test_manual_executor_receives_detached_samples_and_receiver_records(hass):
         captured = {}
 
         async def executor(func, *args):
+            if func is not C.solve:
+                return func(*args)
             snapshot, floor_name = args
             captured.update(copy.deepcopy(snapshot))
             assert snapshot["receivers"] is not cal["receivers"]
@@ -232,6 +238,8 @@ def test_cancelled_http_request_retains_admission_until_private_worker_finishes(
 
         async def executor(func, *args):
             nonlocal jobs
+            if func is not C.solve:
+                return func(*args)
             jobs += 1
             return await asyncio.to_thread(worker, func, args)
 
