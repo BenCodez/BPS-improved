@@ -129,6 +129,33 @@ def test_silent_store_write_failure_does_not_advance_layout_cache(tmp_path):
     run(check())
 
 
+def test_setup_reload_recovers_unverified_disk_without_trusting_pending_store_data(tmp_path):
+    async def check():
+        hass = make_hass(tmp_path)
+        old = {"floor": [{"name": "Synthetic old floor"}]}
+        changed = {"floor": [{"name": "Synthetic committed floor"}]}
+        await st.save_bps_data(hass, old)
+        hass._store_raise_on_load.add("bps")
+        with pytest.raises(ValueError, match="corrupt store"):
+            await st.save_bps_data(hass, changed)
+        assert st.layout_needs_reload(hass) and st.get_bps_data(hass) == old
+        with pytest.raises(OSError, match="could not be reloaded"):
+            await st.load_bps_data(hass)
+        assert st.layout_needs_reload(hass) and st.get_bps_data(hass) == old
+        hass._store_raise_on_load.clear()
+
+        async def pending():
+            return old
+
+        st._layout_store(hass).async_load = pending
+        await st.load_bps_data(hass)
+        assert st.get_bps_data(hass) == changed and not st.layout_needs_reload(hass)
+        await st.save_bps_data(hass, {"floor": []})
+        assert st.get_bps_data(hass) == {"floor": []}
+
+    run(check())
+
+
 # --- calibration state ------------------------------------------------------
 def test_calib_state_roundtrip(tmp_path):
     hass = make_hass(tmp_path)

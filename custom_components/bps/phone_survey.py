@@ -21,6 +21,7 @@ from .gps_locations import ENTITY_ID, gps_locations, validate_georeference, _num
 from .receiver_sources import ReceiverSources
 from .storage import (
     BPS_FILE_LOCK,
+    assert_layout_writable,
     finish_persistence,
     get_bps_data,
     get_bps_data_for_edit,
@@ -808,6 +809,7 @@ class PhoneSurvey:
         if candidate is None:
             raise ValueError("Phone survey candidate is unavailable")
         async with BPS_FILE_LOCK:
+            assert_layout_writable(self.hass)
             layout = get_bps_data_for_edit(self.hass)
             floor = _floor(layout, candidate["floor"])
             if (

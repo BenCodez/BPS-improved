@@ -266,3 +266,103 @@ def test_disconnect_during_readback_retains_commit_locks_and_rejects_stale_clien
             assert f.manager.candidates[0]["status"] == "verified"
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("writer", ["survey", "full_save"])
+def test_failed_readback_blocks_writers_until_fresh_reload_then_rejects_old_revision(
+    tmp_path, monkeypatch, writer
+):
+    async def check():
+        f = Fixture()
+        _, result = await f.capture()
+        candidate = result["candidate"]
+        f.hass.config.path = lambda _path: str(tmp_path)
+        old = copy.deepcopy(get_bps_data(f.hass))
+        await save_bps_data(f.hass, old)
+        baseline = layout_revision(old)
+        entered, release = asyncio.Event(), asyncio.Event()
+        actual_store = storage.Store
+
+        class FailedReadback(actual_store):
+            async def async_load(self):
+                if self._key == "bps":
+                    entered.set()
+                    await release.wait()
+                    raise OSError("synthetic readback unavailable after disk commit")
+                return await super().async_load()
+
+        monkeypatch.setattr(storage, "Store", FailedReadback)
+        body = {"action": "verify", "candidate_id": candidate["id"]}
+        if writer == "survey":
+            operation = f.manager.action(OWNER, body)
+        else:
+            changed = copy.deepcopy(old)
+            changed["floor"][0]["receivers"][0]["cords"] = candidate["position"]
+            operation = bps.BPSSaveAPIText().post(request(f.hass, changed, baseline))
+        saving = asyncio.create_task(operation)
+        await entered.wait()
+        stale = asyncio.create_task(
+            bps.BPSSaveAPIText().post(
+                request(f.hass, old, baseline, remove="protected.png")
+            )
+        )
+        image = tmp_path / "protected.png"
+        image.write_bytes(b"synthetic retained map")
+        await asyncio.sleep(0)
+        assert not stale.done()
+        release.set()
+        if writer == "survey":
+            with pytest.raises(OSError, match="readback unavailable"):
+                await saving
+        else:
+            assert (await saving).status == 503
+        assert (await stale).status == 503
+        assert storage.layout_needs_reload(f.hass)
+        assert get_bps_data(f.hass) == old
+        committed = copy.deepcopy(f.hass._store_backing["bps"])
+        assert committed["floor"][0]["receivers"][0]["cords"] == candidate["position"]
+        assert image.exists()
+        # Both the common calibration writer and verification are guarded.
+        writes = len(f.hass._store_saves)
+        with pytest.raises(OSError, match="Reload the BPS page"):
+            await save_bps_data(f.hass, old)
+        with pytest.raises(OSError, match="Reload the BPS page"):
+            await f.manager.action(OWNER, body)
+        assert len(f.hass._store_saves) == writes
+        # Failed reload preserves the old cache and the write barrier.
+        unreadable = await bps.BPSReadAPIText().get(NS(app={"hass": f.hass}))
+        assert unreadable.status == 503 and storage.layout_needs_reload(f.hass)
+        assert get_bps_data(f.hass) == old
+        # Recovery reads a new Store, not the old instance's pending load.
+        async def misleading_pending_load():
+            return copy.deepcopy(old)
+
+        storage._layout_store(f.hass).async_load = misleading_pending_load
+        monkeypatch.setattr(storage, "Store", actual_store)
+        monkeypatch.setattr(
+            bps, "_scanner_diagnostics", lambda *_: {"matching": {"options": []}}
+        )
+        refreshed = []
+        monkeypatch.setattr(
+            bps, "refresh_receivers_from_coords",
+            lambda _hass, coordinates: refreshed.append(json.loads(coordinates)),
+        )
+        recovered = await bps.BPSReadAPIText().get(NS(app={"hass": f.hass}))
+        assert recovered.status == 200
+        assert json.loads(recovered.json_body["coordinates"]) == committed
+        assert recovered.json_body["layout_revision"] == layout_revision(committed)
+        assert not storage.layout_needs_reload(f.hass)
+        assert get_bps_data(f.hass) == committed and refreshed == [committed]
+        assert (await bps.BPSSaveAPIText().post(request(f.hass, old, baseline))).status == 409
+        if writer == "survey":
+            audit = await f.manager.action(OWNER, body)
+            assert audit["candidate"]["status"] == "verified"
+            assert get_bps_data(f.hass) == committed
+        changed = copy.deepcopy(committed)
+        changed["floor"][0]["receivers"][0]["height"] = 2
+        fresh = await bps.BPSSaveAPIText().post(
+            request(f.hass, changed, layout_revision(committed))
+        )
+        assert fresh.status == 200 and get_bps_data(f.hass) == changed
+
+    asyncio.run(check())

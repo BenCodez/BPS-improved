@@ -44,12 +44,15 @@ from .calibration import (
 )
 from .storage import (
     BPS_FILE_LOCK,
+    assert_layout_writable,
     finish_persistence,
     get_bps_data,
     get_bps_data_for_edit,
     layout_revision,
+    layout_needs_reload,
     load_bps_data,
     migrate_legacy,
+    reload_unverified_layout,
     save_bps_data,
 )
 from .const import ACCURACY_ENTITY_ID
@@ -2934,6 +2937,7 @@ class BPSSaveAPIText(HomeAssistantView):
             # Serialized with the calibration writers so read-modify-write
             # cycles on the layout cannot interleave.
             async with BPS_FILE_LOCK:
+                assert_layout_writable(hass)
                 if data.get("layout_revision") != layout_revision(get_bps_data(hass)):
                     return web.Response(status=409, text="Saved layout changed or its revision is missing. Reload the page before saving; retain any unsaved edits separately.")
                 async def commit():
@@ -2953,6 +2957,8 @@ class BPSSaveAPIText(HomeAssistantView):
 
         except Exception as e:
             _LOGGER.error(f"Failed to save coordinates: {e}")
+            if layout_needs_reload(hass):
+                return web.Response(status=503, text="Saved layout could not be verified. Reload the BPS page before making changes.")
             return web.Response(status=500, text="Failed to save coordinates")
 
     async def _write_save(self, hass, maps_path, data, coords_obj):
@@ -2966,6 +2972,7 @@ class BPSSaveAPIText(HomeAssistantView):
         write+delete). The layout goes to the Store (atomic); only the map
         images live under maps_path.
         """
+        assert_layout_writable(hass)
         error = await hass.async_add_executor_job(validate_georeference, coords_obj)
         if error:
             return web.Response(status=400, text=error)
@@ -3108,6 +3115,11 @@ class BPSReadAPIText(HomeAssistantView):
         offline_receivers = list(hass.data.get(DOMAIN, {}).get("rl_offline", []))
 
         try:
+            async with BPS_FILE_LOCK:
+                async def recover():
+                    if await reload_unverified_layout(hass):
+                        refresh_receivers_from_coords(hass, json.dumps(get_bps_data(hass)))
+                await finish_persistence(recover())
             # The layout now lives in the Store; a fresh install has none, and
             # the frontend's `if (data.coordinates)` guard expects "" (not "[]")
             # in that case so it never JSON.parses an empty layout.
@@ -3131,6 +3143,8 @@ class BPSReadAPIText(HomeAssistantView):
 
         except Exception as e:
             _LOGGER.error(f"Failed to read coordinates: {e}")
+            if layout_needs_reload(hass):
+                return web.Response(status=503, text="Saved layout could not be reloaded. Check Home Assistant storage and refresh the BPS page again.")
             return web.Response(status=500, text="Failed to read coordinates")
 
 def _diagnostic_inventory(hass):

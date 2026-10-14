@@ -83,6 +83,32 @@ def layout_revision(layout) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def layout_needs_reload(hass) -> bool:
+    """A failed write/readback may leave disk newer than the live cache."""
+    return _bucket(hass).get("layout_needs_reload", False)
+
+
+def assert_layout_writable(hass):
+    """Reject every layout writer while its durable revision is unknown."""
+    if layout_needs_reload(hass):
+        raise OSError("Saved layout could not be verified. Reload the BPS page before making changes.")
+
+
+async def reload_unverified_layout(hass):
+    """Reconcile from a fresh Store under BPS_FILE_LOCK; never trust pending data."""
+    if not layout_needs_reload(hass):
+        return False
+    try:
+        data = await Store(hass, STORAGE_VERSION, STORAGE_KEY_LAYOUT).async_load()
+        if not isinstance(data, (dict, list)):
+            raise ValueError("Saved layout is missing or invalid")
+    except Exception as exc:
+        raise OSError("Saved layout could not be reloaded. Check Home Assistant storage and refresh the BPS page again.") from exc
+    _bucket(hass)["layout"] = data
+    _bucket(hass).pop("layout_needs_reload", None)
+    return True
+
+
 async def save_verified_store(hass, store, data, *, key, version=1):
     """Confirm disk contents: HA logs some save failures instead of raising.
 
@@ -139,6 +165,10 @@ async def load_bps_data(hass):
     A corrupt/unreadable store must not abort setup — the old flat-file reader
     tolerated bad JSON and ran with an empty layout, so keep that resilience.
     """
+    if layout_needs_reload(hass):
+        async with BPS_FILE_LOCK:
+            await finish_persistence(reload_unverified_layout(hass))
+        return get_bps_data(hass)
     try:
         data = await _layout_store(hass).async_load()
     except Exception as e:
@@ -164,8 +194,11 @@ async def save_bps_data(hass, data) -> None:
     restart rather than running ahead of disk.
     """
     async def commit():
+        assert_layout_writable(hass)
+        _bucket(hass)["layout_needs_reload"] = True
         await save_verified_store(hass, _layout_store(hass), data, key=STORAGE_KEY_LAYOUT, version=STORAGE_VERSION)
         _bucket(hass)["layout"] = data
+        _bucket(hass).pop("layout_needs_reload", None)
     await finish_persistence(commit())
 
 

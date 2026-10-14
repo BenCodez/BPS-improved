@@ -2875,6 +2875,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         
             if (!response.ok) {
                 console.error("Failed to fetch BPS data:", response.statusText); // Handle error status
+                if (response.status === 503) bpsToast('Saved layout could not be reloaded. Check Home Assistant storage and refresh this page again.');
                 return;
             }
         
@@ -6484,7 +6485,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 new_floor = false;
                 return true;
             } else {
-                bpsToast(response.status === 409 ? 'The saved layout changed elsewhere. Reload the page before saving; retain any unsaved edits separately.' : 'Error saving data!');
+                bpsToast(response.status === 409 ? 'The saved layout changed elsewhere. Reload the page before saving; retain any unsaved edits separately.' : response.status === 503 ? 'Saved layout could not be verified. Reload the page before making changes; retain any unsaved edits separately.' : 'Error saving data!');
             }
         } catch (error) {
             console.error('Error saving data:', error);

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const vm = require('node:vm');
 
-function productionSave({warning = null} = {}) {
+function productionSave({warning = null, status = 200} = {}) {
     const source = readFileSync('custom_components/bps/frontend/script.js', 'utf8');
     const start = source.indexOf('    async function savedata(');
     const end = source.indexOf('    // =================================================================', start);
@@ -15,7 +15,7 @@ function productionSave({warning = null} = {}) {
         myScaleVal: 20, removefile: false, new_floor: false, finalcords: {floor: []},
         removeListeners() {}, FormData: class {constructor() {this.values = new Map();} append(k, v) {this.values.set(k, v);}}, saveButton: {remove() {}},
         bpsToast: value => messages.push(value), console: {error() {}},
-        bpsFetch: async (url, options) => {requests.push(options.body); await pending; if (fail) throw new Error('synthetic failure'); return {ok: true, headers: {get: name => name === 'X-BPS-Layout-Revision' ? 'b'.repeat(64) : warning}};},
+        bpsFetch: async (url, options) => {requests.push(options.body); await pending; if (fail) throw new Error('synthetic failure'); return {ok: status === 200, status, headers: {get: name => name === 'X-BPS-Layout-Revision' ? 'b'.repeat(64) : warning}};},
         savebuttondiv: {contains: () => false}, mapReady: () => true, anyLayoutToolActive: () => false});
     vm.runInContext(source.slice(start, end) + '\nfunction canSurvey() {' + method + '\n}', state);
     return {state, requests, messages, release, fail() {fail = true;}};
@@ -59,4 +59,12 @@ test('committed layout cleanup warnings are visible and retain the revision for 
     assert.equal(p.state.layoutRevision, 'b'.repeat(64));
     assert.equal(await p.state.savedata(), true);
     assert.equal(p.requests[1].values.get('layout_revision'), 'b'.repeat(64));
+});
+
+test('unverified storage state tells the user to reload and retains the previous revision', async () => {
+    const p = productionSave({status: 503});
+    const save = p.state.savedata(); p.release(); await save;
+    assert.match(p.messages[0], /Saved layout could not be verified.*Reload the page/);
+    assert.equal(p.state.layoutRevision, 'a'.repeat(64));
+    assert.equal(p.state.layoutSavePending, false);
 });

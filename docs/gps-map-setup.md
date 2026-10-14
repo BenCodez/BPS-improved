@@ -111,6 +111,10 @@ are still current. Shared survey capacity rejects overflow without evicting othe
 users' records; remove one of your retained records to free space.
 Failure to remove an obsolete map file after a successful layout commit returns
 the new revision with a cleanup warning, allowing subsequent edits to save.
+If storage write verification fails, all layout writers pause until a successful
+page refresh reloads the durable layout and calibration geometry. A failed
+reload retains the write barrier; resolve the Home Assistant storage problem
+and refresh again. Retain unsaved edits separately before refreshing.
 
 The optional **Request fresh phone GPS** toggle uses your explicitly selected
 Companion App notification service to send `request_location_update`, at most once
