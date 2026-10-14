@@ -313,3 +313,54 @@ def test_cancelled_http_caller_does_not_cancel_save_or_open_another_slot(hass):
         assert api.job is None and len(history.records) == 1
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("download", [False, True])
+def test_disconnected_history_get_retains_expiry_lock_before_new_mark(hass, monkeypatch, download):
+    async def scenario():
+        expired = record_at("expiredpoint123456", 100)
+        hass._store_backing[gt.STORAGE_KEY] = {"records": [expired], "evicted": 0}
+        now = 100 + gt.MAX_AGE_S + 1
+        monkeypatch.setattr(gt.time, "time", lambda: now)
+        history = gt.get_history(hass)
+        await history.load()
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_save = history.store.async_save
+        calls = 0
+
+        async def delayed_expiry(data):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+            await original_save(data)
+
+        history.store.async_save = delayed_expiry
+        api = gt.BPSGroundTruthAPI(lambda *_: {**snapshot(), "time": now})
+        reading = asyncio.create_task(api.get(request(hass, query={"download": "1"} if download else {})))
+        await entered.wait()
+        reading.cancel()
+        await asyncio.sleep(0)
+        assert history.lock.locked() and not reading.done()
+        marking = asyncio.create_task(api.post(request(hass, mark_body("newpoint123456789"))))
+        await asyncio.sleep(0)
+        assert not marking.done()
+        reading.cancel()
+        await asyncio.sleep(0)
+        assert history.lock.locked() and not reading.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        marked = await marking
+        assert marked.status == 200 and marked.json_body["saved"]["id"] == "newpoint123456789"
+        assert history.evicted == 1 and len(history.records) == 1
+        expected = {"records": history.records, "evicted": 1}
+        assert hass._store_backing[gt.STORAGE_KEY] == expected
+        assert not history.lock.locked()
+        hass.data["bps"].pop("_ground_truth")
+        restarted = await api.get(request(hass, query={"download": "1"}))
+        assert json.loads(restarted.body)["records"] == expected["records"]
+        assert json.loads(restarted.body)["evicted"] == 1
+
+    asyncio.run(scenario())

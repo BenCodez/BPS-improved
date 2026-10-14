@@ -10,7 +10,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.helpers.storage import Store
 
 from .diagnostics import encode, format_known_position_report
-from .storage import save_verified_store
+from .storage import finish_persistence, save_verified_store
 
 STORAGE_KEY = "bps_ground_truth"
 MAX_MARKS = 100
@@ -143,8 +143,16 @@ class GroundTruthHistory:
         if not expired:
             return
         data = {"records": records, "evicted": self.evicted + expired}
-        await save_verified_store(self.hass, self.store, data, key=STORAGE_KEY)
-        self.records, self.evicted = data["records"], data["evicted"]
+        await self.persist(data)
+
+    async def persist(self, data):
+        # Retain the caller's history lock through disk and cache publication,
+        # including GET expiry when HA cancels a disconnected HTTP handler.
+        async def commit():
+            await save_verified_store(self.hass, self.store, data, key=STORAGE_KEY)
+            self.records, self.evicted = data["records"], data["evicted"]
+
+        await finish_persistence(commit())
 
     def overview(self, now=None):
         records = self.recent(now)
@@ -164,14 +172,10 @@ class GroundTruthHistory:
         data = await self.hass.async_add_executor_job(
             bounded_records, self.recent(), len(self.records), self.evicted, record
         )
-        await save_verified_store(self.hass, self.store, data, key=STORAGE_KEY)
-        self.records, self.evicted = data["records"], data["evicted"]
+        await self.persist(data)
 
     async def clear(self):
-        await save_verified_store(
-            self.hass, self.store, {"records": [], "evicted": 0}, key=STORAGE_KEY
-        )
-        self.records, self.evicted = [], 0
+        await self.persist({"records": [], "evicted": 0})
 
 
 def get_history(hass):
