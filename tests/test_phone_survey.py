@@ -561,6 +561,43 @@ def test_committed_position_is_reported_when_audit_save_fails():
     run(check())
 
 
+def test_removing_own_verified_record_frees_storage_without_moving_receiver(
+    monkeypatch,
+):
+    import json
+
+    import bps.phone_survey as survey_module
+
+    f = Fixture()
+
+    async def check():
+        _, result = await f.capture()
+        candidate = result["candidate"]
+        await f.manager.action(
+            OWNER, {"action": "verify", "candidate_id": candidate["id"]}
+        )
+        saved_layout = copy.deepcopy(get_bps_data(f.hass))
+        retained = copy.deepcopy(f.manager.candidates)
+        size = len(json.dumps({"version": 1, "candidates": retained}).encode())
+        monkeypatch.setattr(survey_module, "MAX_STORE_BYTES", size + 100)
+        additional = {**retained[0], "id": "synthetic_additional_record"}
+        with pytest.raises(ValueError, match="storage is full"):
+            await f.manager._persist([*retained, additional])
+        await f.manager.action(
+            "another_user", {"action": "remove", "candidate_id": candidate["id"]}
+        )
+        assert f.manager.candidates == retained
+        await f.manager.action(
+            OWNER, {"action": "remove", "candidate_id": candidate["id"]}
+        )
+        assert f.manager.candidates == []
+        assert get_bps_data(f.hass) == saved_layout
+        await f.manager._persist([additional])
+        assert f.manager.candidates == [additional]
+
+    run(check())
+
+
 @pytest.mark.parametrize("restart", [False, True])
 def test_retry_recovers_a_committed_move_after_verification_audit_is_cancelled(restart):
     f = Fixture()

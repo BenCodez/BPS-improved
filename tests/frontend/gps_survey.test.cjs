@@ -61,6 +61,27 @@ test('verification remains observable until the committed response is merged', a
     assert.equal(p.api.isVerifying(), false);
 });
 
+test('verified survey records can be removed without changing saved receiver coordinates', async () => {
+    const p = ui(); const c = {...candidate(), status: 'verified'};
+    p.candidates([c]); await p.click('gpsSurveyRefresh');
+    const remove = p.el('gpsSurveyCandidates').children[0].children[1];
+    assert.equal(remove.textContent, 'Remove survey record');
+    assert.match(remove.title, /Keeps the saved receiver position/);
+    await remove.fire('click');
+    assert.deepEqual(p.requests.at(-1), {action: 'remove', candidate_id: c.id});
+    assert.equal(p.api.snapshot().candidate_count, 0); assert.equal(p.saveCalls.length, 0);
+});
+
+test('records from a removed floor remain removable and cannot be verified on another floor', async () => {
+    const p = ui(); const c = {...candidate(), floor: 'Removed floor'};
+    p.candidates([c]); await p.click('gpsSurveyRefresh');
+    const row = p.el('gpsSurveyCandidates').children[0];
+    assert.match(row.children[0].textContent, /Removed floor/);
+    assert.equal(row.children[1].disabled, true);
+    await row.children[1].fire('click'); assert.equal(p.requests.filter(r => r?.action === 'verify').length, 0);
+    await row.children[2].fire('click'); assert.equal(p.api.snapshot().candidate_count, 0);
+});
+
 test('lost verification response blocks full saves until an idempotent retry merges the saved coordinates', async () => {
     const p = ui(); p.candidates([candidate()]); await p.click('gpsSurveyRefresh');
     const fetch = p.hooks.fetch; let committed = false;

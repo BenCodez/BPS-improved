@@ -84,6 +84,9 @@ Each candidate shows a proposed map position and accuracy circle. Review it and
 press **Verify and save** to update only that receiver's coordinates. Other saved
 settings and radio calibration are retained. Pending candidates remain in private
 Home Assistant storage so you can verify several stations after a walk.
+Use **Remove survey record** to free space occupied by an old verified survey;
+its receiver position stays saved. Records from other or removed floors remain
+listed for cleanup, while verification requires opening the candidate's floor.
 
 If the verification response is lost, full layout saves pause so they cannot undo
 a receiver move that may already be saved. Use **Retry verification** to confirm

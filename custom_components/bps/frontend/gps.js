@@ -185,17 +185,20 @@
                 retry.disabled = verifying; retry.addEventListener('click', () => verifyCandidate(unconfirmed));
                 row.appendChild(details); row.appendChild(retry); el('gpsSurveyCandidates').appendChild(row);
             }
-            candidates.filter(c => c.floor === hooks.getFloor()?.name).forEach(c => {
+            // Records from removed or renamed floors must remain removable too.
+            candidates.forEach(c => {
                 const row = doc.createElement('div'), details = doc.createElement('p');
                 const gps = c.gps || {}, position = c.position || {};
-                details.textContent = `${c.receiver}: averaged ${gps.sample_count || 0} GPS fixes · reported accuracy ${Number(gps.reported_accuracy_m).toFixed(1)} m · spread ${Number(gps.spread_m).toFixed(1)} m · map uncertainty ${Number(c.map_accuracy_m).toFixed(1)} m · ${c.status === 'verified' ? 'verified and saved' : 'awaiting verification'}.`;
+                const onFloor = c.floor === hooks.getFloor()?.name;
+                details.textContent = `${c.receiver} (${c.floor}): averaged ${gps.sample_count || 0} GPS fixes · reported accuracy ${Number(gps.reported_accuracy_m).toFixed(1)} m · spread ${Number(gps.spread_m).toFixed(1)} m · map uncertainty ${Number(c.map_accuracy_m).toFixed(1)} m · ${c.status === 'verified' ? 'verified and saved' : 'awaiting verification'}.`;
                 row.appendChild(details);
                 if (c.status !== 'verified') {
                     const verify = doc.createElement('button'); verify.type = 'button';
                     verify.className = 'bps-btn bps-btn-primary'; verify.textContent = `Verify and save ${c.receiver}`;
-                    verify.disabled = verifying || !!unconfirmed;
+                    verify.disabled = verifying || !!unconfirmed || !onFloor;
+                    if (!onFloor) verify.title = 'Open this floor before verifying its receiver position.';
                     verify.addEventListener('click', async () => {
-                        if (verifying || unconfirmed) return;
+                        if (verifying || unconfirmed || c.floor !== hooks.getFloor()?.name) return;
                         const bounds = hooks.getBounds();
                         if (!number(position.x, 0, bounds.width) || !number(position.y, 0, bounds.height)) {
                             status('GPS candidate is outside the current map. Review saved anchors before verifying.'); return;
@@ -204,16 +207,17 @@
                         catch (error) {status(error.message); return;}
                         await verifyCandidate({candidate: c, context: hooks.getContext()});
                     }); row.appendChild(verify);
-                    const remove = doc.createElement('button'); remove.type = 'button'; remove.textContent = 'Discard candidate';
-                    remove.className = 'bps-btn bps-btn-outline';
-                    remove.disabled = verifying || !!unconfirmed;
-                    remove.addEventListener('click', async () => {
-                        if (verifying || unconfirmed) return;
-                        try {await json({action: 'remove', candidate_id: c.id}); candidates = candidates.filter(row => row.id !== c.id); render();}
-                        catch (error) {status(error.message);}
-                    }); row.appendChild(remove);
                     details.textContent += ` Proposed map position ${Number(position.x).toFixed(1)}, ${Number(position.y).toFixed(1)} px. Check it against the real receiver before verifying.`;
                 }
+                const remove = doc.createElement('button'); remove.type = 'button';
+                remove.textContent = c.status === 'verified' ? 'Remove survey record' : 'Discard candidate';
+                if (c.status === 'verified') remove.title = 'Keeps the saved receiver position.';
+                remove.className = 'bps-btn bps-btn-outline'; remove.disabled = verifying || !!unconfirmed;
+                remove.addEventListener('click', async () => {
+                    if (verifying || unconfirmed) return;
+                    try {await json({action: 'remove', candidate_id: c.id}); candidates = candidates.filter(row => row.id !== c.id); render(); hooks.redraw();}
+                    catch (error) {status(error.message);}
+                }); row.appendChild(remove);
                 el('gpsSurveyCandidates').appendChild(row);
             });
         }
