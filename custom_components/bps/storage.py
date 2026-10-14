@@ -100,12 +100,17 @@ async def reload_unverified_layout(hass):
         return False
     try:
         data = await Store(hass, STORAGE_VERSION, STORAGE_KEY_LAYOUT).async_load()
+        if data is None and _bucket(hass).get("layout_reload_allows_missing"):
+            # A failed first write may never create a Store. Recover only the
+            # original empty state; missing established layouts stay guarded.
+            data = []
         if not isinstance(data, (dict, list)):
             raise ValueError("Saved layout is missing or invalid")
     except Exception as exc:
         raise OSError("Saved layout could not be reloaded. Check Home Assistant storage and refresh the BPS page again.") from exc
     _bucket(hass)["layout"] = data
     _bucket(hass).pop("layout_needs_reload", None)
+    _bucket(hass).pop("layout_reload_allows_missing", None)
     return True
 
 
@@ -195,10 +200,12 @@ async def save_bps_data(hass, data) -> None:
     """
     async def commit():
         assert_layout_writable(hass)
+        _bucket(hass)["layout_reload_allows_missing"] = get_bps_data(hass) == []
         _bucket(hass)["layout_needs_reload"] = True
         await save_verified_store(hass, _layout_store(hass), data, key=STORAGE_KEY_LAYOUT, version=STORAGE_VERSION)
         _bucket(hass)["layout"] = data
         _bucket(hass).pop("layout_needs_reload", None)
+        _bucket(hass).pop("layout_reload_allows_missing", None)
     await finish_persistence(commit())
 
 

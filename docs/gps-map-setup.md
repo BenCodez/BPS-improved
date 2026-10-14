@@ -115,6 +115,8 @@ If storage write verification fails, all layout writers pause until a successful
 page refresh reloads the durable layout and calibration geometry. A failed
 reload retains the write barrier; resolve the Home Assistant storage problem
 and refresh again. Retain unsaved edits separately before refreshing.
+After a failed first save, a missing Store can recover to the original empty
+layout, allowing a retry without restarting Home Assistant.
 
 The optional **Request fresh phone GPS** toggle uses your explicitly selected
 Companion App notification service to send `request_location_update`, at most once

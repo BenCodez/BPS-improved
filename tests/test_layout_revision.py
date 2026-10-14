@@ -366,3 +366,62 @@ def test_failed_readback_blocks_writers_until_fresh_reload_then_rejects_old_revi
         assert fresh.status == 200 and get_bps_data(f.hass) == changed
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("failure", ["raised", "silent"])
+def test_failed_first_write_recovers_empty_state_on_page_refresh(tmp_path, monkeypatch, failure):
+    async def check():
+        hass = make_hass(tmp_path)
+        hass.config.path = lambda _path: str(tmp_path)
+        layout = {"floor": [{"name": "Synthetic first floor", "receivers": []}]}
+        baseline = layout_revision(get_bps_data(hass))
+        store = storage._layout_store(hass)
+        original_save = store.async_save
+
+        async def fail(_payload):
+            if failure == "raised":
+                raise OSError("synthetic first write failure")
+
+        store.async_save = fail
+        failed = await bps.BPSSaveAPIText().post(request(hass, layout, baseline))
+        assert failed.status == 503
+        assert "bps" not in hass._store_backing
+        assert get_bps_data(hass) == [] and storage.layout_needs_reload(hass)
+        monkeypatch.setattr(
+            bps, "_scanner_diagnostics", lambda *_: {"matching": {"options": []}}
+        )
+        reloaded = await bps.BPSReadAPIText().get(NS(app={"hass": hass}))
+        assert reloaded.status == 200 and reloaded.json_body["coordinates"] == ""
+        assert reloaded.json_body["layout_revision"] == baseline
+        assert not storage.layout_needs_reload(hass)
+        store.async_save = original_save
+        retry = await bps.BPSSaveAPIText().post(request(hass, layout, baseline))
+        assert retry.status == 200
+        assert get_bps_data(hass) == hass._store_backing["bps"] == layout
+
+    asyncio.run(check())
+
+
+def test_missing_established_layout_stays_guarded(tmp_path, monkeypatch):
+    async def check():
+        hass = make_hass(tmp_path)
+        old = {"floor": [{"name": "Synthetic existing floor", "receivers": []}]}
+        await save_bps_data(hass, old)
+        store = storage._layout_store(hass)
+
+        async def lost_store(_payload):
+            hass._store_backing.pop("bps", None)
+            raise OSError("synthetic storage disappeared")
+
+        store.async_save = lost_store
+        with pytest.raises(OSError, match="storage disappeared"):
+            await save_bps_data(hass, {"floor": []})
+        assert storage.layout_needs_reload(hass)
+        with pytest.raises(OSError, match="could not be reloaded"):
+            await storage.reload_unverified_layout(hass)
+        assert storage.layout_needs_reload(hass) and get_bps_data(hass) == old
+        with pytest.raises(OSError, match="Reload"):
+            await save_bps_data(hass, old)
+        assert "bps" not in hass._store_backing
+
+    asyncio.run(check())
