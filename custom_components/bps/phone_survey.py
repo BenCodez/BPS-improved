@@ -206,7 +206,7 @@ def _fit(floor):
 def average_gps(samples, now):
     """Arithmetic mean, without claiming independent or calibrated GPS errors."""
     recent = [s for s in samples if 0 <= now - s["observed"] <= MAX_GPS_AGE_S]
-    if len(recent) < 2 or recent[-1]["observed"] - recent[0]["observed"] < 20:
+    if not recent:
         raise ValueError("Need distinct GPS fixes spanning at least 20 seconds")
     points = [_local(s, recent[0]) for s in recent]
     x, y = (sum(p[k] for p in points) / len(points) for k in (0, 1))
@@ -214,6 +214,9 @@ def average_gps(samples, now):
     accuracy = max(s["accuracy_m"] for s in recent)
     if spread > max(5, accuracy * 2):
         raise ValueError("GPS moved or jumped; stand still and capture again")
+    # Even an ineligible late source can contradict a stationary capture.
+    if len(recent) < 2 or recent[-1]["observed"] - recent[0]["observed"] < 20:
+        raise ValueError("Need distinct GPS fixes spanning at least 20 seconds")
     latitude = recent[0]["latitude"] - y / EARTH_M * 180 / math.pi
     longitude = (
         recent[0]["longitude"]

@@ -434,6 +434,41 @@ def test_movement_and_future_or_pre_capture_fixes_do_not_produce_eligible_averag
         assert "candidate" not in result and not f.manager.candidates
 
 
+@pytest.mark.parametrize("late_jump_m", [0.5, 200, 6000])
+def test_late_ha_gps_movement_vetoes_browser_capture_before_span_check(late_jump_m):
+    f = Fixture()
+    state = SimpleNamespace(
+        entity_id="device_tracker.synthetic_gps_phone",
+        state="home",
+        attributes={
+            **{k: v for k, v in point().items() if k in ("latitude", "longitude")},
+            "gps_accuracy": 1.0,
+            "source_type": "gps",
+        },
+        last_updated=datetime.fromtimestamp(NOW - 100, timezone.utc),
+    )
+    f.gps = [state]
+
+    async def check():
+        token = await f.start(gps_entity=state.entity_id)
+
+        def sample():
+            if f.now >= NOW + 20:
+                fix = point(x=5 + (late_jump_m if f.now >= NOW + 28 else 0))
+                state.attributes.update({k: fix[k] for k in ("latitude", "longitude")})
+                state.last_updated = datetime.fromtimestamp(f.now, timezone.utc)
+            return point(timestamp=f.now * 1000)
+
+        _, result = await f.capture(token, sample)
+        if late_jump_m < 1:
+            assert result["candidate"]["gps"]["source"] == "browser"
+        else:
+            assert "candidate" not in result and not f.manager.candidates
+            assert "moved or jumped" in result["status"]
+
+    run(check())
+
+
 def test_clock_skew_is_aligned_once_without_changing_original_browser_timestamps():
     f = Fixture()
 
