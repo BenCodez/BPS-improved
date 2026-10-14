@@ -120,7 +120,10 @@ def test_invalid_mark_never_writes_or_changes_tracking(hass, body):
     asyncio.run(scenario())
 
 
-def test_write_failure_retains_previous_history_and_clear_is_durable(hass):
+@pytest.mark.parametrize("silent_failure", [False, True])
+def test_write_failure_retains_previous_history_and_clear_is_durable(
+    hass, silent_failure
+):
     async def scenario():
         api = gt.BPSGroundTruthAPI(lambda *_: snapshot())
         await api.post(request(hass, mark_body()))
@@ -129,7 +132,8 @@ def test_write_failure_retains_previous_history_and_clear_is_durable(hass):
         save = history.store.async_save
 
         async def fail(_):
-            raise OSError("synthetic disk failure")
+            if not silent_failure:
+                raise OSError("synthetic disk failure")
 
         history.store.async_save = fail
         failed = await api.post(request(hass, mark_body("secondpoint123456")))
@@ -167,6 +171,119 @@ def test_retention_is_bounded_and_eviction_is_explicit(monkeypatch):
     monkeypatch.setattr(gt, "MAX_MARKS", 1)
     result = gt.bounded_records(records[:3], 3, 0, records[3])
     assert result["records"] == records[3:] and result["evicted"] == 3
+
+
+def record_at(key, captured_at):
+    captured = snapshot()
+    captured["time"] = captured_at
+    return gt.prepare(captured, mark_body()["marker"], key)
+
+
+@pytest.mark.parametrize("download", [False, True])
+def test_history_access_persists_expiration_and_preserves_boundary_and_future_marks(
+    hass, monkeypatch, download
+):
+    async def scenario():
+        now = 100 + gt.MAX_AGE_S + 1
+        records = [
+            record_at("expiredpoint123456", 100),
+            record_at("boundarypoint12345", 101),
+            record_at("futurepoint1234567", now + 60),
+        ]
+        hass._store_backing[gt.STORAGE_KEY] = {"records": records, "evicted": 4}
+        monkeypatch.setattr(gt.time, "time", lambda: now)
+        api = gt.BPSGroundTruthAPI(lambda *_: snapshot())
+
+        response = await api.get(
+            request(hass, query={"download": "1"} if download else {})
+        )
+        assert response.status == 200
+        overview = json.loads(response.body)
+        assert [mark["id"] for mark in overview["marks"]] == [
+            record["id"] for record in records[1:]
+        ]
+        assert overview["evicted"] == 5
+        if download:
+            assert overview["records"] == records[1:]
+        expected = {"records": records[1:], "evicted": 5}
+        assert hass._store_backing[gt.STORAGE_KEY] == expected
+        history = gt.get_history(hass)
+        assert history.records == records[1:] and history.evicted == 5
+        assert len(hass._store_saves) == 1
+
+        hass.data["bps"].pop("_ground_truth")
+        restarted = await api.get(request(hass, query={"download": "1"}))
+        assert json.loads(restarted.body)["records"] == records[1:]
+        assert json.loads(restarted.body)["evicted"] == 5
+        assert len(hass._store_saves) == 1, "restart must not count expiry twice"
+
+    asyncio.run(scenario())
+
+
+def test_mark_access_expires_history_before_duplicate_id_lookup(hass, monkeypatch):
+    async def scenario():
+        expired = record_at("abcdefghijklmnop", 100)
+        hass._store_backing[gt.STORAGE_KEY] = {"records": [expired], "evicted": 0}
+        now = 100 + gt.MAX_AGE_S + 1
+        monkeypatch.setattr(gt.time, "time", lambda: now)
+        calls = []
+
+        def capture(_, captured_at):
+            calls.append(captured_at)
+            return {**snapshot(), "time": captured_at}
+
+        api = gt.BPSGroundTruthAPI(capture)
+        response = await api.post(request(hass, mark_body(x_m=4)))
+        assert response.status == 200
+        assert calls == [now]
+        assert response.json_body["saved"]["time"] == now
+        assert response.json_body["saved"]["x_m"] == 4
+        assert len(response.json_body["marks"]) == 1
+        assert response.json_body["evicted"] == 1
+        assert hass._store_backing[gt.STORAGE_KEY]["records"][0]["time"] == now
+        assert hass._store_backing[gt.STORAGE_KEY]["evicted"] == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("silent_drop", [False, True])
+def test_failed_expiry_preserves_records_and_clear_bypasses_expiry(
+    hass, monkeypatch, silent_drop
+):
+    async def scenario():
+        records = [record_at("expiredpoint123456", 100)]
+        stored = {"records": records, "evicted": 3}
+        hass._store_backing[gt.STORAGE_KEY] = copy.deepcopy(stored)
+        monkeypatch.setattr(gt.time, "time", lambda: 100 + gt.MAX_AGE_S + 1)
+        history = gt.get_history(hass)
+        await history.load()
+        save = history.store.async_save
+
+        async def fail_expiry(data):
+            if data["evicted"]:
+                if silent_drop:
+                    return
+                raise OSError("synthetic expiry write failure")
+            await save(data)
+
+        history.store.async_save = fail_expiry
+        api = gt.BPSGroundTruthAPI(lambda *_: snapshot())
+        failed = await api.get(request(hass, query={"download": "1"}))
+        assert failed.status == 400 and failed.json_body["error"]
+        assert history.records == records and history.evicted == 3
+        assert hass._store_backing[gt.STORAGE_KEY] == stored
+
+        cleared = await api.post(request(hass, {"action": "clear"}))
+        assert cleared.status == 200
+        assert cleared.json_body["marks"] == [] and cleared.json_body["evicted"] == 0
+        assert history.records == [] and history.evicted == 0
+        assert hass._store_backing[gt.STORAGE_KEY] == {"records": [], "evicted": 0}
+        hass.data["bps"].pop("_ground_truth")
+        restored = await api.get(request(hass, query={"download": "1"}))
+        assert json.loads(restored.body)["records"] == []
+        assert json.loads(restored.body)["evicted"] == 0
+
+    asyncio.run(scenario())
 
 
 def test_cancelled_http_caller_does_not_cancel_save_or_open_another_slot(hass):

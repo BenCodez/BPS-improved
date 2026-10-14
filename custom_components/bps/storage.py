@@ -17,6 +17,7 @@ import copy
 import hashlib
 import json
 import logging
+import operator
 from pathlib import Path
 
 import aiofiles
@@ -82,6 +83,19 @@ def layout_revision(layout) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+async def save_verified_store(hass, store, data, *, key, version=1):
+    """Confirm disk contents: HA logs some save failures instead of raising.
+
+    A separate Store avoids the original instance's pending-write/load future.
+    Store invalidates its startup cache when writing, so this load reads disk.
+    All callers serialize their writes until verification has completed.
+    """
+    await store.async_save(data)
+    persisted = await Store(hass, version, key).async_load()
+    if not await hass.async_add_executor_job(operator.eq, persisted, data):
+        raise OSError(f"Persistence could not be confirmed for {key}; saved data was not acknowledged")
+
+
 def get_bps_data_for_edit(hass):
     """A deep copy of the layout for read-modify-write callers (calibration).
 
@@ -123,7 +137,7 @@ async def save_bps_data(hass, data) -> None:
     Persist first so a raising write leaves the cache matching what survives a
     restart rather than running ahead of disk.
     """
-    await _layout_store(hass).async_save(data)
+    await save_verified_store(hass, _layout_store(hass), data, key=STORAGE_KEY_LAYOUT, version=STORAGE_VERSION)
     _bucket(hass)["layout"] = data
 
 
@@ -139,7 +153,7 @@ async def load_calib_state(hass):
 
 
 async def save_calib_state(hass, payload) -> None:
-    await _calib_store(hass).async_save(payload)
+    await save_verified_store(hass, _calib_store(hass), payload, key=STORAGE_KEY_CALIB, version=STORAGE_VERSION)
 
 
 # --- One-time migration of the old flat files -------------------------------

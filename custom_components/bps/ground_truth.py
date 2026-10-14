@@ -10,6 +10,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.helpers.storage import Store
 
 from .diagnostics import encode, format_known_position_report
+from .storage import save_verified_store
 
 STORAGE_KEY = "bps_ground_truth"
 MAX_MARKS = 100
@@ -134,15 +135,24 @@ class GroundTruthHistory:
 
     def recent(self, now=None):
         now = time.time() if now is None else now
-        return [r for r in self.records if 0 <= now - r["time"] <= MAX_AGE_S]
+        return [r for r in self.records if now - r["time"] <= MAX_AGE_S]
 
-    def overview(self):
-        records = self.recent()
+    async def expire(self, now=None):
+        records = self.recent(now)
+        expired = len(self.records) - len(records)
+        if not expired:
+            return
+        data = {"records": records, "evicted": self.evicted + expired}
+        await save_verified_store(self.hass, self.store, data, key=STORAGE_KEY)
+        self.records, self.evicted = data["records"], data["evicted"]
+
+    def overview(self, now=None):
+        records = self.recent(now)
         return {
             "format": "bps-ground-truth-v1",
             "guide": GUIDE,
             "marks": [summary(r) for r in records],
-            "evicted": self.evicted + len(self.records) - len(records),
+            "evicted": self.evicted,
             "limits": {
                 "max_marks": MAX_MARKS,
                 "max_bytes": MAX_BYTES,
@@ -154,11 +164,13 @@ class GroundTruthHistory:
         data = await self.hass.async_add_executor_job(
             bounded_records, self.recent(), len(self.records), self.evicted, record
         )
-        await self.store.async_save(data)
+        await save_verified_store(self.hass, self.store, data, key=STORAGE_KEY)
         self.records, self.evicted = data["records"], data["evicted"]
 
     async def clear(self):
-        await self.store.async_save({"records": [], "evicted": 0})
+        await save_verified_store(
+            self.hass, self.store, {"records": [], "evicted": 0}, key=STORAGE_KEY
+        )
         self.records, self.evicted = [], 0
 
 
@@ -189,9 +201,11 @@ class BPSGroundTruthAPI(HomeAssistantView):
         try:
             async with history.lock:
                 await history.load()
-                data = history.overview()
+                now = time.time()
+                await history.expire(now)
+                data = history.overview(now)
                 if request.query.get("download") == "1":
-                    data["records"] = list(history.recent())
+                    data["records"] = list(history.recent(now))
             payload = await history.hass.async_add_executor_job(encode, data)
             return web.Response(
                 body=payload,
@@ -232,6 +246,8 @@ class BPSGroundTruthAPI(HomeAssistantView):
                     if body["action"] == "clear":
                         await history.clear()
                         return history.overview()
+                    now = time.time()
+                    await history.expire(now)
                     existing = next(
                         (r for r in history.records if r["id"] == body["id"]), None
                     )
@@ -241,13 +257,13 @@ class BPSGroundTruthAPI(HomeAssistantView):
                             raise ValueError(
                                 "A mark ID cannot be reused for a different location"
                             )
-                        return {**history.overview(), "saved": summary(existing)}
-                    snapshot = self.snapshot(history.hass, time.time())
+                        return {**history.overview(now), "saved": summary(existing)}
+                    snapshot = self.snapshot(history.hass, now)
                     record = await history.hass.async_add_executor_job(
                         prepare, snapshot, body["marker"], body["id"]
                     )
                     await history.append(record)
-                    return {**history.overview(), "saved": summary(record)}
+                    return {**history.overview(now), "saved": summary(record)}
 
             self.job = asyncio.create_task(save())
             self.job.add_done_callback(self.finished)

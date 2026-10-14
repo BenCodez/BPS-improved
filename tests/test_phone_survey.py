@@ -596,6 +596,33 @@ def test_committed_position_is_reported_when_audit_save_fails():
     run(check())
 
 
+def test_silent_store_failure_cannot_acknowledge_a_new_candidate_from_pending_data():
+    f = Fixture()
+
+    async def check():
+        await f.capture()
+        before = copy.deepcopy(f.manager.candidates)
+        disk = copy.deepcopy(f.hass._store_backing["bps_phone_survey"])
+        pending = None
+
+        async def drop(payload):
+            nonlocal pending
+            pending = payload
+
+        async def pending_load():
+            return pending
+
+        f.manager.store.async_save = drop
+        f.manager.store.async_load = pending_load
+        with pytest.raises(OSError, match="Persistence could not be confirmed"):
+            await f.capture()
+        assert pending is not None
+        assert f.manager.candidates == before
+        assert f.hass._store_backing["bps_phone_survey"] == disk
+
+    run(check())
+
+
 def test_removing_own_verified_record_frees_storage_without_moving_receiver(
     monkeypatch,
 ):

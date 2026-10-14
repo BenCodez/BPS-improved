@@ -13,7 +13,7 @@
             el('Panel').hidden = !target;
             el('Mark').disabled = busy || !target;
             el('Copy').disabled = busy;
-            el('Clear').disabled = busy || !overview.marks.length;
+            el('Clear').disabled = busy;
             el('History').replaceChildren();
             const marks = overview.marks.filter(m => m.target === target);
             for (const mark of marks.slice(-5).reverse()) {

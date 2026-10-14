@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const vm = require('node:vm');
 
-function setup() {
+function setup(initialError = null) {
     const nodes = new Map(), requests = [], copied = [];
     function node() {return {value: '', hidden: false, disabled: false, textContent: '', children: [], events: {},
         addEventListener(type, fn) {this.events[type] = fn;}, fire() {return this.events.click();},
@@ -13,7 +13,7 @@ function setup() {
     const el = name => nodes.get('liveTruth' + name);
     const options = {open: false}; el('Report').closest = selector => selector === 'details' ? options : null;
     el('Accuracy').value = '1';
-    const state = {target: 'bps_group_dog', pick: null, cancelled: null, clears: 0, marks: [], pending: null, error: null,
+    const state = {target: 'bps_group_dog', pick: null, cancelled: null, clears: 0, marks: [], pending: null, error: initialError,
         valid: true, clipboard: true, now: 100000};
     const sandbox = vm.createContext({document: {getElementById: name => nodes.get(name), createElement: node},
         Date, Math, navigator: {clipboard: {writeText: async text => {if (!state.clipboard) throw new Error('denied'); copied.push(text);}}}});
@@ -107,4 +107,15 @@ test('clearing labelled history uses a separate endpoint and leaves tracking alo
     assert.deepEqual(JSON.parse(p.requests.at(-1).options.body), {action: 'clear'});
     assert.equal(p.state.target, 'bps_group_dog');
     assert.equal(p.el('History').children.length, 0);
+});
+
+test('Clear stays available when expiry failure prevents stored marks from loading', async () => {
+    const p = setup('Actual-location history expiry write failed'); await settle();
+    assert.match(p.el('Status').textContent, /expiry write failed/);
+    assert.equal(p.el('History').children.length, 0);
+    assert.equal(p.el('Clear').disabled, false);
+    p.state.error = null;
+    await p.el('Clear').fire();
+    assert.deepEqual(JSON.parse(p.requests.at(-1).options.body), {action: 'clear'});
+    assert.match(p.el('Status').textContent, /history cleared/);
 });

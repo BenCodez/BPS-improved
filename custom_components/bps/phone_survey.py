@@ -24,6 +24,7 @@ from .storage import (
     get_bps_data,
     get_bps_data_for_edit,
     layout_revision,
+    save_verified_store,
     save_bps_data,
 )
 from .calibration import refresh_receivers_from_coords
@@ -316,7 +317,9 @@ class PhoneSurvey:
             or len(json.dumps(payload, allow_nan=False).encode()) > MAX_STORE_BYTES
         ):
             raise ValueError("Phone survey storage is full; remove an old candidate")
-        await self.store.async_save(payload)
+        await save_verified_store(
+            self.hass, self.store, payload, key="bps_phone_survey"
+        )
         self.candidates = candidates
 
     def _known(self):
@@ -913,5 +916,5 @@ class BPSPhoneSurveyAPI(HomeAssistantView):
             return web.json_response(
                 await self._manager(request).action(self._owner(request), body)
             )
-        except (ValueError, TypeError, OverflowError) as exc:
+        except (ValueError, TypeError, OverflowError, OSError) as exc:
             return web.json_response({"error": str(exc)}, status=400)

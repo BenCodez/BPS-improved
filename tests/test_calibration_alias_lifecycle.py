@@ -211,8 +211,9 @@ def test_manual_rematch_drops_old_hardware_samples_before_any_new_dump(
                 started = asyncio.Event()
                 original_executor = hass.async_add_executor_job
                 async def blocked_executor(func, *args):
-                    started.set()
-                    await release.wait()
+                    if func is C.solve:
+                        started.set()
+                        await release.wait()
                     return func(*args)
                 hass.async_add_executor_job = blocked_executor
                 pending = asyncio.create_task(C.BPSCalibrationAPI().post(request))
@@ -521,7 +522,8 @@ def test_explicit_solve_api_during_auto_uses_selected_floor_raw_samples_and_prov
         cal["_auto_samples"] = {}  # Explicit Solve uses raw windows, independently of auto admission.
         captures = []
         async def executor(func, *args):
-            captures.append(copy.deepcopy(args[0]))
+            if func is C.solve:
+                captures.append(copy.deepcopy(args[0]))
             return func(*args)
         hass.async_add_executor_job = executor
         async def body(): return {"action": "solve", "floor": "Upstairs"}

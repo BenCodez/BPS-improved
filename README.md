@@ -858,7 +858,8 @@ dog stationary between marks or change tracking/calibration.
 The latest five marks show their measured position errors. **Copy marked
 history** exports all retained snapshots for analysis, including both members of
 a group. Marks survive integration/HA restarts in private `.storage/bps_ground_truth`
-and retain up to 100 snapshots, 16 MiB and seven days; older evictions are reported.
+and retain up to 100 snapshots and 16 MiB. Marks older than seven days are removed
+when history is accessed; expired and evicted counts are reported.
 Use the map's **Live** mode when marking. Existing stationary recording labels
 remain available for calibration validation.
 
