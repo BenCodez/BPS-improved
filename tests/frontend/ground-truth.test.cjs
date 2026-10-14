@@ -11,6 +11,7 @@ function setup() {
         focus() {this.focused = true;}, select() {this.selected = true;}};}
     for (const name of ['Panel', 'Mark', 'Copy', 'Clear', 'History', 'Status', 'Accuracy', 'Label', 'Report']) nodes.set('liveTruth' + name, node());
     const el = name => nodes.get('liveTruth' + name);
+    const options = {open: false}; el('Report').closest = selector => selector === 'details' ? options : null;
     el('Accuracy').value = '1';
     const state = {target: 'bps_group_dog', pick: null, cancelled: null, clears: 0, marks: [], pending: null, error: null,
         valid: true, clipboard: true, now: 100000};
@@ -36,7 +37,7 @@ function setup() {
     }, {getTarget: () => state.target, validate() {if (!state.valid) throw new Error('Return to Live first.');},
         pick(done, cancelled) {state.pick = done; state.cancelled = cancelled; return () => cancelled();},
         clearPoint() {state.clears++;}, confirmClear: async () => true}, {now: () => state.now});
-    return {el, state, requests, copied, controller};
+    return {el, state, requests, copied, controller, options};
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -96,6 +97,7 @@ test('history export includes raw snapshots and clipboard fallback preserves sel
     assert.equal(p.requests.at(-1).url, '/api/bps/ground_truth?download=1');
     assert.match(p.el('Report').value, /original BLE data/);
     assert.equal(p.el('Report').hidden, false); assert.equal(p.el('Report').selected, true);
+    assert.equal(p.options.open, true);
 });
 
 test('clearing labelled history uses a separate endpoint and leaves tracking alone', async () => {

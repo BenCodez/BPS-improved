@@ -87,7 +87,8 @@
                 const text = 'BPS actual-location history\n' + JSON.stringify(data, null, 2);
                 el('Report').value = text;
                 try {await root.navigator.clipboard.writeText(text); message('Marked history copied.');}
-                catch (_) {el('Report').hidden = false; el('Report').focus(); el('Report').select();
+                catch (_) {const options = el('Report').closest('details'); if (options) options.open = true;
+                    el('Report').hidden = false; el('Report').focus(); el('Report').select();
                     message('History ready. Copy the selected text.');}
             } catch (error) {message(error.message);}
             finally {busy = false; render();}
