@@ -1348,6 +1348,9 @@ Select **BLE ranges** or **Estimated position** to see just one view. With
 multiple devices shown, lines replace circles; select a beacon to isolate it.
 Receiver icons become smaller on screen as you zoom in, with click targets scaled
 to match. Hover a receiver in the sidebar to highlight its map icon in blue.
+Tracking and history icons also shrink gently as you zoom in, including the main
+group icon and its small member markers. Tracker click targets follow the visible
+icon with a little extra room for selecting it.
 Live-tracker and receiver-to-receiver labels default to metres. The **Distances**
 selector under **View** changes BLE, map and difference labels to feet together,
 independently of the grid. The selection persists in this browser.
