@@ -2910,7 +2910,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const option = document.createElement('option'); option.value = row.key; option.textContent = row.name || row.key;
                 entSelector.appendChild(option);
             }
-            refreshGroupEditor();
+            refreshGroupEditor({preserveDraft: true});
             if ([...entSelector.options].some(option => option.value === selected)) entSelector.value = selected;
         }
         async function refreshTrackerInventory(showStatus = false) {
@@ -6846,7 +6846,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         rec.outdoor_policy = document.getElementById('outdoorPolicy').value;
         markOutdoorChanged();
     });
-    function refreshGroupEditor() {
+    function refreshGroupEditor({preserveDraft = false} = {}) {
+        const draftMembers = preserveDraft
+            ? [...document.getElementById('groupBeacons').selectedOptions].map(option => option.value) : [];
         const select = document.getElementById('groupSelector');
         const selected = select.value;
         select.replaceChildren();
@@ -6865,18 +6867,22 @@ document.addEventListener('DOMContentLoaded', async () => {
             const option = document.createElement('option'); option.value = `bps_group_${group.id}`; option.textContent = group.name;
             entSelector.appendChild(option);
         }
-        loadGroupFields();
+        if (preserveDraft) refreshGroupBeaconOptions(draftMembers);
+        else loadGroupFields();
     }
     function loadGroupFields() {
         const group = outdoor.groups(finalcords).find(g => g.id === document.getElementById('groupSelector').value);
         document.getElementById('groupName').value = group ? group.name : '';
         const id = document.getElementById('groupId'); id.value = group ? group.id : ''; id.disabled = !!group;
         document.getElementById('groupEnabled').checked = !group || group.enabled === true;
-        const beacons = document.getElementById('groupBeacons'); beacons.replaceChildren();
         document.getElementById('groupEntityHint').textContent = group
             ? `Save Floor Plan to create sensor.bps_group_${group.id}_bps_position. Use that entity in the BPS map card and select ${group.name} in the Tracking picker.`
             : 'Apply a group, then Save Floor Plan to create its own BPS position entity for the map card.';
         const members = group && Array.isArray(group.beacons) ? group.beacons : [];
+        refreshGroupBeaconOptions(members);
+    }
+    function refreshGroupBeaconOptions(members) {
+        const beacons = document.getElementById('groupBeacons'); beacons.replaceChildren();
         for (const key of [...new Set([...availableBeaconKeys, ...members])]) {
             const option = document.createElement('option'); option.value = key;
             option.textContent = availableBeaconKeys.includes(key) ? key : `${key} (missing)`;

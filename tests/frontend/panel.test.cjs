@@ -1695,3 +1695,31 @@ test('tracker refresh discovers new phones without replacing staged receiver edi
     assert.match(p.el('trackerRefreshStatus').textContent, /Existing choices are retained/);
     assert.equal(staged.cords.x, 321);
 });
+
+test('tracker refresh and picker focus preserve unapplied new and existing group fields', async () => {
+    for (const existing of [false, true]) {
+        const source = layout(); source.outdoor_tracking = {enabled: true};
+        if (existing) source.tracker_groups = [{id: 'rover', name: 'Saved name', enabled: true, beacons: ['beacon_a']}];
+        const p = await panel(source);
+        p.el('groupSelector').value = existing ? 'rover' : ''; await p.el('groupSelector').fire('change');
+        const before = JSON.stringify(plain(p.hooks.layout()));
+        p.el('groupName').value = 'Unapplied name';
+        p.el('groupId').value = existing ? 'rover' : 'new_dog';
+        p.el('groupEnabled').checked = false;
+        p.el('groupBeacons').options.forEach(option => {option.selected = option.value === 'beacon_b';});
+        p.el('entSelector').value = existing ? 'bps_group_rover' : 'beacon_a';
+        p.network.trackers = [{key: 'beacon_a', name: 'Existing beacon'}, {key: 'new_phone', name: 'New phone'}];
+        for (const [element, event] of [['refreshTrackers', 'click'], ['entSelector', 'focus']]) {
+            await p.el(element).fire(event);
+            assert.equal(p.el('groupSelector').value, existing ? 'rover' : '');
+            assert.equal(p.el('groupName').value, 'Unapplied name');
+            assert.equal(p.el('groupId').value, existing ? 'rover' : 'new_dog');
+            assert.equal(p.el('groupId').disabled, existing);
+            assert.equal(p.el('groupEnabled').checked, false);
+            assert.deepEqual(p.el('groupBeacons').selectedOptions.map(option => option.value), ['beacon_b']);
+            assert.ok(p.el('groupBeacons').options.some(option => option.value === 'new_phone'));
+            assert.equal(p.el('entSelector').value, existing ? 'bps_group_rover' : 'beacon_a');
+            assert.equal(JSON.stringify(plain(p.hooks.layout())), before);
+        }
+    }
+});
