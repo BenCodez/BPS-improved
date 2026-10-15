@@ -244,3 +244,16 @@ test('a wake lock granted after cancellation is released instead of keeping the 
     assert.equal(p.state.wakeReleases, 1);
     assert.equal(p.timers.size, 0);
 });
+
+test('an armed map pick has a visible touch cancel and a cancelled point cannot start a survey', async () => {
+    const p = setup(); await settle(); p.el('SurveyPick').fire();
+    const oldPick = p.state.pick;
+    assert.equal(p.el('SurveyPanel').hidden, false);
+    assert.equal(p.el('SurveyStop').disabled, false);
+    assert.equal(p.el('SurveyPick').textContent, 'Cancel map pick');
+    p.el('SurveyStop').fire();
+    await oldPick({floor: 'Yard', x_m: 8, y_m: 9});
+    assert.equal(p.el('SurveyStart').disabled, true);
+    assert.equal(posts(p).length, 0);
+    assert.equal(p.el('SurveyPick').textContent, 'Choose survey spot');
+});

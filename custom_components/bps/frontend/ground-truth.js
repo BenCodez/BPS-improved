@@ -50,7 +50,8 @@
             el('SurveyPick').disabled = busy || !!run || !target;
             el('SurveyStart').disabled = busy || !!run || !spot;
             el('SurveyStop').disabled = !spot && !run && !picking;
-            el('SurveyPanel').hidden = !spot && !run;
+            el('SurveyPanel').hidden = !spot && !run && !picking;
+            el('SurveyPick').textContent = picking ? 'Cancel map pick' : 'Choose survey spot';
             el('Copy').disabled = el('Clear').disabled = el('Download').disabled = busy || !!run;
             el('Accuracy').disabled = el('Label').disabled = busy || !!run;
             el('Target').disabled = busy;
@@ -69,6 +70,7 @@
             el('Progress').value = run?.count || 0;
             el('SurveyStatus').textContent = run
                 ? `${run.count}/5 snapshots saved · ${run.count ? 'Next snapshot' : 'Settling'}: ${Math.max(0, Math.ceil((run.nextAt - clock()) / 1000))} s`
+                : picking ? 'Tap the actual location on the map, or cancel below.'
                 : 'Spot selected. Keep the beacons still, then start capture.';
             el('History').replaceChildren();
             const marks = overview.marks.filter(m => m.target === target);
@@ -147,7 +149,7 @@
                         } else await savePoint(point, target, options, expectedContext);
                     } catch (error) {hooks.clearPoint(); message('Location was not confirmed saved: ' + error.message);}
                 }, () => {picking = null; message('Location marking cancelled.'); render();});
-                message('Click or tap where the selected dog actually is. Esc cancels.');
+                message('Tap where the selected dog actually is. Stop / cancel spot or Esc cancels.');
                 hooks.showMap?.(); render();
             } catch (error) {message(error.message);}
         }
