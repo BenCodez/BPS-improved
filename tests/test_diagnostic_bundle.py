@@ -270,6 +270,39 @@ def test_unicode_history_enforces_actual_archive_file_bytes_and_remaining_budget
         assert sum(i.file_size for i in bundle.infolist()) <= bundle_limit
 
 
+def test_history_can_fill_remaining_budget_without_charging_manifest_reserve_twice(monkeypatch):
+    monkeypatch.setattr(diag, "MAX_BUNDLE_BYTES", 200_000)
+    # Keep the duplicate clipboard report constant to isolate the archive budget;
+    # history itself uses the real packing, compression, and export pipeline.
+    monkeypatch.setattr(diag, "format_report", lambda _snapshot: "synthetic report")
+    actual = {"status": "empty", "records": [], "evicted": 0}
+    baseline = diag.build_bundle({"time": 100}, actual, None, None)
+    with zipfile.ZipFile(io.BytesIO(baseline)) as bundle:
+        earlier_bytes = sum(i.file_size for i in bundle.infolist() if i.filename != "manifest.json")
+    budget = diag.MAX_BUNDLE_BYTES - earlier_bytes - diag.BUNDLE_MANIFEST_RESERVE_BYTES
+    padding = budget - 2000
+    for _ in range(10):
+        history = recent.RecentTrackingHistory()
+        history.append(recent.pack({"time": 100, "context": {},
+            "positions": [{"ent": "synthetic_tag", "observed": 90.125, "details": "x" * padding}]}))
+        frozen = history.snapshot(100)
+        encoded = recent.export_json(frozen, diag.MAX_RECENT_BUNDLE_BYTES)
+        if len(encoded) == budget:
+            break
+        padding += budget - len(encoded)
+    assert len(encoded) == budget, 'the real history export exactly fills its available budget'
+    payload = diag.build_bundle({"time": 100, "_recent_tracking_snapshot": frozen}, actual, None, None)
+    with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+        result = json.loads(bundle.read("recent_tracking.json"))
+        manifest = json.loads(bundle.read("manifest.json"))
+        assert result["metadata"]["sample_count"] == 1
+        assert result["frames"][0]["positions"][0]["observed"] == 90.125
+        assert len(bundle.read("recent_tracking.json")) == budget
+        assert sum(i.file_size for i in bundle.infolist()) <= diag.MAX_BUNDLE_BYTES
+        assert len(bundle.read("manifest.json")) <= diag.BUNDLE_MANIFEST_RESERVE_BYTES
+        assert manifest["files"]["recent_tracking.json"]["bytes"] == budget
+
+
 def test_bundle_retains_direct_devices_omitted_by_clipboard_limits(hass, monkeypatch):
     from bps.bermuda_direct import BermudaDirect
     from test_bermuda_direct import prepared

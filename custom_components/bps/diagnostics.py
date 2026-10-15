@@ -27,6 +27,7 @@ MAX_REPORT_BYTES = 4 * 1024 * 1024
 MAX_HISTORY_REPORT_BYTES = 1024 * 1024
 MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 MAX_RECENT_BUNDLE_BYTES = 16 * 1024 * 1024
+BUNDLE_MANIFEST_RESERVE_BYTES = 32 * 1024
 GUIDE = (
     "Coordinates in positions/raw/radii and layout are map pixels; layout floor.scale is pixels per metre. "
     "Readings are current sensor snapshots; positions contain their own solve/observation timestamps and may be older. "
@@ -184,10 +185,10 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
     payloads = {}
     total = 0
 
-    def add(name, value, required=False):
+    def add(name, value, required=False, reserve_bytes=BUNDLE_MANIFEST_RESERVE_BYTES):
         nonlocal total
         data = value if isinstance(value, bytes) else encode(value)
-        if total + len(data) + 32768 > MAX_BUNDLE_BYTES:
+        if total + len(data) + reserve_bytes > MAX_BUNDLE_BYTES:
             manifest["omissions"][name] = "Bundle size limit"
             if required:
                 raise ValueError("Live diagnostic snapshot exceeds the bundle size limit")
@@ -238,7 +239,7 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
         try:
             add("recent_tracking.json", recent_tracking.export_json(
                 recent, min(MAX_RECENT_BUNDLE_BYTES,
-                            MAX_BUNDLE_BYTES - total - 32768)))
+                            MAX_BUNDLE_BYTES - total - BUNDLE_MANIFEST_RESERVE_BYTES)))
         except ValueError:
             manifest["omissions"]["recent_tracking.json"] = "Bundle size limit cannot fit recent tracking metadata"
     else:
@@ -248,7 +249,8 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
                           "actual_location_status": actual["status"],
                           "data_files": len(payloads),
                           "data_bytes_excluding_manifest": total}
-    add("manifest.json", manifest, required=True)
+    # Earlier entries already reserved this headroom for the final manifest.
+    add("manifest.json", manifest, required=True, reserve_bytes=0)
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED,
                          compresslevel=6) as archive:
