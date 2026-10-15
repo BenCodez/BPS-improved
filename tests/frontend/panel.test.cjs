@@ -600,6 +600,29 @@ test('toolbar long-range mode saves immediately without committing draft receive
     assert.equal(JSON.parse(body.get('coordinates')).floor[0].receivers[0].hardware_model, 'Unsaved board');
 });
 
+test('a first floor draft can be saved before the toolbar mode becomes available', async () => {
+    const p = await panel({floor: []});
+    const toggle = p.el('outdoorLongRangeIntervals');
+    assert.equal(toggle.disabled, true, 'an empty saved layout still has a revision');
+    p.hooks.layout().floor.push(layout().floor[0]); p.hooks.select('Property');
+    p.el('outdoorEnabled').checked = true; await p.el('outdoorEnabled').fire('change');
+    assert.equal(toggle.disabled, true, 'a staged first floor is not saved yet');
+    toggle.checked = true; await toggle.fire('change');
+    assert.equal(toggle.checked, false);
+    assert.equal(p.requests.some(r => r.url === '/api/bps/tracking_settings'), false);
+    p.network.saveTextRequest = async () => ({ok: false, status: 500});
+    await p.hooks.savedata(true); assert.equal(toggle.disabled, true);
+    p.network.saveTextRequest = async () => ({ok: true, headers: {get: () => 'c'.repeat(64)}});
+    assert.equal(await p.hooks.savedata(true), true, 'a premature toggle does not freeze the draft');
+    assert.equal(toggle.disabled, false);
+    toggle.checked = true; await toggle.fire('change');
+    const request = p.requests.find(r => r.url === '/api/bps/tracking_settings');
+    assert.equal(JSON.parse(request.options.body).layout_revision, 'c'.repeat(64));
+    assert.equal(toggle.checked, true);
+    p.hooks.layout().floor = []; await p.hooks.savedata(true);
+    assert.equal(toggle.disabled, true, 'removing the final saved floor disables mode changes');
+});
+
 test('a pending toolbar mode save blocks concurrent saves and enables Start only after acknowledgement', async () => {
     const p = await panel(layout()); p.hooks.select('Property');
     let finish;

@@ -29,6 +29,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let truthUI = null;
     let layoutSavePending = false;
     let layoutRevision = null;
+    let savedFloorPlanAvailable = false;
     let trackingModeUnverified = false;
     let heightUI = null;
 
@@ -2984,6 +2985,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // yet the receiver picker is needed exactly then.
             receiverInventoryLoaded = true;
             layoutRevision = data.layout_revision || null;
+            savedFloorPlanAvailable = false;
             receiverMatching = data.receiver_matching || {revision: null, options: []};
             receiverOptions = Array.isArray(data.receivers) ? [...data.receivers].sort() : [];
             offlineReceivers = Array.isArray(data.offline_receivers) ? data.offline_receivers : [];
@@ -2994,6 +2996,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             if (data.coordinates) {
                 finalcords = JSON.parse(data.coordinates);
+                savedFloorPlanAvailable = Array.isArray(finalcords.floor) && finalcords.floor.length > 0;
                 mergeDuplicateFloors();
                 tmpfinalcords = finalcords; //Store original cords in a temp to compare later if it is changed
             }
@@ -6537,6 +6540,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         removeListeners();
         const data = new FormData();
+        const savingHasFloors = Array.isArray(finalcords.floor) && finalcords.floor.length > 0;
         data.append('coordinates', JSON.stringify(finalcords)); 
         if (layoutRevision) data.append('layout_revision', layoutRevision);
         data.append('new_floor', new_floor);
@@ -6586,6 +6590,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     SetScaleButton.remove();
                 }
                 saveButton.remove();
+                savedFloorPlanAvailable = savingHasFloors;
                 new_floor = false;
                 return true;
             } else {
@@ -6607,7 +6612,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function syncTrackingModeControl() {
         const control = document.getElementById('outdoorLongRangeIntervals');
         control.checked = outdoor.settings(finalcords).long_range_intervals;
-        control.disabled = layoutSavePending || trackingModeUnverified || !layoutRevision;
+        control.disabled = layoutSavePending || trackingModeUnverified || !layoutRevision || !savedFloorPlanAvailable;
     }
     function syncOutdoorSettings() {
         const settings = outdoor.settings(finalcords);
@@ -6636,6 +6641,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     document.getElementById('outdoorLongRangeIntervals').addEventListener('change', async event => {
         const control = event.target;
+        if (!savedFloorPlanAvailable) {
+            syncTrackingModeControl(); bpsToast('Save a floor plan before changing tracking mode.'); return;
+        }
         if (layoutSavePending || gpsUI?.isVerifying?.() || trackingModeUnverified || !layoutRevision) {
             syncOutdoorSettings(); bpsToast('Wait for the current save or verification, or reload BPS if the saved state is unknown.'); return;
         }
