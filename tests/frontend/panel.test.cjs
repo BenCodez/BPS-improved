@@ -57,6 +57,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             if (url === '/api/bps/scanner_linking' && network.matching) return {ok: true, status: 200,
                 json: async () => ({placed: [], unplaced: [], beacons: [], matching: network.matching})};
             const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: (matching?.options || []).map(o => o.entity_id), receiver_matching: matching, scanner_diagnostics: matching?.scanner_diagnostics}
+                : url === '/api/bps/trackers' ? {trackers: network.trackers || entities.map(key => ({key, name: key})), ready: network.trackersReady !== false}
                 : url === '/api/bps/cords' ? network.cords
                 : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration
                 : url.startsWith('/api/bps/diagnostics?report=1') ? {text: 'BPS full diagnostics\n{"context":{"layout":{"floor":[]}}}'} : [];
@@ -1109,6 +1110,36 @@ const matchingFixture = () => ({read_only: true, revision: 'inventory-1', option
     {entity_id: 'atrium_445566', name: 'Atrium', scanner_mac: 'aa:bb:cc:44:55:66', token: '445566', label: 'Atrium · atrium_445566 · aa:bb:cc:44:55:66', selectable: true},
     {entity_id: 'ambiguous', name: 'Ambiguous', selectable: false, label: 'Ambiguous'},
 ]});
+
+test('receiver hover shows only the bound HA area and clears it on leave', async () => {
+    const source = layout();
+    source.floor[0].receivers = [
+        {entity_id: 'shared', scanner_mac: 'aa:bb:cc:11:22:33', scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}},
+        {entity_id: 'unknown', cords: {x: 400, y: 100}},
+        {entity_id: 'unique', cords: {x: 600, y: 100}},
+    ];
+    const matching = {options: [{entity_id: 'shared', identity_ambiguous: true, area_names: ['Kitchen', 'Garage'],
+        scanner_identities: [
+            {config_entry_id: 'owner-a', scanner_mac: 'aa:bb:cc:11:22:33', area_name: '<Kitchen & Pantry>'},
+            {config_entry_id: 'owner-b', scanner_mac: 'aa:bb:cc:11:22:33', area_name: 'Garage'},
+        ]}, {entity_id: 'unknown', name: 'Unknown'}, {entity_id: 'unique', name: 'Unique', area_name: 'Office'}]};
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    await p.el('canvas').fire('mousemove', {clientX: 100, clientY: 100, buttons: 0});
+    assert.ok(p.canvasCalls.some(call => call[0] === 'text' && call[1] === 'Area: <Kitchen & Pantry>'));
+    assert.ok(!p.canvasCalls.some(call => call[0] === 'text' && call[1] === 'Area: Garage'));
+    p.hooks.redrawAll();
+    assert.match(p.el('entitytree').innerHTML, /Area: &lt;Kitchen &amp; Pantry&gt;/);
+    const before = p.canvasCalls.length;
+    await p.el('canvas').fire('mousemove', {clientX: 400, clientY: 100, buttons: 0});
+    assert.ok(!p.canvasCalls.slice(before).some(call => call[0] === 'text' && /^Area:/.test(call[1])));
+    await p.el('canvas').fire('mouseleave');
+    const afterLeave = p.canvasCalls.length;
+    p.hooks.redrawAll();
+    assert.ok(!p.canvasCalls.slice(afterLeave).some(call => call[0] === 'text' && /^Area:/.test(call[1])));
+    p.hooks.zoom(2);
+    await p.el('canvas').fire('mousemove', {clientX: 1200, clientY: 200, buttons: 0});
+    assert.ok(p.canvasCalls.slice(afterLeave).some(call => call[0] === 'text' && call[1] === 'Area: Office'));
+});
 const flushMatching = () => new Promise(resolve => setImmediate(resolve));
 async function receiverMatch(p, index = 0) {
     const rec = p.hooks.layout().floor.find(f => f.name === 'Property').receivers[index];
@@ -1645,4 +1676,22 @@ test('manual height edit clears obsolete confirmed height provenance before the 
     await p.hooks.savedata(true);
     const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
     assert.equal(saved.floor[0].receivers[0].height_survey, undefined);
+});
+
+test('tracker refresh discovers new phones without replacing staged receiver edits', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 100}}];
+    const p = await panel(source);
+    const staged = p.hooks.layout().floor[0].receivers[0]; staged.cords.x = 321;
+    p.network.trackers = [{key: 'beacon_a', name: 'Existing beacon'}, {key: 'bps_ble_synthetic_phone', name: 'Synthetic phone'}];
+    await p.el('refreshTrackers').fire('click');
+    assert.equal(p.el('entSelector').options.find(option => option.value === 'bps_ble_synthetic_phone').textContent, 'Synthetic phone');
+    assert.equal(staged.cords.x, 321);
+    assert.equal(p.hooks.layout().floor[0].receivers[0], staged);
+    assert.equal(p.requests.filter(request => request.url === '/api/bps/read_text').length, 1);
+    assert.match(p.el('trackerRefreshStatus').textContent, /2 trackers/);
+    p.network.trackers = []; p.network.trackersReady = false;
+    await p.el('refreshTrackers').fire('click');
+    assert.ok(p.el('entSelector').options.some(option => option.value === 'bps_ble_synthetic_phone'));
+    assert.match(p.el('trackerRefreshStatus').textContent, /Existing choices are retained/);
+    assert.equal(staged.cords.x, 321);
 });

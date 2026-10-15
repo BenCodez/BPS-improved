@@ -13,6 +13,7 @@
         async function captureReport(knownPositions = null) {
             if (reportBusy) return;
             reportBusy = true; el('CopyAll').disabled = true;
+            if (el('Bundle')) el('Bundle').disabled = true;
             if (el('SnapshotCapture')) el('SnapshotCapture').disabled = true;
             el('ReportStatus').textContent = 'Collecting full diagnostics…';
             try {
@@ -52,10 +53,35 @@
                 el('ReportStatus').textContent = `Could not refresh diagnostics: ${error.message}${el('ReportText').value ? ' The previous report below is unchanged.' : ''}`;
             } finally {
                 reportBusy = false; el('CopyAll').disabled = false;
+                if (el('Bundle')) el('Bundle').disabled = false;
                 if (el('SnapshotCapture')) el('SnapshotCapture').disabled = false;
             }
         }
         el('CopyAll').addEventListener('click', () => captureReport());
+        el('Bundle')?.addEventListener('click', async () => {
+            if (reportBusy) return;
+            reportBusy = true; el('CopyAll').disabled = true; el('Bundle').disabled = true;
+            if (el('SnapshotCapture')) el('SnapshotCapture').disabled = true;
+            el('ReportStatus').textContent = 'Preparing complete diagnostic bundle…';
+            try {
+                const panel = panelSnapshot ? JSON.parse(JSON.stringify(panelSnapshot())) : null;
+                const panelContext = panel ? {guide: 'Editor state may contain unsaved changes; backend settings are separate.', ...panel} : null;
+                if (panelContext && new TextEncoder().encode(JSON.stringify(panelContext)).length > 1024 * 1024)
+                    throw new Error('Editor context exceeds 1 MiB. Reduce the selected diagnostic scope.');
+                const response = await apiFetch('/api/bps/diagnostics', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action: 'bundle', panel_context: panelContext})});
+                if (!response.ok) {const body = await response.json(); throw new Error(body.error || `Bundle request failed (${response.status})`);}
+                const blob = await response.blob();
+                const url = root.URL.createObjectURL(blob), link = document.createElement('a');
+                link.href = url; link.download = 'bps-diagnostics-full.zip'; document.body.appendChild(link);
+                try {link.click();} finally {link.remove(); root.setTimeout(() => root.URL.revokeObjectURL(url), 1000);}
+                el('ReportStatus').textContent = 'Diagnostic bundle downloaded. It includes retained snapshots and recordings; manifest.json lists every included or unavailable section.';
+            } catch (error) {el('ReportStatus').textContent = `Could not download diagnostic bundle: ${error.message}`;}
+            finally {
+                reportBusy = false; el('CopyAll').disabled = false; el('Bundle').disabled = false;
+                if (el('SnapshotCapture')) el('SnapshotCapture').disabled = false;
+            }
+        });
         const make = (tag, text = '') => {const node = document.createElement(tag); node.textContent = text; return node;};
         const metric = value => Number.isFinite(value) ? value.toFixed(2) : '—';
         function renderComparison(comparison) {

@@ -848,6 +848,20 @@ lives.)
 
 ## Live actual-location marks
 
+**Debugging → Download all diagnostic data** downloads a private ZIP containing
+the live report, fuller Bermuda direct measurements, complete retained actual-location
+snapshots, available diagnostic recordings, recent tracking, GPS sources and map
+alignment, saved layout context, editor context, and your phone survey candidates.
+`manifest.json` identifies every included file, source limit and unavailable section.
+**Copy full diagnostics** includes bounded actual-location summaries for quick pastes.
+Each mark retains its own capture ID, precise UTC timestamp, software versions and
+settings fingerprint; old labels are never applied to a later live position.
+
+Phone GPS choices remain listed when their fix becomes stale or unavailable. Only
+fresh fixes qualify for placement. **Refresh trackers** updates BLE choices without
+reloading or discarding map edits; API-only Bermuda trackers keep stable identities.
+Hover a receiver to see its Home Assistant area when that scanner identity is known.
+
 In **Map & Setup**, start live tracking and select a dog group in the tracking
 list. Press **Mark actual location**, then click or tap where the dog actually
 is. Repeat whenever needed. Each click saves an independent full BLE snapshot,

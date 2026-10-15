@@ -23,6 +23,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         return `${(distanceUnit === 'ft' ? metres / .3048 : metres).toFixed(1)} ${distanceUnit}`;
     }
     let availableBeaconKeys = [];
+    const availableBeaconLabels = new Map();
     let outdoorFloorSignature = '';
     let gpsUI = null;
     let truthUI = null;
@@ -188,6 +189,32 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (receiverInventoryLoaded && !receiverKnown(slug)) return "(Unmatched) ";
         if (unknownReceivers.includes(slug)) return "(Unknown) ";
         return "";
+    }
+
+    function receiverAreaName(rec) {
+        if (!rec || typeof rec.entity_id !== 'string') return null;
+        const option = receiverMatching.options.find(o => o.entity_id === rec.entity_id);
+        const area = value => typeof value === 'string' && value.trim() ? value.trim() : null;
+        const owner = rec.scanner_config_entry_id;
+        const mac = rec.scanner_mac;
+        if (owner !== undefined && (typeof owner !== 'string' || !owner.trim())) return null;
+        if (mac !== undefined && (typeof mac !== 'string' || !/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(mac))) return null;
+        // A saved hardware binding must use that owner's scanner proof. A slug
+        // can be shared by multiple owners, each with a different HA area.
+        if (mac) {
+            if (!owner) return null;
+            const mapped = (receiverMatching.runtime_address_map || []).filter(row =>
+                row.config_entry_id === owner && row.scanner_ble_mac?.toLowerCase() === mac.toLowerCase());
+            if (mapped.length > 1) return null;
+            const canonical = mapped.length === 1 ? mapped[0].scanner_mac : mac;
+            const proofs = receiverMatching.options.flatMap(current => current.scanner_identities || []).filter(proof =>
+                proof.config_entry_id === owner && proof.scanner_mac?.toLowerCase() === canonical?.toLowerCase());
+            const names = [...new Set(proofs.map(proof => area(proof.area_name)).filter(Boolean))];
+            return names.length === 1 ? names[0] : null;
+        }
+        if (!option) return null;
+        if (owner && !option.config_entry_ids?.includes(owner)) return null;
+        return option.identity_ambiguous ? null : area(option.area_name);
     }
 
     // Live-refresh the offline set from the backend so (Offline) markers update
@@ -1052,7 +1079,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             // Name pill so each marker is identifiable on the map (colour matches
             // the legend); off-floor devices also get the red "on <floor>" pill.
-            drawLabelPill(t.group ? (t.name || entKey) : entKey, marker.x, marker.y + iconSize / 2 + 16, baseHue);
+            drawLabelPill(t.group ? (t.name || entKey) : (availableBeaconLabels.get(entKey) || entKey), marker.x, marker.y + iconSize / 2 + 16, baseHue);
             if (t.offFloor && t.floor) {
                 drawLabelPill(`on ${t.floor}`, marker.x, marker.y + iconSize / 2 + 44, 0);
             }
@@ -1702,6 +1729,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (labelY < 24) labelY = r.cords.y + iconSize / 2 + 24;
                 drawCenteredLabel(receiverStatusLabel(r.entity_id) + r.entity_id, r.cords.x, labelY,
                     "600 22px system-ui, sans-serif", recOffline ? OFFLINE_RED : "#111111");
+                const area = receiverAreaName(r);
+                if (area) drawCenteredLabel(`Area: ${area}`, r.cords.x,
+                    labelY < r.cords.y ? labelY - 25 : labelY + 25,
+                    "600 18px system-ui, sans-serif", "#111111");
             }
         });
         // Pills are details-on-demand: on a dense floor the full set of labels
@@ -2866,6 +2897,45 @@ document.addEventListener('DOMContentLoaded', async () => {
             finalcords.floor = merged;
         }
 
+        let trackerInventoryFlight = null;
+        function updateTrackerOptions(rows) {
+            const selected = entSelector.value;
+            const devices = rows.filter(row => row && row.group !== true && typeof row.key === 'string');
+            availableBeaconKeys = [...new Set(devices.map(row => row.key))];
+            devices.forEach(row => availableBeaconLabels.set(row.key, row.name || row.key));
+            entSelector.replaceChildren();
+            const blank = document.createElement('option'); blank.value = ''; blank.textContent = '--Please choose an option--';
+            entSelector.appendChild(blank);
+            for (const row of devices) {
+                const option = document.createElement('option'); option.value = row.key; option.textContent = row.name || row.key;
+                entSelector.appendChild(option);
+            }
+            refreshGroupEditor();
+            if ([...entSelector.options].some(option => option.value === selected)) entSelector.value = selected;
+        }
+        async function refreshTrackerInventory(showStatus = false) {
+            if (trackerInventoryFlight) return trackerInventoryFlight;
+            const button = document.getElementById('refreshTrackers'), status = document.getElementById('trackerRefreshStatus');
+            trackerInventoryFlight = (async () => {
+                if (button) button.disabled = true;
+                try {
+                    const response = await bpsFetch('/api/bps/trackers');
+                    const data = await response.json();
+                    if (!response.ok || !Array.isArray(data.trackers)) throw new Error('Could not refresh trackers. Try again.');
+                    if (data.ready === false) {
+                        if (showStatus && status) status.textContent = 'Waiting for Bermuda. Existing choices are retained.';
+                        return;
+                    }
+                    updateTrackerOptions(data.trackers);
+                    if (showStatus && status) status.textContent = `${data.trackers.length} trackers available.`;
+                } catch (error) {if (showStatus && status) status.textContent = error.message;}
+                finally {if (button) button.disabled = false; trackerInventoryFlight = null;}
+            })();
+            return trackerInventoryFlight;
+        }
+        document.getElementById('refreshTrackers')?.addEventListener('click', () => refreshTrackerInventory(true));
+        entSelector.addEventListener('focus', () => refreshTrackerInventory());
+
         // Function to fetch data from the API and display it on page
         async function fetchBPSData() {
             const apiUrl = "/api/bps/read_text"; // API endpoint to read the file
@@ -2907,17 +2977,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (o.value) o.textContent = mapOptionLabel(o.value);
             });
             console.log("BPS floor layout loaded");
-            let ents = Array.isArray(data.entities) ? data.entities : [];
-            availableBeaconKeys = ents.filter(e => typeof e === 'string');
-            console.log("Entities to track:", ents);
-
-            entSelector.innerHTML = '<option value="">--Please choose an option--</option>';
-            ents.forEach(ent => {
-                const option = document.createElement('option');
-                option.value = ent;
-                option.textContent = ent;
-                entSelector.appendChild(option);
-            });
+            const entries = Array.isArray(data.tracker_inventory) ? data.tracker_inventory
+                : (Array.isArray(data.entities) ? data.entities : []).map(key => ({key, name: key}));
+            updateTrackerOptions(entries);
             syncOutdoorSettings();
             refreshGroupEditor();
 
@@ -3008,7 +3070,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const name = document.createElement("span");
                 name.className = "bps-track-name";
                 const group = outdoor.groups(finalcords).find(g => `bps_group_${g.id}` === entKey);
-                name.textContent = group ? group.name : entKey;
+                name.textContent = group ? group.name : (availableBeaconLabels.get(entKey) || entKey);
                 name.title = "Click to isolate this device on the map (click again to show all)";
                 // Isolate on the map (toggle), and target the icon controls at it.
                 const pick = () => {
@@ -5129,6 +5191,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                     }
                     drawCenteredLabel(receiverStatusLabel(item.entity_id) + item.entity_id, x, labelY,
                         "600 22px system-ui, sans-serif", recOffline ? OFFLINE_RED : "#111111");
+                    const area = item.entity_id === hoveredReceiver ? receiverAreaName(item) : null;
+                    if (area) drawCenteredLabel(`Area: ${area}`, x,
+                        labelY < y ? labelY - 25 : labelY + 25,
+                        "600 18px system-ui, sans-serif", "#111111");
                 }
             }
             if (item.type == "zone"){
@@ -5758,6 +5824,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const off = isReceiverOffline(r.entity_id);
             const identity = receiverMatching.options.find(o => o.entity_id === r.entity_id);
             const label = receiverStatusLabel(r.entity_id) + (identity?.name || r.entity_id);
+            const area = receiverAreaName(r);
             // The whole row focuses that receiver on the map (only it and its
             // circle stay visible), mirroring a click on its icon. The trash
             // button's handler runs first, so removing never focuses.
@@ -5770,7 +5837,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // height and delete buttons sit in a fixed right-hand column, no
             // matter the receiver name's length or whether a badge is shown.
             return `<li class="${cls}" data-type="focusrec" data-id="${escHtml(r.entity_id)}">`
-                + `<span title="${escHtml(r.entity_id)}"${off ? ' style="color:#d32f2f"' : ''}>${escHtml(label)}</span>`
+                + `<span title="${escHtml(r.entity_id + (area ? ` · Area: ${area}` : ''))}"${off ? ' style="color:#d32f2f"' : ''}>${escHtml(label)}</span>`
                 + `<span class="bps-zone-actions">`
                 + hBadge
                 + `<button class="bps-icon-btn" title="Match Bermuda receiver" data-type="matchrec" data-id="${escHtml(r.entity_id)}" data-index="${(floor.receivers || []).indexOf(r)}">↔</button>`
@@ -6013,6 +6080,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         imgfilename = value;
         mapname.value = removeExtension(value);
         SelMapName = mapname.value;
+        hoveredReceiver = null;
         await setupCanvasWithImage(img, canvas);
         new_floor = false;
         drawElements();

@@ -1,5 +1,6 @@
 """Proven scanner aliases and fresh filtered readings, without changing layouts."""
 import copy
+import hashlib
 import math
 import time
 
@@ -67,6 +68,48 @@ class ReceiverSources:
             self.reading_proofs[eid] = (uid, owner)
             key = (owner, match[1].lower()) if match and isinstance(owner, str) and owner else None
             self.readings.setdefault((tracker, key or slug), []).append(eid)
+        # API-only tracked devices have no range entity from which BPS can
+        # derive its traditional tracker key. Keep their keys independent of
+        # Bermuda's mutable name and slug, and never duplicate a device that
+        # already has a registry range proof (even a disabled/conflicting one).
+        self.fallback_trackers = {}
+        self.fallback_labels = {}
+        registry_keys, represented = self._registry_device_proofs()
+        for owner, snapshot in self.direct.snapshots.items():
+            if not isinstance(owner, str) or not owner:
+                continue
+            for did, device in snapshot["devices"].items():
+                if (not isinstance(did, str) or not did or device.get("tracked") is not True
+                        or device.get("device_id") != did or self.direct.device(owner, did) != did
+                        or device.get("unique_id") and self.direct.device(owner, device["unique_id"]) != did
+                        or any(ad.get("device_id") != did for ad in device["scanners"].values())
+                        or (owner, did) in represented):
+                    continue
+                key = "bps_ble_" + hashlib.sha256(f"{owner}\0{did}".encode()).hexdigest()[:24]
+                if key in registry_keys or key in self.fallback_trackers:
+                    continue
+                self.fallback_trackers[key] = (owner, did)
+                name = device.get("name")
+                self.fallback_labels[key] = name.strip() if isinstance(name, str) and name.strip() else did
+
+    def _registry_device_proofs(self):
+        """Read current keys and owned device proofs, including disabled ranges."""
+        keys, represented = set(), set()
+        for ent in getattr(self.registry, "entities", {}).values():
+            eid = ent.entity_id
+            if not eid.startswith("sensor.") or "_distance_to_" not in eid:
+                continue
+            keys.add(eid.removeprefix("sensor.").split("_distance_to_", 1)[0])
+            if ent.platform != "bermuda":
+                continue
+            uid = getattr(ent, "unique_id", "") or ""
+            match = _RANGE_MAC.search(uid)
+            owner = getattr(ent, "config_entry_id", None)
+            if match and owner in self.direct.snapshots:
+                did = self.direct.device(owner, uid[:match.start()])
+                if did:
+                    represented.add((owner, did))
+        return keys, represented
 
     @staticmethod
     def option_identity(option):
@@ -77,7 +120,9 @@ class ReceiverSources:
 
     def direct_trackers(self):
         """Retain registry tracker keys even when distance entities are disabled."""
-        result = set()
+        registry_keys, represented = self._registry_device_proofs()
+        result = {key for key, owner_device in self.fallback_trackers.items()
+            if key not in registry_keys and owner_device not in represented}
         for (tracker, owner), proofs in self.direct_tracker_proofs.items():
             if not self._tracker_proofs_current(owner, proofs):
                 continue
@@ -200,6 +245,21 @@ class ReceiverSources:
         binding = binding or self.binding(receiver)
         entity_id = f'sensor.{tracker}_distance_to_{receiver.get("entity_id", "")}'
         key = binding.get("identity")
+        fallback = self.fallback_trackers.get(tracker)
+        if fallback:
+            owner, did = fallback
+            # A captured fallback cannot borrow an entity or a different
+            # receiver owner introduced during the same tracking batch.
+            registry_keys, represented = self._registry_device_proofs()
+            if (self.blocked(binding) or key is None or key[0] != owner
+                    or fallback in represented or tracker in registry_keys):
+                return entity_id, None
+            ad = self.direct.measurement(owner, did, key[1])
+            if (self.direct.device(owner, did) != did
+                    or key not in self.direct.scanners and (owner, did, key[1]) not in self.direct.pairs
+                    or ad is not None and ad.get("device_id") != did):
+                return entity_id, None
+            return entity_id, self.direct.reading(owner, did, key[1], entity_id, now=now)
         if not self.blocked(binding) and key and key[0] in self.direct.snapshots:
             proofs = self.direct_tracker_proofs.get((tracker, key[0]), [])
             anchor = [proof for proof in proofs if proof[0] == entity_id]

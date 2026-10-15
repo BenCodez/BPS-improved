@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from bps import diagnostics as diag
+from bps import ground_truth as gt
 from test_snapshot_truth import marker, snapshot
 
 
@@ -25,6 +26,18 @@ def responses(monkeypatch):
 
 def parse_report(text):
     return json.loads(text[text.index("{"):])
+
+
+def assert_only_history_cache_added(hass, before):
+    """Reading a report may cache history, but may not change tracking state."""
+    assert set(hass.data) == set(before) | {"bps"}
+    assert isinstance(hass.data["bps"].get("_ground_truth"), gt.GroundTruthHistory)
+    assert {key: value for key, value in hass.data["bps"].items()
+            if key != "_ground_truth"} == before.get("bps", {})
+    for key in before:
+        if key != "bps":
+            assert hass.data[key] == before[key]
+    assert not hass._store_saves
 
 
 def test_snapshot_action_captures_once_executes_off_loop_and_never_gets_recording(hass, monkeypatch, responses):
@@ -56,7 +69,7 @@ def test_snapshot_action_captures_once_executes_off_loop_and_never_gets_recordin
         assert report["known_position_comparison"] == data["comparison"]
         assert data["read_only"] is True and data["time"] == original["time"]
         assert len(captures) == 1 and jobs == [diag.format_known_position_report]
-        assert hass.data == state_before and not hass._store_saves
+        assert_only_history_cache_added(hass, state_before)
     asyncio.run(scenario())
 
 
@@ -65,7 +78,8 @@ def test_snapshot_does_not_create_recording_when_stopped(hass, monkeypatch, resp
         hass.data = {}
         api = diag.BPSDiagnosticsAPI(None, None, lambda *_: snapshot())
         response = await api.post(request(hass, {"action": "snapshot", "known_positions": [marker()]}))
-        assert response.status == 200 and hass.data == {}
+        assert response.status == 200
+        assert_only_history_cache_added(hass, {})
     asyncio.run(scenario())
 
 
@@ -86,7 +100,11 @@ def test_rejects_bad_body_or_markers_without_recording(hass, monkeypatch, body):
         monkeypatch.setattr(diag, "get_recording", lambda *_: pytest.fail("must not create recorder"))
         api = diag.BPSDiagnosticsAPI(None, None, lambda *_: snapshot())
         response = await api.post(request(hass, body))
-        assert response.status == 400 and not hass.data
+        assert response.status == 400
+        if isinstance(body, dict) and body.get("action") == "snapshot":
+            assert_only_history_cache_added(hass, {})
+        else:
+            assert hass.data == {}
     asyncio.run(scenario())
 
 
@@ -124,7 +142,7 @@ def test_original_get_live_report_stays_unchanged(hass, monkeypatch, responses):
         data = json.loads(response.body)
         assert set(data) == {"text"}
         assert "known_positions" not in parse_report(data["text"])
-        assert not hass.data
+        assert_only_history_cache_added(hass, {})
     asyncio.run(scenario())
 
 
@@ -160,7 +178,7 @@ def test_concurrent_snapshot_is_rejected_before_capture_and_cancellation_keeps_s
         assert api._snapshot_job is None
         response = await api.post(request(hass, body))
         assert response.status == 200 and len(captures) == len(jobs) == 2
-        assert hass.data == {} and not hass._store_saves
+        assert_only_history_cache_added(hass, {})
     asyncio.run(scenario())
 
 
@@ -171,5 +189,5 @@ def test_failed_snapshot_releases_slot_for_retry(hass, responses):
         assert response.status == 400 and api._snapshot_job is None
         response = await api.post(request(hass, {"action": "snapshot", "known_positions": [marker()]}))
         assert response.status == 200 and api._snapshot_job is None
-        assert hass.data == {}
+        assert_only_history_cache_added(hass, {})
     asyncio.run(scenario())

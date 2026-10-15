@@ -192,7 +192,8 @@ function ui() {
         clock: ms => {clock += ms;}, currentTime: () => clock, tick: async () => {for (const cb of [...intervals.values()]) await cb();},
         replaceFloor: () => {floor = {...floor, name: 'Other synthetic floor'};}, editFloor: () => {floor.receivers[0].cords.x += 1;},
         changeTarget: () => {targetRevision++;}, point: p => pointCallback?.(p), unload: () => windowEvents.get('pagehide')(),
-        response: rows => {response = {locations: rows};}, defer: promise => {deferred = promise;}, floor: () => floor};
+        response: rows => {response = Array.isArray(rows) ? {locations: rows} : rows;},
+        defer: promise => {deferred = promise;}, floor: () => floor};
 }
 
 test('browser permissions start only on explicit capture and stop clears watches/timers', () => {
@@ -241,6 +242,59 @@ test('phone selection stays explicit and late HA poll after cancellation is disc
     p.defer(new Promise(r => {resolve = r;})); p.click('gpsCapture'); p.click('gpsCancel');
     resolve({ok: true, json: async () => ({locations: [{entity_id: 'device_tracker.synthetic_phone', ...at(0, 0), gps_accuracy: 1, last_updated: now/1000, age_s: 0}]})});
     await new Promise(r => setImmediate(r)); assert.equal(p.api.snapshot().chosen_gps, undefined); assert.equal(p.watchers.size, 0);
+});
+
+test('phone picker keeps a selected source through fresh, stale, unavailable and recovery responses', async () => {
+    const p = ui(), phone = 'device_tracker.synthetic_phone';
+    const source = (status, age_s) => ({entity_id: phone, name: 'Synthetic phone', status,
+        reason: status === 'fresh' ? 'fresh_state' : status, age_s});
+    const location = {entity_id: phone, ...at(0, 0), gps_accuracy: 1, last_updated: now/1000, age_s: 0};
+    p.response({sources: [source('fresh', 0)], locations: [location]});
+    await p.click('gpsRefreshPhones');
+    assert.equal(p.el('gpsPhone').value, '');
+    p.el('gpsPhone').value = phone;
+    for (const [status, age, rows] of [['stale', 61, []], ['unavailable', 62, []], ['fresh', 0, [location]]]) {
+        p.response({sources: [source(status, age)], locations: rows});
+        await p.click('gpsRefreshPhones');
+        assert.equal(p.el('gpsPhone').value, phone);
+        assert.match(p.el('gpsPhone').options[1].textContent, status === 'fresh' ? /Synthetic phone/ : new RegExp(status));
+        assert.equal(p.api.snapshot().sources[0].status, status);
+    }
+});
+
+test('stale initial load is selectable and source rows never add GPS observations', async () => {
+    const p = ui(), phone = 'device_tracker.synthetic_phone';
+    p.response({sources: [{entity_id: phone, name: 'Synthetic phone', status: 'stale', reason: 'state_older_than_60s', age_s: 300}],
+        locations: []});
+    await p.click('gpsRefreshPhones');
+    assert.equal(p.el('gpsPhone').options[1].value, phone);
+    assert.match(p.el('gpsPhone').options[1].textContent, /stale/);
+    p.el('gpsPhone').value = phone; p.click('gpsCapture');
+    await new Promise(r => setImmediate(r));
+    assert.equal(p.api.snapshot().sources[0].age_s, 300);
+    p.clock(30000); p.click('gpsStop');
+    assert.equal(p.api.snapshot().chosen_gps, undefined);
+});
+
+test('legacy locations populate picker and failed refresh retains existing choices', async () => {
+    const p = ui(), phone = 'device_tracker.synthetic_phone';
+    p.response([{entity_id: phone, name: 'Synthetic phone'}]);
+    await p.click('gpsRefreshPhones');
+    p.el('gpsPhone').value = phone;
+    p.defer(Promise.reject(new Error('Synthetic request failure')));
+    await p.click('gpsRefreshPhones');
+    assert.equal(p.el('gpsPhone').value, phone);
+    assert.equal(p.el('gpsPhone').options[1].value, phone);
+    assert.equal(p.api.snapshot().sources[0].reason, 'legacy_location');
+});
+
+test('GPS setup snapshot detaches anchors and includes fit diagnostics', () => {
+    const p = ui(), snap = p.api.snapshot();
+    assert.equal(snap.setup.anchors.length, 3);
+    assert.equal(snap.setup.fit.independently_checked, true);
+    assert.ok(Number.isFinite(snap.setup.fit.residual_m));
+    snap.setup.anchors[0].latitude = 90;
+    assert.notEqual(p.floor().georeference.anchors[0].latitude, 90);
 });
 
 for (const skew of [-120000, 120000]) test(`HA capture uses server age when browser clock differs by ${skew/1000} seconds`, async () => {

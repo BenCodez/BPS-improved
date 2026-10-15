@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import bps
-from bps.gps_locations import BPSGPSLocationsAPI, gps_locations, validate_georeference
+from bps.gps_locations import BPSGPSLocationsAPI, gps_locations, gps_sources, validate_georeference
 from conftest import make_hass
 
 NOW = 1800000000
@@ -61,6 +61,52 @@ def test_output_is_bounded_and_endpoint_uses_same_filter(monkeypatch):
     result = asyncio.run(BPSGPSLocationsAPI().get(SimpleNamespace(app={"hass": hass})))
     assert len(result.json_body["locations"]) == 128
     assert len(result.json_body["locations"][0]["name"]) == 128
+    assert len(result.json_body["sources"]) == 128
+
+
+def test_source_inventory_remains_selectable_across_fresh_stale_unavailable_recovery():
+    phone = state()
+    for age, availability, expected in ((0, "home", "fresh"), (61, "home", "stale"),
+                                        (61, "unavailable", "unavailable"), (0, "home", "fresh")):
+        phone.last_updated = datetime.fromtimestamp(NOW - age, timezone.utc)
+        phone.state = availability
+        hass = hass_with(phone)
+        source = gps_sources(hass, NOW)[0]
+        assert source["entity_id"] == phone.entity_id
+        assert source["status"] == expected
+        assert source["age_s"] == age
+        assert "secret" not in source and set(source) == {"entity_id", "name", "status", "reason", "age_s"}
+        assert len(gps_locations(hass, NOW)) == (1 if expected == "fresh" else 0)
+
+
+def test_mobile_app_registry_and_person_references_survive_missing_fix(monkeypatch):
+    import bps.gps_locations as module
+    mobile = state("device_tracker.synthetic_mobile", source_type="gps")
+    mobile.state = "unavailable"
+    mobile.attributes = {"friendly_name": "Synthetic mobile"}
+    person = state("person.synthetic_owner")
+    person.state = "unavailable"
+    person.attributes = {"device_trackers": [mobile.entity_id], "friendly_name": "Synthetic owner"}
+    router = state("device_tracker.synthetic_router", source_type="router")
+    router.state = "unavailable"
+    registry = SimpleNamespace(entities={mobile.entity_id: SimpleNamespace(entity_id=mobile.entity_id, platform="mobile_app"),
+                                         router.entity_id: SimpleNamespace(entity_id=router.entity_id, platform="mobile_app")})
+    monkeypatch.setattr(module.er, "async_get", lambda _: registry, raising=False)
+    rows = gps_sources(hass_with(mobile, person, router), NOW)
+    assert {row["entity_id"] for row in rows} == {mobile.entity_id, person.entity_id}
+    assert all(row["status"] == "unavailable" for row in rows)
+
+
+def test_source_inventory_is_deterministically_bounded_and_excludes_non_gps():
+    states = [state(f"device_tracker.synthetic_{i:03d}", age=61) for i in reversed(range(140))]
+    states += [state("device_tracker.synthetic_ble", source_type="bluetooth"),
+               state("device_tracker.synthetic_router", source_type="router"),
+               state("person.synthetic_router_owner", source="device_tracker.synthetic_router")]
+    rows = gps_sources(hass_with(*states), NOW)
+    assert len(rows) == 128
+    assert rows[0]["entity_id"] == "device_tracker.synthetic_000"
+    assert rows[-1]["entity_id"] == "device_tracker.synthetic_127"
+    assert all(row["status"] == "stale" for row in rows)
 
 
 def anchors():

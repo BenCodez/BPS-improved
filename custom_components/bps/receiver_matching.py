@@ -18,7 +18,21 @@ _RANGE_MAC = re.compile(r"_((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})_range$")
 
 def inventory(hass, direct=None):
     """Identity revision excludes fluctuating readings, includes registry changes."""
-    rows, runtime, address_pairs, hardware = {}, {}, set(), {}
+    rows, runtime, address_pairs, hardware, areas = {}, {}, set(), {}, {}
+
+    def remember_area(identity, area_id, area_name):
+        if isinstance(area_name, str) and area_name.strip():
+            areas.setdefault(identity, set()).add((
+                area_id[:128] if isinstance(area_id, str) else None,
+                area_name.strip()[:256],
+            ))
+
+    def area_metadata(identity):
+        values = areas.get(identity, set())
+        if len(values) != 1:
+            return {}
+        area_id, area_name = next(iter(values))
+        return {"area_id": area_id, "area_name": area_name}
     manager = getattr(hass, "config_entries", None)
     entries = manager.async_entries("bermuda") if manager is not None else []
     direct = direct if direct is not None else BermudaDirect(hass)
@@ -28,6 +42,7 @@ def inventory(hass, direct=None):
                 if owner != entry.entry_id:
                     continue
                 for sid, scanner in scanners:
+                    remember_area((owner, address), scanner.get("area_id"), scanner.get("area_name"))
                     hardware.setdefault((owner, address), []).append(hardware_metadata(scanner.get("hardware")))
                     bluetooth = sid.lower() if isinstance(sid, str) and re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", sid) else None
                     if bluetooth is not None:
@@ -49,6 +64,7 @@ def inventory(hass, direct=None):
             if bluetooth is not None:
                 address_pairs.add((entry.entry_id, address, bluetooth))
             name = getattr(dev, "name", None)
+            remember_area((entry.entry_id, address), getattr(dev, "area_id", None), getattr(dev, "area_name", None))
             hardware.setdefault((entry.entry_id, address), []).append(legacy_hardware(hass, dev))
             runtime.setdefault((entry.entry_id, address), set())
             if isinstance(name, str) and name:
@@ -136,6 +152,9 @@ def inventory(hass, direct=None):
                       "Restore Bermuda distance entity IDs with _distance_to_<scanner slug> before matching." if renamed_only and not any(
                           identity in direct.scanners for identity in identities) else None)
         target["hardware"] = descriptions(next(iter(identities))) if len(identities) == 1 and not ambiguous else hardware_metadata(None)
+        target["area_names"] = sorted({name for identity in identities for _area, name in areas.get(identity, set())})
+        if len(identities) == 1 and not ambiguous:
+            target.update(area_metadata(next(iter(identities))))
         # Keep underlying hardware proofs even when the display slug cannot be
         # selected without an owner/MAC. Existing explicitly matched placements
         # can still resolve one scanner without borrowing the other one's data.
@@ -147,6 +166,7 @@ def inventory(hass, direct=None):
         target["scanner_identities"] = [{
             "config_entry_id": owner, "scanner_mac": address,
             "hardware": descriptions((owner, address)),
+            **area_metadata((owner, address)),
             "distance_sensors": sorted(ent.entity_id for ent in grouped_sources.get((owner, address), [])),
             "disabled_sensors": sorted(ent.entity_id for ent in grouped_sources.get((owner, address), [])
                                        if getattr(ent, "disabled_by", None) is not None),

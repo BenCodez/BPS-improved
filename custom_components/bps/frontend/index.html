@@ -108,6 +108,8 @@
                                     <select id="entSelector" class="bps-input">
                                         <option value="">-- Please choose an option --</option>
                                     </select>
+                                    <button type="button" id="refreshTrackers" class="bps-btn bps-btn-outline">Refresh trackers</button>
+                                    <span id="trackerRefreshStatus" class="bps-hint" role="status"></span>
                                 </div>
                                 <div class="bps-field">
                                     <label class="bps-label">Tracker icon</label>
@@ -536,7 +538,9 @@
                 <p>Copy one live report with all trackers, groups, receiver readings, calibration decisions, saved map placements, and Bermuda sensors and settings. Also includes the selected map, displayed circles and editor placements, labelled separately from saved settings. No recording or tracker selection needed. Contains your property geometry, tracker locations and Bluetooth scanner identifiers.</p>
                 <div class="bps-btn-row">
                     <button type="button" id="diagnosticCopyAll" class="bps-btn bps-btn-primary">Copy full diagnostics</button>
+                    <button type="button" id="diagnosticBundle" class="bps-btn bps-btn-outline">Download all diagnostic data</button>
                 </div>
+                <p class="bps-hint">The ZIP includes complete retained actual-location snapshots and recordings, with capture times, settings, GPS alignment and an inventory of included or unavailable data.</p>
                 <h4>Where is the dog actually?</h4>
                 <p>Keep the dog still, choose its tracker or group, and pick its actual location on the saved map. Capture one full BLE snapshot to compare the receiver ranges and estimated positions with that location. This mark applies only to that snapshot.</p>
                 <div class="bps-btn-row"><button type="button" id="diagnosticSnapshotLoad" class="bps-btn bps-btn-outline">Load dogs / floors</button><button type="button" id="diagnosticSnapshotPick" class="bps-btn bps-btn-outline">Pick actual location on map</button></div>

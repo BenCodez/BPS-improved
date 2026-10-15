@@ -71,7 +71,7 @@ from .ground_truth import BPSGroundTruthAPI
 from .phone_survey import BPSPhoneSurveyAPI
 from .receiver_matching import inventory as receiver_inventory
 from .receiver_sources import ReceiverSources
-from .gps_locations import BPSGPSLocationsAPI, validate_georeference
+from .gps_locations import BPSGPSLocationsAPI, gps_locations as _gps_locations, gps_sources as _gps_sources, validate_georeference
 from .height_sources import BPSHeightSourcesAPI, validate_height_surveys
 from . import bermuda_diagnostics
 from . import recent_tracking
@@ -2634,6 +2634,7 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSTrackerIconsListAPI())
             hass.http.register_view(BPSUploadTrackerIconAPI())
             hass.http.register_view(BPSReadAPIText())
+            hass.http.register_view(BPSTrackerInventoryAPI())
             hass.http.register_view(BPSAdjustZonesAPI())
             hass.http.register_view(BPSReceiverStatusAPI())
             hass.http.register_view(BPSScannerLinkingAPI())
@@ -3102,11 +3103,13 @@ class BPSReadAPIText(HomeAssistantView):
         # out of both the tracked-device list and the receiver picker.
         entities = []
         receivers = []
+        tracker_inventory = []
         try:
             allowed = _bermuda_distance_sensor_ids(hass)
             entities = sorted({eid[len("sensor."):].split("_distance_to_")[0] for eid in allowed})
             entities = sorted(set(entities) | ReceiverSources(hass).direct_trackers())
             receivers = sorted({eid.split("_distance_to_", 1)[1] for eid in allowed})
+            tracker_inventory = _diagnostic_inventory(hass)["trackers"]
         except Exception as e:
             _LOGGER.info(f"Error listing Bermuda distance sensors: {e}")
 
@@ -3131,6 +3134,7 @@ class BPSReadAPIText(HomeAssistantView):
                 "coordinates": content,
                 "layout_revision": layout_revision(layout),
                 "entities": entities,
+                "tracker_inventory": tracker_inventory or [{"key": key, "name": key} for key in entities],
                 "receivers": [row["entity_id"] for row in matching["options"]],
                 "receiver_matching": matching,
                 "offline_receivers": offline_receivers,
@@ -3147,13 +3151,29 @@ class BPSReadAPIText(HomeAssistantView):
                 return web.Response(status=503, text="Saved layout could not be reloaded. Check Home Assistant storage and refresh the BPS page again.")
             return web.Response(status=500, text="Failed to read coordinates")
 
+class BPSTrackerInventoryAPI(HomeAssistantView):
+    """Refresh device choices without replacing saved or staged floor edits."""
+
+    url = "/api/bps/trackers"
+    name = "api:bps:trackers"
+    requires_auth = True
+
+    async def get(self, request):
+        hass = request.app["hass"]
+        data = _diagnostic_inventory(hass)
+        return web.json_response({**data, "ready": bool(data["trackers"])},
+                                 headers={"Cache-Control": "no-store"})
+
+
 def _diagnostic_inventory(hass):
     """Only actual Bermuda beacons and enabled logical groups are selectable."""
+    sources = ReceiverSources(hass)
     known = sorted({eid[len("sensor."):].split("_distance_to_", 1)[0]
-                    for eid in _bermuda_distance_sensor_ids(hass)} | ReceiverSources(hass).direct_trackers())
+                    for eid in _bermuda_distance_sensor_ids(hass)} | sources.direct_trackers())
     data = get_bps_data(hass)
     groups = normalize_groups(data, known)
-    return {"trackers": [{"key": key, "name": key} for key in known] + [
+    labels = getattr(sources, "fallback_labels", {})
+    return {"trackers": [{"key": key, "name": labels.get(key, key)} for key in known] + [
         {"key": "bps_group_" + group["id"], "name": group["name"] + " (group)", "group": True}
         for group in groups], "floors": [f["name"] for f in data.get("floor", [])
         if isinstance(f.get("name"), str) and finite_number(f.get("scale"), minimum=1e-6) is not None]
@@ -3417,6 +3437,16 @@ def _diagnostic_report_snapshot(hass, now):
     snapshot["calibration_status"]["pair_counts"] = {str(k): len(v) for k, v in cal.get("samples", {}).items()}
     snapshot["offline_receivers"] = list(dom.get("rl_offline", []))
     snapshot["inventory"] = _diagnostic_inventory(hass)
+    snapshot["phone_gps"] = {"sources": _gps_sources(hass, now), "locations": _gps_locations(hass, now),
+        "guide": "Sources remain selectable while stale or unavailable; only fresh locations qualify for surveying. HA publication time is not the original GPS measurement time."}
+    snapshot["map_alignment"] = []
+    for floor in snapshot["context"]["layout"].get("floor", []):
+        geo = floor.get("georeference", {})
+        anchors = geo.get("anchors", []) if isinstance(geo, dict) else None
+        valid = isinstance(anchors, list)
+        snapshot["map_alignment"].append({"floor": floor.get("name"), "scale_px_per_m": floor.get("scale"),
+            "saved_anchor_count": len(anchors) if valid else 0,
+            "status": "invalid_saved_anchors" if not valid else "saved_anchors" if anchors else "no_saved_anchors"})
     snapshot["scanner_diagnostics"] = _scanner_diagnostics(hass, json.dumps(snapshot["context"]["layout"]))
     snapshot["scanner_linking"] = _scanner_linking(hass, json.dumps(snapshot["context"]["layout"]))
     updater = hass.data.get("bps_update_task")
