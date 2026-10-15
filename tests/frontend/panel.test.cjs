@@ -55,10 +55,12 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         fetch: async (url, options) => {
             requests.push({url, options});
             if (url === '/api/bps/cords' && network.failCords) throw new Error('connection lost');
+            if (url === '/api/bps/tracking_settings' && network.trackingSettingsRequest) return await network.trackingSettingsRequest(options);
             if (url === '/api/bps/scanner_linking' && network.matchingRequest) return await network.matchingRequest();
             if (url === '/api/bps/scanner_linking' && network.matching) return {ok: true, status: 200,
                 json: async () => ({placed: [], unplaced: [], beacons: [], matching: network.matching})};
-            const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: (matching?.options || []).map(o => o.entity_id), receiver_matching: matching, scanner_diagnostics: matching?.scanner_diagnostics}
+            const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), layout_revision: 'a'.repeat(64), entities, receivers: (matching?.options || []).map(o => o.entity_id), receiver_matching: matching, scanner_diagnostics: matching?.scanner_diagnostics}
+                : url === '/api/bps/tracking_settings' ? {layout_revision: 'b'.repeat(64), outdoor_tracking: {enabled: true, long_range_intervals: JSON.parse(options.body).long_range_intervals}}
                 : url === '/api/bps/trackers' ? {trackers: network.trackers || entities.map(key => ({key, name: key})), ready: network.trackersReady !== false}
                 : url === '/api/bps/cords' ? network.cords
                 : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration
@@ -573,6 +575,57 @@ test('panel enforces uncertainty threshold bounds before changing or saving the 
     p.hooks.select('Property'); await p.hooks.savedata(true);
     const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
     assert.equal(saved.outdoor_tracking.hide_uncertainty_below_m, 10000);
+});
+
+test('toolbar long-range mode saves immediately without committing draft receiver edits', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, height: 2}];
+    const p = await panel(source); p.hooks.select('Property');
+    const edit = receiverProperties(p); edit.model.value = 'Unsaved board'; await edit.save.fire('click'); await Promise.resolve();
+    const toggle = p.el('outdoorLongRangeIntervals'); assert.equal(toggle.disabled, false);
+    toggle.checked = true; await toggle.fire('change');
+    const modeRequest = p.requests.find(r => r.url === '/api/bps/tracking_settings');
+    assert.deepEqual(JSON.parse(modeRequest.options.body), {long_range_intervals: true, layout_revision: 'a'.repeat(64)});
+    assert.equal(modeRequest.options.headers.Authorization, 'Bearer test-token');
+    assert.equal(p.requests.some(r => r.url === '/api/bps/save_text'), false);
+    assert.equal(p.hooks.layout().floor[0].receivers[0].hardware_model, 'Unsaved board');
+    assert.equal(p.hooks.layout().outdoor_tracking.enabled, true);
+    assert.equal(p.hooks.layout().outdoor_tracking.long_range_intervals, true);
+    toggle.checked = false; await toggle.fire('change');
+    assert.equal(p.hooks.layout().outdoor_tracking.long_range_intervals, false);
+    assert.equal(p.hooks.layout().outdoor_tracking.enabled, true);
+    await p.hooks.savedata(true);
+    const body = p.requests.find(r => r.url === '/api/bps/save_text').options.body;
+    assert.equal(body.get('layout_revision'), 'b'.repeat(64));
+    assert.equal(JSON.parse(body.get('coordinates')).floor[0].receivers[0].hardware_model, 'Unsaved board');
+});
+
+test('a pending toolbar mode save blocks concurrent saves and enables Start only after acknowledgement', async () => {
+    const p = await panel(layout()); p.hooks.select('Property');
+    let finish;
+    p.network.trackingSettingsRequest = () => new Promise(resolve => {finish = resolve;});
+    const toggle = p.el('outdoorLongRangeIntervals'); toggle.checked = true; const pending = toggle.fire('change');
+    await Promise.resolve();
+    assert.equal(toggle.disabled, true); assert.equal(p.el('starttrack').disabled, true);
+    assert.equal(await p.hooks.savedata(true), false);
+    assert.equal(p.requests.some(r => r.url === '/api/bps/save_text'), false);
+    finish({ok: true, json: async () => ({layout_revision: 'c'.repeat(64), outdoor_tracking: {long_range_intervals: true, enabled: true}})});
+    await pending;
+    assert.equal(toggle.disabled, false); assert.equal(p.el('starttrack').disabled, undefined);
+    assert.equal(toggle.checked, true);
+});
+
+test('failed or malformed toolbar saves preserve the draft and require reload before further writes', async () => {
+    for (const response of [{ok: false, status: 409}, {ok: true, json: async () => ({})}]) {
+        const source = layout(); source.outdoor_tracking = {enabled: true};
+        const p = await panel(source); p.hooks.select('Property');
+        p.network.trackingSettingsRequest = async () => response;
+        const before = plain(p.hooks.layout());
+        const toggle = p.el('outdoorLongRangeIntervals'); toggle.checked = true; await toggle.fire('change');
+        assert.deepEqual(plain(p.hooks.layout()), before);
+        assert.equal(toggle.checked, false); assert.equal(toggle.disabled, true);
+        assert.equal(await p.hooks.savedata(true), false);
+        assert.equal(p.requests.some(r => r.url === '/api/bps/save_text'), false);
+    }
 });
 
 test('panel shared polygon editor creates/edits/cancels/deletes environments and reloads saved points', async () => {

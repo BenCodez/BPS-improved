@@ -896,8 +896,10 @@ height error and antenna/body orientation can produce similar patterns.
 **Show distances** displays available distant bands as a light shaded ring for
 an isolated tracker/group, with range labels; unavailable or stale bands disappear.
 
-To compare positioning, enable **Outdoor tracking → Experimental: use distance
-ranges beyond 10 m**, then **Save Floor Plan**. It is off by default. Eligible
+To compare positioning, use **Long-range mode (experimental)** beside **Start
+tracking**. It saves immediately without committing staged map edits and enables
+Outdoor Tracking when needed. Switch it off in the same place to compare normal
+outdoor positioning. It is off by default. Eligible
 distant ranges use a soft interval constraint with a weak centre tie-break;
 nearby readings and readings without fresh, accepted quality data keep the
 existing calculation. BPS retains the original solve if refinement fails.

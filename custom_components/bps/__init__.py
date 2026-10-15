@@ -69,6 +69,7 @@ from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
 from .ground_truth import BPSGroundTruthAPI
 from .phone_survey import BPSPhoneSurveyAPI
+from .tracking_settings import BPSTrackingSettingsAPI
 from .receiver_matching import inventory as receiver_inventory
 from .receiver_sources import ReceiverSources, synchronous_reader
 from .gps_locations import BPSGPSLocationsAPI, gps_locations as _gps_locations, gps_sources as _gps_sources, validate_georeference
@@ -2657,6 +2658,7 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSCalibrationAPI(_calibration_tracking_check))
             hass.http.register_view(BPSSelfTestAPI(hass))
             hass.http.register_view(BPSTrackerTuneAPI())
+            hass.http.register_view(BPSTrackingSettingsAPI())
             hass.http.register_view(BPSHistoryAPI(hass))
             hass.http.register_view(BPSDiagnosticsAPI(_diagnostic_snapshot, _diagnostic_inventory, _diagnostic_report_snapshot))
             hass.http.register_view(BPSGroundTruthAPI(_diagnostic_report_snapshot))

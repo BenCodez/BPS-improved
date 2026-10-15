@@ -29,6 +29,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let truthUI = null;
     let layoutSavePending = false;
     let layoutRevision = null;
+    let trackingModeUnverified = false;
     let heightUI = null;
 
     // --- API auth token (see bps-panel.js) ---------------------------------
@@ -6518,6 +6519,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     async function savedata(skipScaleCheck = false){
+        if (trackingModeUnverified) {
+            bpsToast('Reload BPS before saving; tracking mode could not be verified. Preserve any unsaved map edits first.');
+            return false;
+        }
         if (layoutSavePending || gpsUI?.isVerifying?.()) {
             bpsToast('Wait for the current map save or receiver verification to finish.');
             return false;
@@ -6601,6 +6606,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('outdoorControls').hidden = !settings.enabled;
         document.getElementById('outdoorUncertainty').checked = settings.show_uncertainty;
         document.getElementById('outdoorLongRangeIntervals').checked = settings.long_range_intervals;
+        document.getElementById('outdoorLongRangeIntervals').disabled = layoutSavePending || trackingModeUnverified || !layoutRevision;
         document.getElementById('outdoorThreshold').value = settings.hide_uncertainty_below_m;
         const strengthSelect = document.getElementById('outdoorObstructionStrength');
         for (const option of Array.from(strengthSelect.options)) {
@@ -6620,7 +6626,42 @@ document.addEventListener('DOMContentLoaded', async () => {
         savebuttondiv.appendChild(saveButton);
         if (mapReady()) redrawAll();
     }
-    for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold', 'outdoorObstructionStrength', 'outdoorLongRangeIntervals']) {
+    document.getElementById('outdoorLongRangeIntervals').addEventListener('change', async event => {
+        const control = event.target;
+        if (layoutSavePending || gpsUI?.isVerifying?.() || trackingModeUnverified || !layoutRevision) {
+            syncOutdoorSettings(); bpsToast('Wait for the current save or verification, or reload BPS if the saved state is unknown.'); return;
+        }
+        const requested = control.checked;
+        layoutSavePending = true; control.disabled = true;
+        const startDisabled = starttrackbtn.disabled;
+        starttrackbtn.disabled = true;
+        const enabledControl = document.getElementById('outdoorEnabled');
+        enabledControl.disabled = true;
+        try {
+            const response = await bpsFetch('/api/bps/tracking_settings', {method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({long_range_intervals: requested, layout_revision: layoutRevision})});
+            if (!response.ok) throw new Error('Tracking mode could not be saved.');
+            const saved = await response.json();
+            if (!/^[a-f0-9]{64}$/.test(saved.layout_revision) || saved.outdoor_tracking?.long_range_intervals !== requested
+                || requested && saved.outdoor_tracking?.enabled !== true) throw new Error('Tracking mode was not verified.');
+            layoutRevision = saved.layout_revision;
+            finalcords.outdoor_tracking = {...(finalcords.outdoor_tracking || {}), long_range_intervals: requested,
+                ...(requested ? {enabled: true} : {})};
+            bpsToast(`Long-range mode ${requested ? 'on' : 'off'} — saved.`);
+            refreshGroupEditor();
+        } catch (error) {
+            trackingModeUnverified = true;
+            bpsToast('Tracking mode could not be verified. Reload BPS before changing settings; preserve any unsaved map edits first.');
+        } finally {
+            layoutSavePending = false; enabledControl.disabled = false;
+            starttrackbtn.disabled = startDisabled;
+            syncOutdoorSettings();
+            renderOutdoorDiagnostics((lastTracks.get(activeDevice) || {}).payload);
+            if (mapReady()) redrawAll();
+        }
+    });
+    for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold', 'outdoorObstructionStrength']) {
         document.getElementById(id).addEventListener('change', () => {
             const threshold = Number(document.getElementById('outdoorThreshold').value);
             const strength = Number(document.getElementById('outdoorObstructionStrength').value);
@@ -6635,7 +6676,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             finalcords.outdoor_tracking = {...(finalcords.outdoor_tracking || {}),
                 enabled: document.getElementById('outdoorEnabled').checked,
                 show_uncertainty: document.getElementById('outdoorUncertainty').checked,
-                long_range_intervals: document.getElementById('outdoorLongRangeIntervals').checked,
                 hide_uncertainty_below_m: threshold, obstruction_strength: strength};
             syncOutdoorSettings();
             if (!finalcords.outdoor_tracking.enabled && editTarget && editTarget.kind === 'environment') cancelShapeEdit();
