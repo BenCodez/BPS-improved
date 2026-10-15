@@ -144,8 +144,8 @@ def test_fallback_caches_detached_identity_resolution_but_rechecks_registry_chan
     for _ in range(100):
         assert sources.source(key, rec, now=1000.)[1].state == 6.
     assert len(calls) == before
-    # A newly introduced representation still invalidates the captured fallback.
-    add("sensor.new_name_distance_to_current_station", "2", uid=f"new-device_{MAC}_range")
+    # A newly introduced conflicting key invalidates the captured fallback.
+    add(f"sensor.{key}_distance_to_current_station", "2", uid=f"other-device_{MAC}_range")
     assert sources.source(key, rec, now=1000.)[1] is None
     assert key not in sources.direct_trackers()
 
@@ -168,7 +168,7 @@ def test_synchronous_read_pass_scans_registry_once_and_refreshes_after_yield(has
 
     async def next_pass():
         await asyncio.sleep(0)
-        add("sensor.new_name_distance_to_current_station", "2", uid=f"new-device_{MAC}_range")
+        add(f"sensor.{key}_distance_to_current_station", "2", uid=f"other-device_{MAC}_range")
         # A caller must capture a new reader after yielding to HA.
         return synchronous_reader(sources)(key, rec, now=1000.)[1]
 
@@ -197,3 +197,31 @@ def test_tracking_and_diagnostic_sweeps_do_not_scan_registry_per_reading(hass, m
     assert len(report["readings"]) == 32
     # Initial discovery, inventory validation and one synchronous reading pass.
     assert len(scans) - before <= 3
+
+
+def test_issued_api_key_survives_new_range_entity_for_same_canonical_device(hass, monkeypatch):
+    data, entries, states, add, payloads, rec, key = api_only(hass, monkeypatch)
+    first = ReceiverSources(hass)
+    assert first.direct_trackers() == {key}
+    add("sensor.phone_distance_to_current_station", "2", uid=f"new-device_{MAC}_range")
+    later = ReceiverSources(hass)
+    assert later.direct_trackers() == {key, "phone"}
+    assert first.source(key, rec, now=1000.)[1].state == 6.
+    assert later.source(key, rec, now=1000.)[1].state == 6.
+    assert later.fallback_trackers[key] == ("entry", "new-device")
+
+
+def test_registered_or_saved_api_key_is_recovered_after_restart(hass, monkeypatch):
+    for registry_proof in [True, False]:
+        data, entries, states, add, payloads, rec, key = api_only(hass, monkeypatch)
+        add("sensor.phone_distance_to_current_station", "2", uid=f"new-device_{MAC}_range")
+        hass.data["bps"].pop("_api_tracker_keys", None)
+        if registry_proof:
+            add("sensor.renamed_bps_sensor", "Home", uid=f"bps_floor_{key}")
+            entries["sensor.renamed_bps_sensor"].platform = "bps"
+        else:
+            data["tracker_groups"] = [{"id": "dog", "beacons": [key], "enabled": True}]
+            hass.data["bps"]["layout"] = data
+        sources = ReceiverSources(hass)
+        assert key in sources.direct_trackers()
+        assert sources.source(key, rec, now=1000.)[1].state == 6.
