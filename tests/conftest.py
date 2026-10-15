@@ -150,6 +150,7 @@ def _install_homeassistant_stubs():
     # `from homeassistant.helpers.storage import Store` — expose the submodule
     # on its parent (as done for panel_custom above).
     helpers.storage = sys.modules["homeassistant.helpers.storage"]
+    _module("homeassistant.helpers.config_validation", config_entry_only_config_schema=lambda domain: lambda config: config)
     _module("homeassistant.helpers.event", async_track_state_change_event=lambda *a, **k: None)
     _module("homeassistant.helpers.template", Template=object)
     _module("homeassistant.core", HomeAssistant=object, callback=lambda f: f)

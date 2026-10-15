@@ -10,6 +10,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import config_validation as cv
 from homeassistant.const import UnitOfLength
 from homeassistant.util.unit_conversion import DistanceConverter
 from homeassistant.util import slugify
@@ -21,6 +22,7 @@ import asyncio
 import math
 import os
 import json
+import hashlib
 import re
 import copy
 from functools import partial
@@ -76,10 +78,12 @@ from .gps_locations import BPSGPSLocationsAPI, gps_locations as _gps_locations, 
 from .height_sources import BPSHeightSourcesAPI, validate_height_surveys
 from . import bermuda_diagnostics
 from . import recent_tracking
+from . import receiver_alerts
 
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "bps"
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 OPTION_SHOW_SIDEBAR_PANEL = "show_sidebar_panel"
 FRONTEND_PATH = Path(__file__).parent / "frontend"
 LEGACY_BPS_ENTITY_PATTERN = re.compile(r"^sensor\.(.+)_\1_bps_(zone|floor)$")
@@ -1246,6 +1250,7 @@ async def update_receiver_liveness(hass):
     Bermuda-owned range entities. Distance readings prove a scanner is working;
     their absence leaves liveness unknown. Never infer offline from silence.
     """
+    context = _capture_tracking_context(hass)
     dom = hass.data.setdefault(DOMAIN, {})
     sources = ReceiverSources(hass)
     try:
@@ -1425,6 +1430,54 @@ async def update_receiver_liveness(hass):
         "identity": list(bindings[slug]["identity"]) if bindings.get(slug, {}).get("identity") else None,
         "source_age_s": evidence_age(slug),
         "captured": time.time()} for slug, status in resolved.items()}
+
+    if hass.data.get("bps_initialized") and _tracking_context_current(context):
+        observations = {}
+        activity = {}
+        unresolved = {}
+        for floor in layout.get("floor", []):
+            if not isinstance(floor, dict):
+                continue
+            for rec in floor.get("receivers", []):
+                if not isinstance(rec, dict):
+                    continue
+                slug = rec.get("entity_id")
+                if not isinstance(slug, str) or not slug:
+                    continue
+                binding = sources.binding(rec)
+                identity = binding.get("identity")
+                floor_name = floor.get("name") if isinstance(floor.get("name"), str) else "Unnamed floor"
+                reference = receiver_alerts.placement_reference(rec)
+                if not identity or sources.blocked(binding) or slug in identity_conflicts:
+                    if binding["status"] != "invalid_scanner_identity":
+                        pending = unresolved.setdefault(reference, {"name": slug,
+                            "receivers": [slug], "floors": []})
+                        if floor_name not in pending["floors"]:
+                            pending["floors"].append(floor_name)
+                    continue
+                key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+                option = next((option for name in binding["aliases"]
+                               if (option := sources.resolved_option(name, binding)) is not None), {})
+                row = observations.setdefault(key, {"name": (option.get("name") or slug)[:128],
+                    "receivers": [], "floors": [], "age_s": None, "scanner_activity_known": False, "references": []})
+                if reference not in row["references"]:
+                    row["references"].append(reference)
+                if slug not in row["receivers"]:
+                    row["receivers"].append(slug)
+                if floor_name not in row["floors"]:
+                    row["floors"].append(floor_name)
+                if identity not in activity:
+                    activity[identity] = receiver_alerts.scanner_activity(hass, sources, identity, devices)
+                age, known = activity[identity]
+                row["scanner_activity_known"] |= known
+                if age is not None:
+                    row["age_s"] = age if row["age_s"] is None else min(age, row["age_s"])
+        try:
+            await receiver_alerts.get_monitor(hass).async_update(observations, time.time(),
+                current=lambda: _tracking_context_current(context) and get_bps_data(hass) is layout,
+                unresolved=unresolved)
+        except Exception:
+            _LOGGER.exception("Receiver silence alert refresh failed")
 
 
 async def update_receiver_radii(hass, eids, receiver_sources=None):
@@ -2743,6 +2796,8 @@ async def async_setup(hass, config):
             the unload half-done (which strands stale registry entries)."""
             await _stop_tracking(hass)
             await shutdown_diagnostics(hass)
+            if monitor := bucket.get("_receiver_alerts"):
+                await monitor.async_flush()
             try:
                 await flush_position_history(hass)
             except Exception as e:
@@ -2830,6 +2885,10 @@ async def async_unload_entry(hass: HomeAssistant, entry):
     if not unload_ok:
         _LOGGER.error("Failed to offload platforms for entry: %s", entry.entry_id)
         return await unload_failed()
+
+    if monitor := bucket.get("_receiver_alerts"):
+        await monitor.async_flush()
+        monitor.clear_notification()
 
     # Once the sensor platform is gone, complete teardown. A frontend cleanup
     # error must not restart tracking against removed SensorEntity objects.
@@ -3481,6 +3540,7 @@ def _diagnostic_report_snapshot(hass, now):
         "mode", "floor", "auto_status", "last_solved_at", "ends_at", "duration")})
     snapshot["calibration_status"]["pair_counts"] = {str(k): len(v) for k, v in cal.get("samples", {}).items()}
     snapshot["offline_receivers"] = list(dom.get("rl_offline", []))
+    snapshot["receiver_alerts"] = receiver_alerts.snapshot(hass)
     snapshot["inventory"] = _diagnostic_inventory(hass)
     snapshot["phone_gps"] = {"sources": _gps_sources(hass, now), "locations": _gps_locations(hass, now),
         "guide": "Sources remain selectable while stale or unavailable; only fresh locations qualify for surveying. HA publication time is not the original GPS measurement time."}
@@ -3539,7 +3599,8 @@ class BPSReceiverStatusAPI(HomeAssistantView):
     async def get(self, request):
         hass = request.app["hass"]
         offline = hass.data.get(DOMAIN, {}).get("rl_offline", [])
-        return web.json_response({"offline": list(offline), "unknown": list(hass.data.get(DOMAIN, {}).get("rl_unknown", []))})
+        return web.json_response({"offline": list(offline), "unknown": list(hass.data.get(DOMAIN, {}).get("rl_unknown", [])),
+                                  "receiver_alerts": receiver_alerts.snapshot(hass)})
 
 
 class BPSScannerLinkingAPI(HomeAssistantView):

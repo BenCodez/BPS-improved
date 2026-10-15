@@ -1570,6 +1570,31 @@ inventory is unavailable, automatic status remains Unknown until it can be check
 If a receiver shows red while the
 device is online, map it explicitly in `receiver_status`.
 
+BPS automatically alerts when a **placed, matched receiver has sent no BLE data
+for three hours**. A warning appears under Zones & Receivers in the BPS web page
+and in Home Assistant's persistent notifications. It clears when reception
+resumes. One notification lists all affected receivers; duplicate placements or
+old/current aliases of the same scanner count once. Tracking does not need to
+be started, and the dogs do not need to be nearby.
+
+The silence timer prefers Home Assistant's Bluetooth received-packet timestamps,
+falling back to Bermuda's scanner timing on older installations. Reception from
+other devices counts; hearing a receiver's transmitted beacon at a different
+station does not reset its HA reception time. Scanner startup and watchdog clocks
+also cannot clear an existing alert. A live network connection alone
+does not reset the timer. Monitoring
+requires a known scanner or previously established timing; unmatched or ambiguous
+receivers and installations exposing only per-tracker distances cannot establish
+scanner silence. Newly registered scanners without a first packet get a full
+three-hour grace period. Match unknown receivers first or check Bermuda's scanner data.
+Previously proven bindings retain their timers through a Bermuda API or scanner
+inventory outage while the same placement remains saved, including after restart.
+Removing or rematching the placement discards its old timer. Activity times are
+stored locally every five minutes, at alert/recovery transitions and on graceful
+shutdown. An abrupt stop can lose up to five minutes of recent activity until
+fresh source timestamps reconcile it. Full diagnostics include the alert state;
+storage failures also appear in the BPS warning.
+
 The full card guide (all options, per-floor behavior, labels/icons/zones,
 troubleshooting) is in the [upstream wiki](https://github.com/Hogster/BPS/wiki/Lovelace-map-card).
 
