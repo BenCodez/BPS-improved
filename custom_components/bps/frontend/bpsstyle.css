@@ -3342,6 +3342,42 @@ input[type="checkbox"] { accent-color: hsl(var(--sidebar-primary)); }
     .bps-sidebar { flex: 1 1 auto; width: 100%; position: static; max-height: none; }
 }
 
+/* Keep survey controls beside the map, with no overlay hiding map points. */
+.bps-truth-panel {
+    margin-top: 12px;
+    padding: 12px;
+    border: 1px solid hsl(var(--border));
+    border-radius: 12px;
+    background: hsl(var(--card));
+}
+.bps-truth-panel[hidden], #liveTruthSurveyPanel[hidden] { display: none; }
+.bps-truth-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.bps-truth-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 10px 0; }
+.bps-truth-panel .bps-btn { min-height: 46px; height: auto; white-space: normal; }
+.bps-truth-panel .bps-input { width: 100%; min-width: 0; }
+.bps-truth-panel progress { width: 100%; height: 12px; }
+.bps-truth-panel summary { min-height: 44px; padding-top: 12px; cursor: pointer; }
+#liveTruthDownload { width: 100%; }
+.bps-survey-view .bps-setup-row, .bps-survey-view .bps-sidebar,
+.bps-survey-view .bps-tabs, .bps-survey-view #zonediv,
+.bps-survey-view #historyBar { display: none !important; }
+.bps-survey-view .bps-main { display: block; }
+.bps-survey-view .bps-content { display: block; width: 100%; }
+.bps-survey-view .bps-canvas-wrap { margin-top: 0; }
+.bps-survey-view .bps-canvas-wrap canvas { width: auto; max-height: 50vh; max-height: 50dvh; touch-action: none; }
+@media (min-width: 1600px) and (min-aspect-ratio: 5/2) {
+    .bps-truth-panel { grid-column: 2; grid-row: 4; }
+}
+@media (max-width: 600px) {
+    .bps-app { padding: 8px 10px max(20px, env(safe-area-inset-bottom)); }
+    .bps-content { width: 100%; }
+    .bps-tabs { overflow-x: auto; }
+    .bps-tab { flex: 0 0 auto; padding: 10px; }
+    .bps-truth-panel .bps-input { font-size: 16px; min-height: 44px; }
+    .bps-truth-heading { align-items: flex-start; }
+    .bps-truth-panel .bps-btn { font-size: 14px; }
+}
+
 /* ---- Position-history time scrubber -------------------------------------
    A strip directly UNDER the map: device + span pickers and playback on the
    first row, the scrubber itself on the second. The slider is given the whole

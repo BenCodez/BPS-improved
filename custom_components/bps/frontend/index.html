@@ -2,6 +2,7 @@
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>BPS</title>
     <link rel="stylesheet" href="bpsstyle.css">
 </head>
@@ -181,17 +182,6 @@
                                  click a row to make the tracker-icon controls target it, × to
                                  stop tracking it. Populated by renderTrackLegend(). -->
                             <div id="trackLegend" class="bps-track-legend" style="display: none"></div>
-                            <div id="liveTruthPanel" hidden>
-                                <div class="bps-btnrow"><button id="liveTruthMark" type="button" class="bps-btn bps-btn-primary">Mark actual location</button><button id="liveTruthCopy" type="button" class="bps-btn bps-btn-outline">Copy marked history</button></div>
-                                <p id="liveTruthStatus" class="bps-hint" role="status">Select a dog, then mark where it actually is. Each click saves one instant with BLE diagnostics.</p>
-                                <div id="liveTruthHistory" class="bps-hint"></div>
-                                <details><summary>Location mark options</summary>
-                                    <label for="liveTruthAccuracy">Location tolerance (m)</label><input id="liveTruthAccuracy" class="bps-input" type="number" min="0" max="100" step="any" value="1">
-                                    <label for="liveTruthLabel">Note (optional)</label><input id="liveTruthLabel" class="bps-input" maxlength="240" placeholder="Inside barn; standing still">
-                                    <button id="liveTruthClear" type="button" class="bps-btn bps-btn-outline">Clear actual-location marks</button>
-                                    <textarea id="liveTruthReport" hidden readonly rows="12" spellcheck="false" class="bps-input"></textarea>
-                                </details>
-                            </div>
                             <div class="bps-viewrow">
                                 <!-- Unlike the two tracking-session toggles below, receiver
                                      distances need no session — they compare the latest
@@ -255,6 +245,7 @@
                                 </label>
                                 <button type="button" id="starttrack" class="bps-btn bps-btn-primary" style="display: none">Start tracking</button>
                                 <button type="button" id="stoptrack" class="bps-btn bps-btn-primary" style="display: none">Stop tracking</button>
+                                <button type="button" id="liveTruthShortcut" class="bps-btn bps-btn-outline" disabled>Phone survey</button>
                             </div>
                             <!-- Options for the Receiver distances overlay, revealed on their own
                                  indented row only while that toggle is on so the three selectors
@@ -317,6 +308,40 @@
                             <button type="button" id="saveToolBtn" title="Save current tool">✓ Save</button>
                             <button type="button" id="cancelToolBtn" title="Cancel current tool (Esc)">✕ Cancel</button>
                         </div>
+                    </div>
+
+                    <div id="liveTruthPanel" class="bps-truth-panel" hidden>
+                        <div class="bps-truth-heading">
+                            <label class="bps-label" for="liveTruthTarget">Actual location · dog / group</label>
+                            <button id="liveTruthFocus" type="button" class="bps-btn bps-btn-outline" aria-pressed="false">Phone survey view</button>
+                        </div>
+                        <select id="liveTruthTarget" class="bps-input"></select>
+                        <div class="bps-truth-actions">
+                            <button id="liveTruthMark" type="button" class="bps-btn bps-btn-outline">Mark actual location</button>
+                            <button id="liveTruthSurveyPick" type="button" class="bps-btn bps-btn-primary">Choose survey spot</button>
+                        </div>
+                        <div id="liveTruthSurveyPanel" hidden>
+                            <p class="bps-hint">Keep the beacons still at this spot. Capture waits 30 seconds, then saves five BLE snapshots at least 10 seconds apart. Stop before moving; keep this page open and the screen awake.</p>
+                            <div class="bps-truth-actions">
+                                <button id="liveTruthSurveyStart" type="button" class="bps-btn bps-btn-primary">Collect 5 snapshots</button>
+                                <button id="liveTruthSurveyStop" type="button" class="bps-btn bps-btn-outline">Stop / cancel spot</button>
+                            </div>
+                            <progress id="liveTruthProgress" max="5" value="0" aria-label="Survey snapshots saved"></progress>
+                            <p id="liveTruthSurveyStatus" class="bps-hint" aria-live="off"></p>
+                        </div>
+                        <p id="liveTruthStatus" class="bps-hint" role="status">Select a dog, then mark where it actually is. Each mark saves an instant with BLE diagnostics.</p>
+                        <button id="liveTruthDownload" type="button" class="bps-btn bps-btn-primary">Download diagnostic ZIP</button>
+                        <p class="bps-hint">Download after each spot before older snapshots are evicted. The ZIP includes raw Bermuda data, location marks and settings.</p>
+                        <details><summary>Recent marks &amp; options</summary>
+                            <div id="liveTruthHistory" class="bps-hint"></div>
+                            <label for="liveTruthAccuracy">Location tolerance (m)</label><input id="liveTruthAccuracy" class="bps-input" type="number" inputmode="decimal" min="0" max="100" step="any" value="1">
+                            <label for="liveTruthLabel">Note (optional)</label><input id="liveTruthLabel" class="bps-input" maxlength="240" placeholder="20 m from station; clear path">
+                            <div class="bps-truth-actions">
+                                <button id="liveTruthCopy" type="button" class="bps-btn bps-btn-outline">Copy marked history</button>
+                                <button id="liveTruthClear" type="button" class="bps-btn bps-btn-outline">Clear actual-location marks</button>
+                            </div>
+                            <textarea id="liveTruthReport" hidden readonly rows="12" spellcheck="false" class="bps-input"></textarea>
+                        </details>
                     </div>
 
                     <!-- Time scrubber for the position-history overlay. Sits directly
