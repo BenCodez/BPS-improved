@@ -26,6 +26,44 @@ def test_api_only_phone_is_selectable_and_refresh_does_not_modify_layout(hass, m
     assert data == before and not hass._store_saves
 
 
+def test_saved_group_does_not_make_temporarily_unavailable_phone_inventory_ready(hass, monkeypatch):
+    data, entries, states, _add, _old, _new, payloads, _calls = prepared(hass, monkeypatch)
+    entries.clear()
+    states.clear()
+    key = next(iter(ReceiverSources(hass).fallback_trackers))
+    data.update(outdoor_tracking={"enabled": True}, tracker_groups=[{
+        "id": "dog", "name": "Synthetic group", "enabled": True, "beacons": [key]}])
+    hass.data["bps"]["layout"] = data
+    api = bps.BPSTrackerInventoryAPI()
+    request = NS(app={"hass": hass})
+    assert asyncio.run(api.get(request)).json_body["ready"]
+    payloads["entry"] = None
+    waiting = asyncio.run(api.get(request)).json_body
+    assert waiting["trackers"] and all(row.get("group") for row in waiting["trackers"])
+    assert waiting["ready"] is False
+    payloads["entry"] = snapshot()
+    assert asyncio.run(api.get(request)).json_body["ready"]
+
+
+def test_partial_api_outage_retains_choices_even_when_legacy_trackers_remain(hass, monkeypatch):
+    data, _entries, _states, _add, _old, _new, payloads, _calls = prepared(hass, monkeypatch)
+    hass.data["bps"]["layout"] = data
+    configs = hass.config_entries.async_entries("bermuda")
+    hass.config_entries.async_entries = lambda _domain: [*configs, NS(entry_id="other", state="loaded")]
+    payloads["other"] = None
+    result = asyncio.run(bps.BPSTrackerInventoryAPI().get(NS(app={"hass": hass}))).json_body
+    assert result["trackers"] and result["ready"] is False
+
+
+def test_stock_bermuda_legacy_inventory_remains_refreshable(hass, monkeypatch):
+    import sys
+    data, _entries, _states, _add, _old, _new, _payloads, _calls = prepared(hass, monkeypatch)
+    hass.data["bps"]["layout"] = data
+    monkeypatch.setitem(sys.modules, "custom_components.bermuda.api", NS())
+    result = asyncio.run(bps.BPSTrackerInventoryAPI().get(NS(app={"hass": hass}))).json_body
+    assert result["trackers"] and result["ready"] is True
+
+
 def test_receiver_area_metadata_is_scoped_to_owner_and_clears_when_absent(hass, monkeypatch):
     _data, entries, _states, add, _old, _new, payloads, _calls = prepared(hass, monkeypatch)
     first = inventory(hass)

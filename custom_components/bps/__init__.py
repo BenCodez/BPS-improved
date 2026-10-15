@@ -3163,14 +3163,21 @@ class BPSTrackerInventoryAPI(HomeAssistantView):
 
     async def get(self, request):
         hass = request.app["hass"]
-        data = _diagnostic_inventory(hass)
-        return web.json_response({**data, "ready": bool(data["trackers"])},
+        sources = ReceiverSources(hass)
+        data = _diagnostic_inventory(hass, sources)
+        # Saved groups are not evidence that Bermuda's inventory is ready.
+        # Preserve existing API-only choices during partial entry reloads too;
+        # stock Bermuda without the optional API retains its legacy inventory.
+        ready = any(row.get("group") is not True for row in data["trackers"]) and all(
+            row.get("path") == "direct" or row.get("reason") == "api_unavailable"
+            for row in sources.direct.statuses)
+        return web.json_response({**data, "ready": ready},
                                  headers={"Cache-Control": "no-store"})
 
 
-def _diagnostic_inventory(hass):
+def _diagnostic_inventory(hass, receiver_sources=None):
     """Only actual Bermuda beacons and enabled logical groups are selectable."""
-    sources = ReceiverSources(hass)
+    sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass)
     known = sorted({eid[len("sensor."):].split("_distance_to_", 1)[0]
                     for eid in _bermuda_distance_sensor_ids(hass)} | sources.direct_trackers())
     data = get_bps_data(hass)
