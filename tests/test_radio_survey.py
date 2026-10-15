@@ -77,6 +77,32 @@ def test_three_fresh_distinct_marks_expose_diagnostic_diversity_without_fit():
     assert "offset_recommendation" not in json.dumps(output)
 
 
+def test_moving_gps_samples_remain_diagnostic_evidence_without_stationary_fit():
+    records = [record(i, x=i * 3) for i in range(3)]
+    for item in records:
+        item["gps_reference"] = {"stationary_calibration_eligible": False}
+    output = radio_survey.export(records)
+    assert len(output["samples"]) == 3
+    assert output["counts"]["eligible_samples"] == 0
+    assert output["pairs"] == []
+    assert all(item["reference_kind"] == "moving_phone_gps" for item in output["samples"])
+    assert all("moving_gps_reference_not_stationary" in item["exclusions"] for item in output["samples"])
+
+
+@pytest.mark.parametrize("moving_first", [False, True])
+def test_moving_reference_cannot_invalidate_a_stationary_label_of_the_same_packet(moving_first):
+    stationary = record(0, x=0, accuracy=.2, readings=[row(stamp=100, observed=100)])
+    moving = copy.deepcopy(stationary)
+    moving.update(id="moving-capture", time=101, gps_reference={"stationary_calibration_eligible": False})
+    moving["marker"].update(x_m=2, accuracy_m=1)
+    records = [moving, stationary] if moving_first else [stationary, moving]
+    output = radio_survey.export(records)
+    assert output["counts"]["eligible_samples"] == 1
+    assert output["pairs"][0]["counts"]["samples"] == 1
+    manual = next(item for item in output["samples"] if item["reference_kind"] == "manual_point")
+    assert manual["eligible"] and manual["exclusions"] == []
+
+
 def test_pair_cohorts_separate_owner_model_context_path_and_hardware():
     changes = [
         {},

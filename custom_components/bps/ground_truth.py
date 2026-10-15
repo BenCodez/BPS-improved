@@ -32,7 +32,12 @@ def retention_limits():
     return {"max_marks": MAX_MARKS, "max_bytes": MAX_BYTES, "max_age_s": MAX_AGE_S}
 
 
-def prepare(snapshot, marker, request_id):
+def prepare(snapshot, marker, request_id, gps=None):
+    reference = None
+    if gps is not None:
+        from .gps_walk import prepare_reference
+        marker, reference = prepare_reference(snapshot, marker, gps)
+        snapshot = {**snapshot, "gps_reference": reference}
     result = format_known_position_report(snapshot, [marker])
     report = json.loads(result["text"][result["text"].index("{") :])
     mark = report["known_positions"][0]
@@ -44,6 +49,8 @@ def prepare(snapshot, marker, request_id):
         "report": report,
     }
     record["capture"] = capture_metadata(record)
+    if reference is not None:
+        record["gps_reference"] = reference
     return record
 
 
@@ -96,6 +103,9 @@ def summary(record):
         "position_errors": comparison["position_errors"],
         "summary": comparison["summary"],
         "capture": record.get("capture") or capture_metadata(record),
+        **({"gps_reference": {key: record["gps_reference"][key] for key in (
+            "source", "gps_observed_at_epoch_s", "gps_age_s", "accuracy_m")}}
+           if "gps_reference" in record else {}),
     }
 
 
@@ -298,6 +308,7 @@ class BPSGroundTruthAPI(HomeAssistantView):
             body = await request.json()
             if not isinstance(body, dict) or body.get("action") not in (
                 "mark",
+                "gps_mark",
                 "clear",
             ):
                 raise ValueError("Choose mark or clear for actual-location history")
@@ -308,7 +319,7 @@ class BPSGroundTruthAPI(HomeAssistantView):
                     },
                     status=429,
                 )
-            if body["action"] == "mark":
+            if body["action"] in ("mark", "gps_mark"):
                 request_id = body.get("id")
                 if not isinstance(request_id, str) or not REQUEST_ID.fullmatch(
                     request_id
@@ -330,16 +341,30 @@ class BPSGroundTruthAPI(HomeAssistantView):
                         (r for r in history.records if r["id"] == body["id"]), None
                     )
                     if existing:
+                        if body["action"] == "gps_mark":
+                            if existing.get("gps_reference", {}).get("request") != {
+                                "marker": body["marker"], "gps": body.get("gps")
+                            }:
+                                raise ValueError("A mark ID cannot be reused for a different GPS reference")
+                            return {**history.overview(now), "saved": summary(existing)}
                         expected = {"accuracy_m": 1.0, "label": "", **body["marker"]}
                         if existing["marker"] != expected:
                             raise ValueError(
                                 "A mark ID cannot be reused for a different location"
                             )
                         return {**history.overview(now), "saved": summary(existing)}
+                    # Expiry can await a slow storage write. Capture and GPS
+                    # freshness must use the clock after that await completes.
+                    now = time.time()
                     snapshot = self.snapshot(history.hass, now)
-                    record = await history.hass.async_add_executor_job(
-                        prepare, snapshot, body["marker"], body["id"]
-                    )
+                    if body["action"] == "gps_mark":
+                        if not isinstance(body.get("gps"), dict):
+                            raise ValueError("Supply a browser GPS reference")
+                        record = await history.hass.async_add_executor_job(
+                            prepare, snapshot, body["marker"], body["id"], body["gps"])
+                    else:
+                        record = await history.hass.async_add_executor_job(
+                            prepare, snapshot, body["marker"], body["id"])
                     await history.append(record)
                     return {**history.overview(now), "saved": summary(record)}
 

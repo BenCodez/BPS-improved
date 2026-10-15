@@ -3529,6 +3529,7 @@ def _diagnostic_report_snapshot(hass, now):
     layout = get_bps_data(hass)
     # Saved settings only; omit map/icon assets and unrelated entity state.
     if isinstance(layout, dict):
+        snapshot["context"]["layout_revision"] = layout_revision(layout)
         snapshot["context"]["layout"].update({key: copy.deepcopy(layout[key]) for key in (
             "history_enabled", "history_max_age", "history_min_interval", "history_min_move_m",
             "history_max_points", "history_heartbeat") if key in layout})

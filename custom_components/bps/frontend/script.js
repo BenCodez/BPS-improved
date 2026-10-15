@@ -7611,6 +7611,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     if (globalThis.BPSGroundTruth) truthUI = globalThis.BPSGroundTruth.init(bpsFetch, {
+        getGPSMap: () => ({...currentFloor(), layout_revision: layoutRevision}),
         getTarget: () => pollTrackActive ? activeDevice : null,
         getTargets: () => trackedDevices.map(key => ({key, name: outdoor.groups(finalcords)
             .find(group => `bps_group_${group.id}` === key)?.name || availableBeaconLabels.get(key) || key})),

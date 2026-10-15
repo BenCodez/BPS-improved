@@ -129,3 +129,47 @@ alignment after clicking. Enter each point's latitude and longitude separately, 
 accuracy can be 0 for surveyed coordinates or an estimate such as 2 metres.
 Validation identifies the invalid field rather than reporting an accuracy error
 for invalid latitude/longitude.
+
+## GPS walk / ride references
+
+After saving the map anchors and selecting your dog/group in live tracking,
+open **Phone survey** → **GPS walk / ride survey**. Choose walking (up to
+3 m/s) or a slow ride (up to 10 m/s), enter the maximum dog-to-phone distance,
+and press **Start GPS survey** on the phone you are carrying. For example,
+use 5 m only if the dogs stay within 5 m; stop if they run farther away.
+This distance is an estimate you supply, not a Bermuda proximity measurement.
+
+Allow precise browser location access. Use HTTPS; keep the page visible and
+the screen on. BPS requests a screen wake lock where supported. No continuous
+background Companion App location or notification permission is needed.
+GPS callbacks provide instantaneous fixes; the survey does not average a
+moving route into one point or assume the dog stays at an earlier position.
+Walks are generally better for examining range bias; rides also expose lag.
+
+BPS saves one full diagnostic mark at most every 15 seconds. A fix must be
+less than three seconds old and report accuracy of 20 m or better; GPS jumps
+or reported speeds above the mode's limit pause capture. These limits are
+quality gates, not guarantees of true GPS accuracy. The server rechecks the
+fix and projects it against the alignment frozen with the BLE snapshot.
+The location allowance includes reported GPS accuracy, anchor error/fit and
+extrapolation uncertainty, your dog-to-phone allowance, and possible movement
+during GPS age. Map and GPS timestamps, raw GPS coordinates, speed/heading
+when supplied, session identity and the full settings/Bermuda evidence remain
+in the private captured report. BLE packets and solved positions retain
+their own timestamps; filtering may represent earlier positions.
+
+Sessions stop after 30 minutes or 120 confirmed snapshots, on Stop, when the
+page is hidden, live tracking ends, a save fails or the map/target changes.
+Collection resumes only when you start another session. Closing the screen
+therefore does not silently create points later. Save failures are explicit;
+no offline queue or interpolation invents missing observations. A request
+already saving when stopped may finish. Retained points are included in the
+usual actual-location history and full ZIP download, subject to its storage
+limits, so they can be downloaded from another device.
+
+Moving GPS labels are approximate phone-reference areas. They do not alter
+calibration, receiver positions, heights or map alignment, and do not enter
+stationary radio-model trend summaries. They are useful for identifying large
+errors, group recovery and lag; use stationary known-location captures to
+validate precise RSSI/attenuation corrections. Three or more independently
+checked anchors give a better alignment check than two points that fit exactly.

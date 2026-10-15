@@ -7,6 +7,7 @@
         if (!el('Mark')) return null;
         let busy = false, picking = null, loaded = false, overview = {marks: []}, selection = null;
         let spot = null, run = null, timer = null, wakeLock = null, pickVersion = 0, focused = false, targetOptions = '';
+        let gpsUI = null;
         const now = environment.now || (() => Date.now());
         const clock = environment.monotonic || (() => root.performance?.now?.() ?? now());
         const schedule = environment.setTimeout || root.setTimeout.bind(root);
@@ -54,13 +55,14 @@
                     + 'Download the ZIP from BPS on your desktop later.'
                     + (overview.evicted ? ` ${overview.evicted} older snapshots have already expired or been removed.` : '');
             }
-            el('Mark').disabled = busy || !!run || !target;
-            el('SurveyPick').disabled = busy || !!run || !target;
-            el('SurveyStart').disabled = busy || !!run || !spot;
+            const gpsActive = gpsUI?.isActive() || false;
+            el('Mark').disabled = busy || !!run || gpsActive || !target;
+            el('SurveyPick').disabled = busy || !!run || gpsActive || !target;
+            el('SurveyStart').disabled = busy || !!run || gpsActive || !spot;
             el('SurveyStop').disabled = !spot && !run && !picking;
             el('SurveyPanel').hidden = !spot && !run && !picking;
             el('SurveyPick').textContent = picking ? 'Cancel map pick' : 'Choose survey spot';
-            el('Copy').disabled = el('Clear').disabled = el('Download').disabled = busy || !!run;
+            el('Copy').disabled = el('Clear').disabled = el('Download').disabled = busy || !!run || gpsActive;
             el('Accuracy').disabled = el('Label').disabled = busy || !!run;
             el('Target').disabled = busy;
             if (el('Shortcut')) el('Shortcut').disabled = busy || !target;
@@ -104,9 +106,10 @@
             busy = true; render();
             try {overview = await request(); loaded = true;}
             catch (error) {message(error.message);}
-            finally {busy = false; render();}
+            finally {busy = false; render(); gpsUI?.sync();}
         }
         function sync() {
+            gpsUI?.sync();
             const target = hooks.getTarget();
             if (target !== selection || (spot && spot.context !== context())) {
                 cancelPick();
@@ -117,15 +120,17 @@
             render();
             if (target && !loaded && !busy) void load();
         }
-        async function savePoint(point, target, options, expectedContext) {
+        async function savePoint(point, target, options, expectedContext, gps = null) {
             validate(target, expectedContext);
             busy = true; render(); message('Saving actual location and BLE snapshot…');
             const id = root.crypto?.randomUUID?.().replaceAll('-', '')
                 || 'mark_' + now().toString(36) + '_' + Math.random().toString(36).slice(2);
             try {
                 const result = await request({method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({action: 'mark', id, marker: {target, floor: point.floor,
-                        x_m: point.x_m, y_m: point.y_m, accuracy_m: options.accuracy, label: options.label}})});
+                    body: JSON.stringify(gps ? {action: 'gps_mark', id,
+                        marker: {target, floor: point.floor, label: options.label}, gps}
+                        : {action: 'mark', id, marker: {target, floor: point.floor,
+                            x_m: point.x_m, y_m: point.y_m, accuracy_m: options.accuracy, label: options.label}})});
                 if (result.saved?.id !== id || result.saved?.target !== target) throw new Error('The server did not confirm this snapshot.');
                 overview = result;
                 const error = overview.saved.position_errors?.find(p => p.target === target);
@@ -133,10 +138,11 @@
                     + (Number.isFinite(error?.error_m) && error.scored ? ` Current position error: ${error.error_m.toFixed(1)} m.` : '')
                     + (overview.evicted ? ` ${overview.evicted} older marks expired or were evicted; see the retention limits below.` : '')
                     + ' You can mark another location at any time.');
-            } finally {busy = false; render();}
+                return result.saved;
+            } finally {busy = false; render(); gpsUI?.sync();}
         }
         function choosePoint(survey) {
-            if (busy || run) return;
+            if (busy || run || gpsUI?.isActive()) return;
             if (picking) {cancelPick(); return;}
             const target = hooks.getTarget();
             try {
@@ -188,7 +194,7 @@
             }
         }
         el('SurveyStart').addEventListener('click', () => {
-            if (busy || run || !spot) return;
+            if (busy || run || gpsUI?.isActive() || !spot) return;
             try {
                 validate(spot.target, spot.context);
                 run = {...spot, options: markOptions(), count: 0, nextAt: clock() + 30000};
@@ -208,7 +214,7 @@
             if (!focused) {
                 try {validate(hooks.getTarget(), context());} catch (error) {message(error.message); return;}
             }
-            if (focused) {cancelPick(); stopSurvey('Survey stopped. Your saved marks are available to download.');}
+            if (focused) {cancelPick(); gpsUI?.stop('GPS survey stopped. Saved points remain available.'); stopSurvey('Survey stopped. Your saved marks are available to download.');}
             focusView(!focused); render();
         }
         el('Focus').addEventListener('click', toggleFocus);
@@ -224,17 +230,17 @@
             }
         });
         el('Download').addEventListener('click', async () => {
-            if (busy || run) return;
+            if (busy || run || gpsUI?.isActive()) return;
             cancelPick(); busy = true; render(); message('Preparing full diagnostic ZIP…');
             try {
                 const result = await hooks.download();
                 if (!result?.ok) throw new Error(result?.error || 'Diagnostic download is unavailable.');
                 message('Diagnostic ZIP download started. Keep this file for analysis.');
             } catch (error) {message('Could not download diagnostics: ' + error.message);}
-            finally {busy = false; render();}
+            finally {busy = false; render(); gpsUI?.sync();}
         });
         el('Copy').addEventListener('click', async () => {
-            if (busy || run) return;
+            if (busy || run || gpsUI?.isActive()) return;
             cancelPick();
             busy = true; render(); message('Preparing marked tracking history…');
             try {
@@ -246,18 +252,23 @@
                     el('Report').hidden = false; el('Report').focus(); el('Report').select();
                     message('History ready. Copy the selected text.');}
             } catch (error) {message(error.message);}
-            finally {busy = false; render();}
+            finally {busy = false; render(); gpsUI?.sync();}
         });
         el('Clear').addEventListener('click', async () => {
-            if (busy || run || !await hooks.confirmClear()) return;
-            if (busy || run) return;
+            if (busy || run || gpsUI?.isActive() || !await hooks.confirmClear()) return;
+            if (busy || run || gpsUI?.isActive()) return;
             cancelPick(); stopSurvey();
             busy = true; render();
             try {overview = await request({method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'clear'})});
                 hooks.clearPoint(); message('Actual-location history cleared.');}
             catch (error) {message(error.message);}
-            finally {busy = false; render();}
+            finally {busy = false; render(); gpsUI?.sync();}
         });
+        if (root.BPSGPSWalk) gpsUI = root.BPSGPSWalk.init({
+            target: hooks.getTarget, context, validate: () => validate(hooks.getTarget(), context()),
+            map: hooks.getGPSMap, label: () => el('Label').value, busy: () => busy,
+            beforeStart: () => {cancelPick(); stopSurvey();}, changed: render, save: savePoint,
+        }, environment);
         sync();
         return {sync};
     }

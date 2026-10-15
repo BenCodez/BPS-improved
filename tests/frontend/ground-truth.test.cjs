@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const vm = require('node:vm');
 
-function setup(initialError = null) {
+function setup(initialError = null, withGPS = false) {
     const nodes = new Map(), requests = [], copied = [], timers = new Map(), events = new Map();
     let timerId = 0;
     function node() {return {value: '', hidden: false, disabled: false, textContent: '', children: [], events: {},
@@ -12,6 +12,8 @@ function setup(initialError = null) {
         focus() {this.focused = true;}, select() {this.selected = true;}};}
     for (const name of ['Panel', 'Mark', 'Copy', 'Clear', 'History', 'Status', 'Accuracy', 'Label', 'Report',
         'Target', 'Focus', 'Shortcut', 'SurveyPick', 'SurveyStart', 'SurveyStop', 'SurveyPanel', 'Progress', 'SurveyStatus', 'Download', 'Retention']) nodes.set('liveTruth' + name, node());
+    if (withGPS) for (const name of ['Start', 'Stop', 'Mode', 'Distance', 'Status']) nodes.set('liveGPS' + name, node());
+    if (withGPS) {nodes.get('liveGPSMode').value = 'walk'; nodes.get('liveGPSDistance').value = '5';}
     const el = name => nodes.get('liveTruth' + name);
     const options = {open: false}; el('Report').closest = selector => selector === 'details' ? options : null;
     el('Accuracy').value = '1';
@@ -27,6 +29,7 @@ function setup(initialError = null) {
         Date, Math, navigator: {clipboard: {writeText: async text => {if (!state.clipboard) throw new Error('denied'); copied.push(text);}},
             wakeLock: {request: async () => {state.wakeRequests++; if (state.wakePending) await state.wakePending;
                 return {release: async () => {state.wakeReleases++;}};}}}});
+    if (withGPS) for (const file of ['gps.js', 'gps-walk.js']) vm.runInContext(readFileSync('custom_components/bps/frontend/' + file, 'utf8'), sandbox);
     vm.runInContext(readFileSync('custom_components/bps/frontend/ground-truth.js', 'utf8'), sandbox);
     const controller = sandbox.BPSGroundTruth.init(async (url, options) => {
         requests.push({url, options});
@@ -38,6 +41,7 @@ function setup(initialError = null) {
             if (body.action === 'clear') state.marks = [];
             else {
                 saved = {id: body.id, time: state.now / 1000, ...body.marker,
+                    ...(body.action === 'gps_mark' ? {accuracy_m: 14} : {}),
                     position_errors: [{target: body.marker.target, scored: true, error_m: 2}]};
                 state.marks.push(saved);
             }
@@ -46,12 +50,17 @@ function setup(initialError = null) {
             limits: {max_marks: 500, max_bytes: 128 * 1048576, max_age_s: 30 * 86400},
             ...(url.includes('download') ? {records: [{report: {readings: ['original BLE data']}}]} : {})})};
     }, {getTarget: () => state.target, getTargets: () => state.targets, selectTarget: key => {state.target = key;},
+        getGPSMap: () => ({name: 'Yard', scale: 10, layout_revision: 'a'.repeat(64),
+            georeference: {version: 1, anchors: [[0,0],[30,0],[0,30]].map(([x,y]) => ({
+                ...sandbox.BPSGPS.fromLocal({x,y}, {latitude:10,longitude:20}),
+                x:x*10, y:y*10, accuracy_m:2, label:'Synthetic'}))}}),
         getContext: () => state.context, focusView: value => {state.focused = value;},
         download: async () => {state.downloads++; return state.downloadError ? {ok: false, error: state.downloadError} : {ok: true};},
         validate() {if (!state.valid) throw new Error('Return to Live first.');},
         pick(done, cancelled) {state.pick = done; state.cancelled = cancelled; return () => cancelled();},
-        clearPoint() {state.clears++;}, confirmClear: async () => true}, {now: () => state.now});
-    return {el, state, requests, copied, controller, options, timers, document,
+        clearPoint() {state.clears++;}, confirmClear: async () => true}, {now: () => state.now,
+        monotonic: () => state.now, geolocation: {watchPosition(ok) {state.gps = ok; return 1;}, clearWatch() {state.gps = null;}}});
+    return {el, gpsEl: name => nodes.get('liveGPS' + name), state, requests, copied, controller, options, timers, document,
         async hide() {document.hidden = true; events.get('visibilitychange')(); await settle();},
         async advance(ms) {
             state.now += ms;
@@ -145,6 +154,38 @@ async function chooseSurvey(p) {
     await p.state.pick({floor: 'Yard', x_m: 12, y_m: 8});
 }
 const posts = p => p.requests.filter(r => r.options).map(r => JSON.parse(r.options.body));
+
+test('GPS survey uses the actual-location API, blocks manual marks and restores controls after stop', async () => {
+    const p = setup(null, true); await settle();
+    p.gpsEl('Start').fire();
+    p.state.gps({timestamp:p.state.now,coords:{latitude:10,longitude:20,accuracy:2,speed:1}});
+    await settle();
+    assert.equal(posts(p).length,1);
+    assert.equal(posts(p)[0].action,'gps_mark');
+    assert.deepEqual(posts(p)[0].marker,{target:'bps_group_dog',floor:'Yard',label:''});
+    assert.equal(posts(p)[0].gps.layout_revision,'a'.repeat(64));
+    assert.equal(p.el('Mark').disabled,true);
+    p.el('Mark').fire(); await p.el('Copy').fire(); await p.el('Download').fire();
+    assert.equal(posts(p).length,1);
+    assert.equal(p.state.downloads,0);
+    assert.match(p.gpsEl('Status').textContent,/1 GPS\/BLE/);
+    p.gpsEl('Stop').fire();
+    assert.equal(p.el('Mark').disabled,false); assert.equal(p.el('Download').disabled,false);
+    assert.equal(p.state.gps,null);
+});
+
+test('stopping GPS during a pending save restores GPS start and inputs when the save finishes', async () => {
+    const p = setup(null, true); await settle();
+    let release; p.state.pending = new Promise(resolve => {release = resolve;});
+    p.gpsEl('Start').fire();
+    p.state.gps({timestamp:p.state.now,coords:{latitude:10,longitude:20,accuracy:2,speed:1}});
+    await settle(); p.gpsEl('Stop').fire();
+    assert.equal(p.gpsEl('Start').disabled,true);
+    release(); await settle();
+    for (const key of ['Start','Mode','Distance']) assert.equal(p.gpsEl(key).disabled,false);
+    p.state.pending=null; p.gpsEl('Start').fire();
+    assert.equal(p.gpsEl('Stop').disabled,false);
+});
 
 test('stationary survey waits, saves five spaced instantaneous labels and does not apply settings', async () => {
     const p = setup(); await settle(); await chooseSurvey(p);
