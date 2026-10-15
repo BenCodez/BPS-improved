@@ -394,3 +394,68 @@ def test_seeded_startup_clock_cannot_clear_proven_silence(hass, notices, monkeyp
         await bps.update_receiver_liveness(hass)
         assert not A.snapshot(hass)["active"] and notices[-1][0] == "dismiss"
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("binding", ["explicit", "ble_alias", "implicit"])
+@pytest.mark.parametrize("full_restart", [False, True])
+def test_inventory_loss_preserves_placed_scanner_only_timer_and_recovers(hass, notices, monkeypatch, binding, full_restart):
+    data, payloads, calls, at = direct_monitor(hass, monkeypatch)
+    source = "dd:ee:ff:11:22:33" if binding == "ble_alias" else MAC
+    if source != MAC:
+        from test_bermuda_direct import snapshot
+        payloads["entry"] = snapshot(sid=source, retained=MAC)
+    payloads["entry"]["devices"].clear()
+    rec = data["floor"][0]["receivers"][0]
+    rec["entity_id"] = "current_station"
+    if binding != "implicit":
+        rec.update(scanner_mac=source, scanner_config_entry_id="entry")
+    # The scanner need not have any enabled or disabled distance entities.
+    registry = bps.er.async_get(hass)
+    registry.entities.clear()
+    clock = [30000.]
+    monkeypatch.setattr(A.time, "monotonic", lambda: clock[0])
+    scanner = NS(source=source.upper(), discovered_device_timestamps={"packet": 10000.})
+    monkeypatch.setitem(sys.modules, "homeassistant.components.bluetooth", NS(
+        async_scanner_by_source=lambda hass, address: scanner if address.lower() == source else None))
+    async def run():
+        at(40000, 20000)
+        await bps.update_receiver_liveness(hass)
+        key = A.snapshot(hass)["active"][0]["key"]
+        good_payload = payloads["entry"]
+        payloads["entry"] = RuntimeError("synthetic inventory outage")
+        if full_restart:
+            hass.data["bps"]["_receiver_alerts"] = A.ReceiverAlerts(hass)
+        notices.clear()
+        clock[0] = 30015
+        monkeypatch.setattr(bps.time, "time", lambda: 40015.)
+        await bps.update_receiver_liveness(hass)
+        assert A.snapshot(hass)["monitored"] == 1
+        assert A.snapshot(hass)["active"][0]["last_seen"] == 20000
+        assert A.snapshot(hass)["active"][0]["key"] == key
+        assert not any(call[0] == "dismiss" for call in notices)
+        clock[0] = 30030
+        payloads["entry"] = good_payload
+        scanner.discovered_device_timestamps["new-packet"] = 30030
+        at(40030, 0)
+        await bps.update_receiver_liveness(hass)
+        assert not A.snapshot(hass)["active"] and notices[-1][0] == "dismiss"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["remove", "rematch"])
+def test_unavailable_inventory_does_not_keep_removed_or_changed_placement(hass, notices, change):
+    reference = A.placement_reference({"entity_id": "station"})
+    async def run():
+        monitor = A.get_monitor(hass)
+        initial = observed(20000)
+        initial[KEY]["references"] = [reference]
+        await monitor.async_update(initial, 40000)
+        pending = {reference: {"name": "station", "receivers": ["station"], "floors": ["Ground"]}}
+        await monitor.async_update({}, 40015, unresolved=pending)
+        assert monitor.status["active"]
+        replacement = A.placement_reference({"entity_id": "station", "scanner_mac": "aa:bb:cc:44:55:66", "scanner_config_entry_id": "entry"})
+        unresolved = {} if change == "remove" else {replacement: pending[reference]}
+        await monitor.async_update({}, 40030, unresolved=unresolved)
+        assert not monitor.status["active"] and not monitor.records
+        assert notices[-1][0] == "dismiss"
+    asyncio.run(run())

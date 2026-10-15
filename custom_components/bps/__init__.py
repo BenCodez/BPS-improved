@@ -1434,6 +1434,7 @@ async def update_receiver_liveness(hass):
     if hass.data.get("bps_initialized") and _tracking_context_current(context):
         observations = {}
         activity = {}
+        unresolved = {}
         for floor in layout.get("floor", []):
             if not isinstance(floor, dict):
                 continue
@@ -1441,18 +1442,28 @@ async def update_receiver_liveness(hass):
                 if not isinstance(rec, dict):
                     continue
                 slug = rec.get("entity_id")
+                if not isinstance(slug, str) or not slug:
+                    continue
                 binding = sources.binding(rec)
                 identity = binding.get("identity")
+                floor_name = floor.get("name") if isinstance(floor.get("name"), str) else "Unnamed floor"
+                reference = receiver_alerts.placement_reference(rec)
                 if not identity or sources.blocked(binding) or slug in identity_conflicts:
+                    if binding["status"] != "invalid_scanner_identity":
+                        pending = unresolved.setdefault(reference, {"name": slug,
+                            "receivers": [slug], "floors": []})
+                        if floor_name not in pending["floors"]:
+                            pending["floors"].append(floor_name)
                     continue
                 key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
                 option = next((option for name in binding["aliases"]
                                if (option := sources.resolved_option(name, binding)) is not None), {})
                 row = observations.setdefault(key, {"name": (option.get("name") or slug)[:128],
-                    "receivers": [], "floors": [], "age_s": None, "scanner_activity_known": False})
+                    "receivers": [], "floors": [], "age_s": None, "scanner_activity_known": False, "references": []})
+                if reference not in row["references"]:
+                    row["references"].append(reference)
                 if slug not in row["receivers"]:
                     row["receivers"].append(slug)
-                floor_name = floor.get("name") if isinstance(floor.get("name"), str) else "Unnamed floor"
                 if floor_name not in row["floors"]:
                     row["floors"].append(floor_name)
                 if identity not in activity:
@@ -1463,7 +1474,8 @@ async def update_receiver_liveness(hass):
                     row["age_s"] = age if row["age_s"] is None else min(age, row["age_s"])
         try:
             await receiver_alerts.get_monitor(hass).async_update(observations, time.time(),
-                current=lambda: _tracking_context_current(context) and get_bps_data(hass) is layout)
+                current=lambda: _tracking_context_current(context) and get_bps_data(hass) is layout,
+                unresolved=unresolved)
         except Exception:
             _LOGGER.exception("Receiver silence alert refresh failed")
 

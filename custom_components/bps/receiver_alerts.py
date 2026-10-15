@@ -1,6 +1,8 @@
 """Three-hour silence notices for placed, identity-proven BLE receivers."""
 import asyncio
 import copy
+import hashlib
+import json
 import logging
 import math
 import time
@@ -24,6 +26,12 @@ def _number(value):
                 and math.isfinite(value) and value >= 0 else None)
     except OverflowError:
         return None
+
+
+def placement_reference(receiver):
+    """Retain previously proven identity only for an unchanged saved binding."""
+    binding = [receiver.get(field) for field in ("entity_id", "scanner_config_entry_id", "scanner_mac")]
+    return hashlib.sha256(json.dumps(binding).encode()).hexdigest()
 
 
 def scanner_activity(hass, sources, identity, dump):
@@ -103,7 +111,7 @@ class ReceiverAlerts:
         self.error = None
         self.status = {"threshold_s": THRESHOLD_S, "active": [], "monitored": 0}
 
-    async def async_update(self, observations, now, current=lambda: True):
+    async def async_update(self, observations, now, current=lambda: True, *, unresolved=None):
         async with self.lock:
             if self.records is None:
                 try:
@@ -114,7 +122,11 @@ class ReceiverAlerts:
                         raise ValueError("Invalid receiver activity store")
                     records = (saved or {}).get("receivers", {})
                     if any(not isinstance(key, str) or len(key) != 64 or not isinstance(row, dict)
-                           or _number(row.get("last_seen")) is None for key, row in records.items()):
+                           or _number(row.get("last_seen")) is None
+                           or not isinstance(row.get("references", []), list)
+                           or len(row.get("references", [])) > MAX_RECEIVERS
+                           or any(not isinstance(ref, str) or len(ref) != 64 for ref in row.get("references", []))
+                           for key, row in records.items()):
                         raise ValueError("Invalid receiver activity record")
                     self.records = records
                 except Exception:
@@ -125,6 +137,25 @@ class ReceiverAlerts:
                     return
             if not current():
                 return
+            observations = copy.deepcopy(observations)
+            owners = {}
+            for key, record in self.records.items():
+                for ref in record.get("references", []):
+                    owners.setdefault(ref, set()).add(key)
+            resolved = {ref for row in observations.values() for ref in row.get("references", [])}
+            # Inventory loss is not a placement removal. Retain a proven timer
+            # for the unchanged saved binding, never infer new hardware from it.
+            for ref, pending in (unresolved or {}).items():
+                keys = owners.get(ref, set())
+                if ref in resolved or len(keys) != 1:
+                    continue
+                key = next(iter(keys))
+                row = observations.setdefault(key, {**copy.deepcopy(pending), "age_s": None,
+                    "scanner_activity_known": False, "references": []})
+                for field in ("receivers", "floors"):
+                    row[field] = sorted(set(row[field]) | set(pending[field]))
+                if ref not in row["references"]:
+                    row["references"].append(ref)
             records, active = {}, []
             for key, observation in list(observations.items())[:MAX_RECEIVERS]:
                 age = _number(observation.get("age_s"))
@@ -138,14 +169,15 @@ class ReceiverAlerts:
                 # can already prove a three-hour gap; no extra grace is needed.
                 if age is not None:
                     last_seen = max(0.0, now - age) if not previous else max(last_seen, now - age)
-                records[key] = {"last_seen": last_seen}
+                records[key] = {"last_seen": last_seen, "references": sorted(observation.get("references", []))}
                 silent = max(0.0, now - last_seen)
                 if silent >= THRESHOLD_S:
                     active.append({"key": key, "name": observation["name"],
                         "receivers": observation["receivers"], "floors": observation["floors"],
                         "silent_s": silent, "last_seen": last_seen})
             signature = tuple(sorted((row["key"], row["name"], tuple(row["floors"])) for row in active))
-            changed = set(records) != set(self.records)
+            changed = set(records) != set(self.records) or any(
+                row["references"] != self.records[key].get("references", []) for key, row in records.items())
             self.records = records
             # Save promptly at alert/recovery/configuration transitions, and at
             # most once every five minutes while receivers keep reporting.

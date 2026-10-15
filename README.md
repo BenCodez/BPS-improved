@@ -1587,7 +1587,9 @@ requires a known scanner or previously established timing; unmatched or ambiguou
 receivers and installations exposing only per-tracker distances cannot establish
 scanner silence. Newly registered scanners without a first packet get a full
 three-hour grace period. Match unknown receivers first or check Bermuda's scanner data.
-Existing timers can continue through a Bermuda API outage. Activity times are
+Previously proven bindings retain their timers through a Bermuda API or scanner
+inventory outage while the same placement remains saved, including after restart.
+Removing or rematching the placement discards its old timer. Activity times are
 stored locally every five minutes, at alert/recovery transitions and on graceful
 shutdown. An abrupt stop can lose up to five minutes of recent activity until
 fresh source timestamps reconcile it. Full diagnostics include the alert state;
