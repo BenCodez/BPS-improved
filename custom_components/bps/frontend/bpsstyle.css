@@ -3364,7 +3364,7 @@ input[type="checkbox"] { accent-color: hsl(var(--sidebar-primary)); }
 .bps-survey-view .bps-main { display: block; }
 .bps-survey-view .bps-content { display: block; width: 100%; }
 .bps-survey-view .bps-canvas-wrap { margin-top: 0; }
-.bps-survey-view .bps-canvas-wrap canvas { max-height: 50vh; max-height: 50dvh; touch-action: none; }
+.bps-survey-view .bps-canvas-wrap canvas { width: auto; max-height: 50vh; max-height: 50dvh; touch-action: none; }
 @media (min-width: 1600px) and (min-aspect-ratio: 5/2) {
     .bps-truth-panel { grid-column: 2; grid-row: 4; }
 }
