@@ -236,7 +236,7 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
     # optional history; larger history exports must not displace that evidence.
     if recent is not None:
         try:
-            add("recent_tracking.json", recent_tracking.export_snapshot(
+            add("recent_tracking.json", recent_tracking.export_json(
                 recent, min(MAX_RECENT_BUNDLE_BYTES,
                             MAX_BUNDLE_BYTES - total - 32768)))
         except ValueError:

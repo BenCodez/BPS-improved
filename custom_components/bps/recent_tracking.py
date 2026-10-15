@@ -313,3 +313,8 @@ def export_snapshot(snapshot: HistorySnapshot, max_bytes: int = EXPORT_MAX_BYTES
         else:
             low = mid + 1
     return result
+
+
+def export_json(snapshot: HistorySnapshot, max_bytes: int = EXPORT_MAX_BYTES) -> bytes:
+    """Return the exact UTF-8 representation used to enforce the export cap."""
+    return _encode(export_snapshot(snapshot, max_bytes), pretty=True)
