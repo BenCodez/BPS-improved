@@ -64,6 +64,22 @@ def test_stock_bermuda_legacy_inventory_remains_refreshable(hass, monkeypatch):
     assert result["trackers"] and result["ready"] is True
 
 
+def test_authoritative_empty_inventory_is_ready_after_last_device_is_untracked(hass, monkeypatch):
+    data, entries, states, _add, _old, _new, payloads, _calls = prepared(hass, monkeypatch)
+    entries.clear()
+    states.clear()
+    hass.data["bps"]["layout"] = data
+    api = bps.BPSTrackerInventoryAPI()
+    request = NS(app={"hass": hass})
+    initial = asyncio.run(api.get(request)).json_body
+    assert initial["ready"] and initial["trackers"]
+    payloads["entry"]["devices"]["synthetic-tracker"]["tracked"] = False
+    empty = asyncio.run(api.get(request)).json_body
+    assert empty["ready"] and empty["trackers"] == []
+    payloads["entry"] = None
+    assert asyncio.run(api.get(request)).json_body["ready"] is False
+
+
 def test_receiver_area_metadata_is_scoped_to_owner_and_clears_when_absent(hass, monkeypatch):
     _data, entries, _states, add, _old, _new, payloads, _calls = prepared(hass, monkeypatch)
     first = inventory(hass)

@@ -3168,9 +3168,11 @@ class BPSTrackerInventoryAPI(HomeAssistantView):
         # Saved groups are not evidence that Bermuda's inventory is ready.
         # Preserve existing API-only choices during partial entry reloads too;
         # stock Bermuda without the optional API retains its legacy inventory.
-        ready = any(row.get("group") is not True for row in data["trackers"]) and all(
-            row.get("path") == "direct" or row.get("reason") == "api_unavailable"
-            for row in sources.direct.statuses)
+        statuses = sources.direct.statuses
+        source_available = all(row.get("path") == "direct" or row.get("reason") == "api_unavailable"
+                               for row in statuses)
+        authoritative = bool(statuses) and all(row.get("path") == "direct" for row in statuses)
+        ready = source_available and (authoritative or any(row.get("group") is not True for row in data["trackers"]))
         return web.json_response({**data, "ready": ready},
                                  headers={"Cache-Control": "no-store"})
 

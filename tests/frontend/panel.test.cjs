@@ -1694,6 +1694,11 @@ test('tracker refresh discovers new phones without replacing staged receiver edi
     assert.ok(p.el('entSelector').options.some(option => option.value === 'bps_ble_synthetic_phone'));
     assert.match(p.el('trackerRefreshStatus').textContent, /Existing choices are retained/);
     assert.equal(staged.cords.x, 321);
+    p.network.trackersReady = true;
+    await p.el('refreshTrackers').fire('click');
+    assert.equal(p.el('entSelector').options.filter(option => option.value).length, 0);
+    assert.match(p.el('trackerRefreshStatus').textContent, /0 trackers/);
+    assert.equal(staged.cords.x, 321);
 });
 
 test('tracker refresh and picker focus preserve unapplied new and existing group fields', async () => {
