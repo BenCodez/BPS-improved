@@ -46,7 +46,9 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         addEventListener: (name, cb) => listeners.set(name, cb), removeEventListener: name => listeners.delete(name), body: element(), documentElement: element()};
     const window = {location: {origin: 'https://home.test'}, scrollX: 0, scrollY: 0, innerHeight: 1000,
         addEventListener: (name, cb) => listeners.set(`window:${name}`, cb)}; window.parent = window;
+    let elapsed = 0;
     const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date: ClockDate, URL, FormData, Response, TextEncoder,
+        performance: {now: () => elapsed},
         navigator: {geolocation: {watchPosition(done) {gpsWatchers.set(++gpsWatchId, done); return gpsWatchId;}, clearWatch(id) {gpsWatchers.delete(id);}}},
         Image: class {constructor() {this.naturalWidth = iconsLoaded ? 24 : 0; this.complete = iconsLoaded;}}, setTimeout: () => 1, clearTimeout() {}, setInterval: (cb, ms) => {intervals.push({cb, ms}); return intervals.length;}, clearInterval() {},
         requestAnimationFrame: () => 1, localStorage: {getItem: key => preferences.get(key) ?? null, setItem: (key, value) => preferences.set(key, value)},
@@ -57,6 +59,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             if (url === '/api/bps/scanner_linking' && network.matching) return {ok: true, status: 200,
                 json: async () => ({placed: [], unplaced: [], beacons: [], matching: network.matching})};
             const body = url === '/api/bps/read_text' ? {coordinates: JSON.stringify(layout), entities, receivers: (matching?.options || []).map(o => o.entity_id), receiver_matching: matching, scanner_diagnostics: matching?.scanner_diagnostics}
+                : url === '/api/bps/trackers' ? {trackers: network.trackers || entities.map(key => ({key, name: key})), ready: network.trackersReady !== false}
                 : url === '/api/bps/cords' ? network.cords
                 : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration
                 : url.startsWith('/api/bps/diagnostics?report=1') ? {text: 'BPS full diagnostics\n{"context":{"layout":{"floor":[]}}}'} : [];
@@ -82,7 +85,8 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     await ready;
     await new Promise(resolve => setImmediate(resolve));
     return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests, intervals, canvasCalls, network, document, listeners, preferences,
-        setClock: now => {clock = now;}, clock: () => clock, gpsWatchers,
+        setClock: now => {elapsed += Math.max(0, now - clock); clock = now;}, clock: () => clock, gpsWatchers,
+        setWallClock: now => {clock = now;}, setElapsed: now => {elapsed = now;},
         emitGPS: (coordinates, accuracy = 1) => {for (const callback of gpsWatchers.values()) callback({coords: {...coordinates, accuracy}, timestamp: clock});}};
 }
 const layout = () => ({floor: [{name: 'Property', scale: 20, zones: [], receivers: []}]});
@@ -93,7 +97,7 @@ function receiverProperties(p, id = 'proxy') {
     p.listeners.get('click')({target: {closest: selector => selector === '[data-type="recheight"]' ? button : null}});
     const dialog = p.document.body.children.findLast(e => e.className === 'bps-modal-overlay').children[0];
     return {height: dialog.children[1], unit: dialog.children[2], model: dialog.children[3].children[0], antenna: dialog.children[4].children[0],
-        accuracy: dialog.children[5].children[0], hardware: dialog.children[6], external: dialog.children[7].children[0],
+        accuracy: dialog.children[5].children[0], hardware: dialog.children[6], external: dialog.children[7].children[0], gain: dialog.children[8].children[0],
         save: dialog.children.at(-1).children[1], cancel: dialog.children.at(-1).children[0]};
 }
 
@@ -122,6 +126,26 @@ test('receiver expected distance error converts selected feet and metres, persis
     edit = receiverProperties(p); edit.accuracy.value = '0'; await edit.save.fire('click'); await Promise.resolve(); assert.equal(receiver.distance_accuracy_m, 0);
     edit = receiverProperties(p); edit.accuracy.value = ''; await edit.save.fire('click'); await Promise.resolve();
     assert.equal(receiver.distance_accuracy_m, undefined); assert.equal(receiver.height_unit, undefined);
+});
+
+test('receiver advertised dBi gain persists as metadata without changing range corrections', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, height: 2, correction: 1.8}];
+    const p = await panel(source); p.hooks.select('Property'); const receiver = p.hooks.layout().floor[0].receivers[0];
+    let edit = receiverProperties(p); edit.gain.value = '20'; await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.antenna_gain_dbi, 20); assert.equal(receiver.correction, 1.8);
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[0].receivers[0].antenna_gain_dbi, 20);
+    for (const value of ['61', '-21', 'Infinity', 'bad']) {
+        edit = receiverProperties(p); edit.gain.value = value; edit.model.value = 'changed';
+        await edit.save.fire('click'); assert.equal(receiver.antenna_gain_dbi, 20); assert.equal(receiver.hardware_model, undefined);
+        await edit.cancel.fire('click'); await Promise.resolve();
+    }
+    edit = receiverProperties(p); edit.gain.value = ''; edit.gain.validity.badInput = true;
+    await edit.save.fire('click'); assert.equal(receiver.antenna_gain_dbi, 20);
+    await edit.cancel.fire('click'); await Promise.resolve();
+    edit = receiverProperties(p); edit.gain.value = ''; await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.antenna_gain_dbi, undefined); assert.equal(receiver.correction, 1.8);
 });
 
 test('beacon hardware profiles persist per beacon, remain independent of tuning and reject invalid or cancelled edits', async () => {
@@ -410,6 +434,28 @@ test('both distance styles for two trackers keep all four labels apart at the ma
     assert.ok(y.every((value,index)=>index===0||value-y[index-1]>=28));
 });
 
+test('live distance bands draw and label signal variation, then expire during a redraw without a fresh poll', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const p = await panel(source); p.hooks.select('Property');
+    p.el('entSelector').value = 'beacon_a'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click'); p.el('circleToggle').checked = true; p.setClock(100000);
+    p.network.cords = [{ent: 'beacon_a', floor: 'Property', cords: [100, 100], radii: [[0, 0, 400]],
+        outdoor: {server_time: 100, receiver_diagnostics: [{receiver_xy_px: [0, 0], range_interval: {status: 'available', center_m: 20, source_observed: 99},
+            horizontal_interval: {status: 'available', lower_px: 200, upper_px: 600}}]}}];
+    p.canvasCalls.length = 0; await p.intervals.findLast(i => i.ms === 500).cb();
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600));
+    assert.ok(p.canvasCalls.some(c => c[0] === 'text' && c[1] === 'BLE range 10.0 m–30.0 m · signal variation'));
+    p.setWallClock(1000000000); p.canvasCalls.length = 0; await p.hooks.redrawAll();
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600), 'skewed client epoch does not hide fresh server evidence');
+    p.setWallClock(0); p.canvasCalls.length = 0; await p.hooks.redrawAll();
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600), 'a slow browser clock also keeps fresh server evidence visible');
+    p.setWallClock(100000);
+    p.setClock(104000); p.canvasCalls.length = 0;
+    p.el('distanceUnit').value = 'ft'; await p.el('distanceUnit').fire('change');
+    assert.equal(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600), false);
+    assert.equal(p.canvasCalls.some(c => c[0] === 'text' && /signal variation/.test(c[1])), false);
+});
+
 test('saving a floor retains receiver placement controls', async () => {
     const p=await panel(layout()); p.hooks.select('Property');
     p.el('mapbuttondiv').appendChild(p.hooks.addDeviceButton);
@@ -492,11 +538,14 @@ test('panel old layout loads without outdoor fields and opt-in saves via authent
     assert.ok(p.hooks, 'panel initialization completed');
     assert.equal(p.hooks.layout().outdoor_tracking, undefined);
     assert.equal(p.el('outdoorEnabled').checked, false);
+    assert.equal(p.el('outdoorLongRangeIntervals').checked, false);
     assert.equal(p.el('outdoorControls').hidden, true);
     p.el('outdoorEnabled').checked = true;
     await p.el('outdoorEnabled').fire('change');
     assert.equal(p.hooks.layout().outdoor_tracking.enabled, true);
     assert.equal(p.el('outdoorControls').hidden, false);
+    p.el('outdoorLongRangeIntervals').checked = true; await p.el('outdoorLongRangeIntervals').fire('change');
+    assert.equal(p.hooks.layout().outdoor_tracking.long_range_intervals, true);
     p.el('outdoorUncertainty').checked = false; await p.el('outdoorUncertainty').fire('change');
     assert.equal(p.hooks.layout().outdoor_tracking.show_uncertainty, false);
     p.el('outdoorThreshold').value = '7.4'; await p.el('outdoorThreshold').fire('change');
@@ -505,6 +554,7 @@ test('panel old layout loads without outdoor fields and opt-in saves via authent
     const request = p.requests.find(r => r.url === '/api/bps/save_text');
     assert.equal(request.options.headers.Authorization, 'Bearer test-token');
     assert.equal(JSON.parse(request.options.body.get('coordinates')).outdoor_tracking.enabled, true);
+    assert.equal(JSON.parse(request.options.body.get('coordinates')).outdoor_tracking.long_range_intervals, true);
 });
 
 test('panel enforces uncertainty threshold bounds before changing or saving the layout', async () => {
@@ -1109,6 +1159,36 @@ const matchingFixture = () => ({read_only: true, revision: 'inventory-1', option
     {entity_id: 'atrium_445566', name: 'Atrium', scanner_mac: 'aa:bb:cc:44:55:66', token: '445566', label: 'Atrium · atrium_445566 · aa:bb:cc:44:55:66', selectable: true},
     {entity_id: 'ambiguous', name: 'Ambiguous', selectable: false, label: 'Ambiguous'},
 ]});
+
+test('receiver hover shows only the bound HA area and clears it on leave', async () => {
+    const source = layout();
+    source.floor[0].receivers = [
+        {entity_id: 'shared', scanner_mac: 'aa:bb:cc:11:22:33', scanner_config_entry_id: 'owner-a', cords: {x: 100, y: 100}},
+        {entity_id: 'unknown', cords: {x: 400, y: 100}},
+        {entity_id: 'unique', cords: {x: 600, y: 100}},
+    ];
+    const matching = {options: [{entity_id: 'shared', identity_ambiguous: true, area_names: ['Kitchen', 'Garage'],
+        scanner_identities: [
+            {config_entry_id: 'owner-a', scanner_mac: 'aa:bb:cc:11:22:33', area_name: '<Kitchen & Pantry>'},
+            {config_entry_id: 'owner-b', scanner_mac: 'aa:bb:cc:11:22:33', area_name: 'Garage'},
+        ]}, {entity_id: 'unknown', name: 'Unknown'}, {entity_id: 'unique', name: 'Unique', area_name: 'Office'}]};
+    const p = await panel(source, [], false, matching); p.hooks.select('Property');
+    await p.el('canvas').fire('mousemove', {clientX: 100, clientY: 100, buttons: 0});
+    assert.ok(p.canvasCalls.some(call => call[0] === 'text' && call[1] === 'Area: <Kitchen & Pantry>'));
+    assert.ok(!p.canvasCalls.some(call => call[0] === 'text' && call[1] === 'Area: Garage'));
+    p.hooks.redrawAll();
+    assert.match(p.el('entitytree').innerHTML, /Area: &lt;Kitchen &amp; Pantry&gt;/);
+    const before = p.canvasCalls.length;
+    await p.el('canvas').fire('mousemove', {clientX: 400, clientY: 100, buttons: 0});
+    assert.ok(!p.canvasCalls.slice(before).some(call => call[0] === 'text' && /^Area:/.test(call[1])));
+    await p.el('canvas').fire('mouseleave');
+    const afterLeave = p.canvasCalls.length;
+    p.hooks.redrawAll();
+    assert.ok(!p.canvasCalls.slice(afterLeave).some(call => call[0] === 'text' && /^Area:/.test(call[1])));
+    p.hooks.zoom(2);
+    await p.el('canvas').fire('mousemove', {clientX: 1200, clientY: 200, buttons: 0});
+    assert.ok(p.canvasCalls.slice(afterLeave).some(call => call[0] === 'text' && call[1] === 'Area: Office'));
+});
 const flushMatching = () => new Promise(resolve => setImmediate(resolve));
 async function receiverMatch(p, index = 0) {
     const rec = p.hooks.layout().floor.find(f => f.name === 'Property').receivers[index];
@@ -1645,4 +1725,55 @@ test('manual height edit clears obsolete confirmed height provenance before the 
     await p.hooks.savedata(true);
     const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
     assert.equal(saved.floor[0].receivers[0].height_survey, undefined);
+});
+
+test('tracker refresh discovers new phones without replacing staged receiver edits', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 100}}];
+    const p = await panel(source);
+    const staged = p.hooks.layout().floor[0].receivers[0]; staged.cords.x = 321;
+    p.network.trackers = [{key: 'beacon_a', name: 'Existing beacon'}, {key: 'bps_ble_synthetic_phone', name: 'Synthetic phone'}];
+    await p.el('refreshTrackers').fire('click');
+    assert.equal(p.el('entSelector').options.find(option => option.value === 'bps_ble_synthetic_phone').textContent, 'Synthetic phone');
+    assert.equal(staged.cords.x, 321);
+    assert.equal(p.hooks.layout().floor[0].receivers[0], staged);
+    assert.equal(p.requests.filter(request => request.url === '/api/bps/read_text').length, 1);
+    assert.match(p.el('trackerRefreshStatus').textContent, /2 trackers/);
+    p.network.trackers = []; p.network.trackersReady = false;
+    await p.el('refreshTrackers').fire('click');
+    assert.ok(p.el('entSelector').options.some(option => option.value === 'bps_ble_synthetic_phone'));
+    assert.match(p.el('trackerRefreshStatus').textContent, /Existing choices are retained/);
+    assert.equal(staged.cords.x, 321);
+    p.network.trackersReady = true;
+    await p.el('refreshTrackers').fire('click');
+    assert.equal(p.el('entSelector').options.filter(option => option.value).length, 0);
+    assert.match(p.el('trackerRefreshStatus').textContent, /0 trackers/);
+    assert.equal(staged.cords.x, 321);
+});
+
+test('tracker refresh and picker focus preserve unapplied new and existing group fields', async () => {
+    for (const existing of [false, true]) {
+        const source = layout(); source.outdoor_tracking = {enabled: true};
+        if (existing) source.tracker_groups = [{id: 'rover', name: 'Saved name', enabled: true, beacons: ['beacon_a']}];
+        const p = await panel(source);
+        p.el('groupSelector').value = existing ? 'rover' : ''; await p.el('groupSelector').fire('change');
+        const before = JSON.stringify(plain(p.hooks.layout()));
+        p.el('groupName').value = 'Unapplied name';
+        p.el('groupId').value = existing ? 'rover' : 'new_dog';
+        p.el('groupEnabled').checked = false;
+        p.el('groupBeacons').options.forEach(option => {option.selected = option.value === 'beacon_b';});
+        p.el('entSelector').value = existing ? 'bps_group_rover' : 'beacon_a';
+        p.network.trackers = [{key: 'beacon_a', name: 'Existing beacon'}, {key: 'new_phone', name: 'New phone'}];
+        for (const [element, event] of [['refreshTrackers', 'click'], ['entSelector', 'focus']]) {
+            await p.el(element).fire(event);
+            assert.equal(p.el('groupSelector').value, existing ? 'rover' : '');
+            assert.equal(p.el('groupName').value, 'Unapplied name');
+            assert.equal(p.el('groupId').value, existing ? 'rover' : 'new_dog');
+            assert.equal(p.el('groupId').disabled, existing);
+            assert.equal(p.el('groupEnabled').checked, false);
+            assert.deepEqual(p.el('groupBeacons').selectedOptions.map(option => option.value), ['beacon_b']);
+            assert.ok(p.el('groupBeacons').options.some(option => option.value === 'new_phone'));
+            assert.equal(p.el('entSelector').value, existing ? 'bps_group_rover' : 'beacon_a');
+            assert.equal(JSON.stringify(plain(p.hooks.layout())), before);
+        }
+    }
 });

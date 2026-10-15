@@ -355,7 +355,7 @@
         let generation = 0, capture = null, fix = null, preview = null, anchorPoint = null, anchorGuard = null;
         let watch = null, timer = null, poll = null, picked = null, lastContext = null, lastChosen = null;
         let message = 'GPS is optional. Align the map with at least two known points.';
-        let locationsRequest = 0;
+        let locationsRequest = 0, sourceInventory = [];
         let locationsFlight = null;
         let survey = null;
         const status = text => {message = text; el('gpsStatus').textContent = text;};
@@ -405,6 +405,25 @@
                 el('gpsFit').textContent = text;
             } catch (error) {el('gpsFit').textContent = error.message;}
         }
+        function setupSnapshot() {
+            const floor = hooks.getFloor(), raw = floor?.georeference?.anchors;
+            const anchors = Array.isArray(raw) ? raw.slice(0, MAX_ANCHORS).map(anchor => ({
+                label: typeof anchor?.label === 'string' ? anchor.label.slice(0, 80) : '',
+                latitude: anchor?.latitude, longitude: anchor?.longitude,
+                x: anchor?.x, y: anchor?.y, accuracy_m: anchor?.accuracy_m
+            })) : [];
+            const setup = {floor: typeof floor?.name === 'string' ? floor.name : null,
+                map_scale_px_per_m: floor?.scale, anchors};
+            try {
+                const transform = fit(anchors);
+                setup.fit = {scale_px_per_m: transform.scale, residual_m: transform.residual_m,
+                    residuals_m: [...transform.residuals_m], anchor_accuracy_m: transform.anchor_accuracy_m,
+                    independently_checked: transform.independently_checked, consistent: transform.consistent,
+                    map_scale_difference_percent: number(floor?.scale, .001, 100000)
+                        ? (transform.scale / floor.scale - 1) * 100 : null};
+            } catch (error) {setup.fit = {error: error.message};}
+            return setup;
+        }
         function refresh() {
             const signature = context(), changed = lastContext !== null && signature !== lastContext;
             lastContext = signature;
@@ -434,14 +453,26 @@
                 if (requestId !== locationsRequest || g && !current(g)) return;
                 const selected = el('gpsPhone').value;
                 const rows = Array.isArray(data.locations) ? data.locations.slice(0, 128) : [];
+                const inventory = Array.isArray(data.sources) ? data.sources : rows.map(row => ({
+                    entity_id: row.entity_id, name: row.name, status: 'fresh', reason: 'legacy_location', age_s: row.age_s}));
+                const seen = new Set();
+                sourceInventory = inventory.filter(row => {
+                    if (!row || !/^(device_tracker|person)\.[a-z0-9_]{1,128}$/.test(row.entity_id)
+                        || seen.has(row.entity_id) || seen.size >= 128) return false;
+                    seen.add(row.entity_id); return true;
+                }).map(row => ({entity_id: row.entity_id,
+                    name: typeof row.name === 'string' ? row.name.slice(0, 128) : row.entity_id,
+                    status: ['fresh', 'stale', 'unavailable'].includes(row.status) ? row.status : 'unavailable',
+                    reason: typeof row.reason === 'string' ? row.reason.slice(0, 64) : '',
+                    age_s: number(row.age_s, 0, Number.MAX_SAFE_INTEGER) ? row.age_s : null}));
                 el('gpsPhone').replaceChildren();
                 const blank = doc.createElement('option'); blank.value = ''; blank.textContent = 'Browser only'; el('gpsPhone').appendChild(blank);
-                rows.forEach(row => {
-                    if (!/^(device_tracker|person)\.[a-z0-9_]{1,128}$/.test(row.entity_id)) return;
+                sourceInventory.forEach(row => {
                     const option = doc.createElement('option'); option.value = row.entity_id;
-                    option.textContent = `${row.name || row.entity_id} (${row.entity_id})`; el('gpsPhone').appendChild(option);
+                    option.textContent = `${row.name || row.entity_id} (${row.entity_id})${row.status === 'fresh' ? '' : ` — ${row.status}`}`;
+                    el('gpsPhone').appendChild(option);
                 });
-                if (selected && !rows.some(row => row.entity_id === selected)) {
+                if (selected && !sourceInventory.some(row => row.entity_id === selected)) {
                     const missing = doc.createElement('option'); missing.value = selected; missing.textContent = selected + ' (stale or unavailable)'; el('gpsPhone').appendChild(missing);
                 }
                 el('gpsPhone').value = selected;
@@ -582,12 +613,14 @@
             ctx.beginPath(); ctx.arc(preview.x, preview.y, preview.radius_px, 0, Math.PI*2); ctx.fill(); ctx.stroke();
             ctx.fillStyle = '#06b6d4'; ctx.beginPath(); ctx.arc(preview.x, preview.y, 5/zoom, 0, Math.PI*2); ctx.fill(); ctx.restore();
         }, snapshot() {
-            if (!lastChosen) return {active: !!capture, status: message, auto_survey: survey?.snapshot()};
+            const common = {active: !!capture, status: message, selected_phone: el('gpsPhone').value || '',
+                sources: sourceInventory.map(row => ({...row})), setup: setupSnapshot(), auto_survey: survey?.snapshot()};
+            if (!lastChosen) return common;
             return {active: !!capture, status: message, usable_for_placement: !!fix && current(fix.guard) && now()-fix.timestamp <= MAX_AGE_MS,
                 chosen_gps: {...lastChosen, age_s: (now()-lastChosen.timestamp)/1000,
                 stale: now()-lastChosen.timestamp > MAX_AGE_MS},
                 preview: preview ? {x: preview.x, y: preview.y, accuracy_m: preview.accuracy_m, receiver: preview.target.label} : null,
-                auto_survey: survey?.snapshot()};
+                ...common};
         }};
     }
     const api = {fit, local, fromLocal, project, observation, summarize, choose, collector, parseCoordinates, mergeSurveyPosition, surveyLayoutRevision, surveyController, init};

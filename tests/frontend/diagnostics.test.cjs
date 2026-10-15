@@ -17,7 +17,7 @@ function panel(panelSnapshot, locationTools = {}) {
             addEventListener(type, cb) {this.events[type] = cb;},
             fire(type = 'click') {return this.events[type]();}, click() {downloads.push({href: this.href, name: this.download});}};
     }
-    for (const name of ['CopyAll', 'ReportText', 'ReportStatus', 'ReportPanel', 'SelectReport', 'Start', 'Stop', 'Download', 'Clear', 'Mark', 'Pick', 'Release', 'Note', 'Refresh', 'Target', 'Duration', 'Floor', 'Status', 'X', 'Y', 'Label',
+    for (const name of ['CopyAll', 'Bundle', 'ReportText', 'ReportStatus', 'ReportPanel', 'SelectReport', 'Start', 'Stop', 'Download', 'Clear', 'Mark', 'Pick', 'Release', 'Note', 'Refresh', 'Target', 'Duration', 'Floor', 'Status', 'X', 'Y', 'Label',
         'SnapshotLoad', 'SnapshotPick', 'SnapshotTarget', 'SnapshotFloor', 'SnapshotX', 'SnapshotY', 'SnapshotAccuracy', 'SnapshotLabel', 'SnapshotCapture', 'SnapshotComparison']) {
         elements.set('diagnostic' + name, element(['Target', 'Duration', 'Floor', 'SnapshotTarget', 'SnapshotFloor'].includes(name) ? 'select' : 'input'));
     }
@@ -75,6 +75,39 @@ test('panel context is frozen separately before the server fetch and is included
     const copiedPanel = report.panel_context;
     assert.equal(copiedPanel.editor_layout.floor[0].receivers[0].cords.x, 2);
     assert.equal(p.el('ReportText').value, text);
+});
+
+test('full bundle downloads retained binary data with a frozen editor context and releases controls', async () => {
+    const editor = {selected_floor: 'Synthetic floor', editor_layout: {floor: [{name: 'Synthetic floor', scale: 20}]}};
+    const p = panel(() => editor);
+    let release; p.network.pending = new Promise(resolve => {release = resolve;});
+    const action = p.el('Bundle').fire();
+    assert.equal(p.el('CopyAll').disabled, true);
+    assert.equal(p.el('SnapshotCapture').disabled, true);
+    editor.editor_layout.floor[0].scale = 40;
+    release(); await action;
+    const posted = JSON.parse(p.requests[0].options.body);
+    assert.equal(posted.action, 'bundle');
+    assert.equal(posted.panel_context.editor_layout.floor[0].scale, 20);
+    assert.equal(p.downloads[0].name, 'bps-diagnostics-full.zip');
+    assert.equal(p.downloads[1].revoked, 'blob:local');
+    assert.equal(p.el('CopyAll').disabled, false);
+    assert.equal(p.el('Bundle').disabled, false);
+    assert.equal(p.copied.length, 0);
+    assert.match(p.el('ReportStatus').textContent, /manifest.json/);
+});
+
+test('bundle errors preserve the previous clipboard report and restore controls', async () => {
+    const p = panel();
+    await p.el('CopyAll').fire();
+    const before = p.el('ReportText').value;
+    p.network.error = 'synthetic bundle unavailable';
+    await p.el('Bundle').fire();
+    assert.equal(p.downloads.length, 0);
+    assert.equal(p.el('ReportText').value, before);
+    assert.match(p.el('ReportStatus').textContent, /synthetic bundle unavailable/);
+    assert.equal(p.el('Bundle').disabled, false);
+    assert.equal(p.el('CopyAll').disabled, false);
 });
 
 test('oversized combined reports preserve the previous report and do not copy incomplete output', async () => {

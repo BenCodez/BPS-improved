@@ -14,6 +14,7 @@ from .environment import (CompiledEnvironment, compile_environment,
 from .environment_geometry import point_relation
 from .solver_settings import MIN_WEIGHT_RADIUS_M
 from .uncertainty import estimate_uncertainty
+from .range_intervals import solve_with_intervals
 
 
 # These are trust heuristics, not a claim that a short RSSI range proves a
@@ -208,7 +209,7 @@ def _indoor_support(environment, selected, diagnostics, scale, max_age_s):
 
 def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
                   previous, solver, *, position_timeout_s=300.0, nearby_trust=False,
-                  obstruction_strength=1.0):
+                  obstruction_strength=1.0, long_range_intervals=False):
     """Return an outdoor candidate, or None with fewer than three usable inputs.
 
     ``weighted`` and ``floor.receivers`` share the ordering of the live candidate
@@ -237,6 +238,23 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
                 if not excluded(rec)]
     if len(selected) < 3:
         return None
+    intervals = []
+    for pt, rec in selected:
+        reading = rec.get("_outdoor_reading", {})
+        raw_interval = reading.get("range_interval", {})
+        horizontal = reading.get("horizontal_interval", {})
+        lo, hi = (finite_number(horizontal.get(key), minimum=0.0) for key in ("lower_px", "upper_px"))
+        eligible = (raw_interval.get("solver_eligible") is True and horizontal.get("status") == "available"
+                    and finite_number(raw_interval.get("center_m"), 0) >= LOWER_TRUST_RANGE_M
+                    and pt[4] / scale >= LOWER_TRUST_RANGE_M and lo is not None and hi is not None
+                    and lo < hi and lo <= pt[2] <= hi)
+        intervals.append((lo, hi) if eligible and long_range_intervals else None)
+    point_solver = solver
+    interval_telemetry = {"applied": False, "reason": "no_eligible_ranges" if long_range_intervals else "disabled"}
+    if any(intervals):
+        def solver(points, **kwargs):
+            return solve_with_intervals(points, intervals, point_solver=point_solver,
+                                        telemetry=interval_telemetry, **kwargs)
     accuracies = [receiver_accuracy(rec, pt[4] / scale) for pt, rec in selected]
     jump_weights = [pt[3] for pt, _rec in selected]
     ranges = nearby_range_trust([
@@ -254,6 +272,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
     fix = solver(base, bounds=bounds, min_weight_radius=min_weight_radius)
     if fix is None:
         return None
+    first_interval_telemetry = dict(interval_telemetry)
     compilation_error = None
     try:
         environment = compile_environment(floor)
@@ -264,7 +283,7 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
         compilation_error = type(error).__name__
         environment = CompiledEnvironment(())
     diagnostics = []
-    for (pt, rec), accuracy, trust, jump_weight in zip(selected, accuracies, ranges, jump_weights):
+    for (pt, rec), accuracy, trust, jump_weight, interval in zip(selected, accuracies, ranges, jump_weights, intervals):
         reading = rec.get("_outdoor_reading", {})
         diagnostic = measurement_reliability(
             environment, pt[:2], fix, policy=rec.get("outdoor_policy", "auto"),
@@ -280,6 +299,10 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
             "corrected_distance_m": rec["distance"],
             "observed": reading.get("observed"),
             "base_jump_weight": jump_weight,
+            "receiver_xy_px": list(pt[:2]),
+            "range_interval": reading.get("range_interval", {"status": "unavailable", "reason": "source_has_no_quality_interval"}),
+            "horizontal_interval": reading.get("horizontal_interval"),
+            "range_interval_used": interval is not None,
             **accuracy,
             **trust,
         })
@@ -307,12 +330,15 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
         if refined is not None:
             fix, base = refined, adjusted
         else:
+            interval_telemetry.update(first_interval_telemetry)
             # Telemetry must describe the weights that actually produced the fix.
             for diagnostic, pt in zip(diagnostics, base):
                 diagnostic["reliability_weight"] = pt[3]
                 diagnostic["status"] = "refinement_failed"
             indoor["indoor_support_applied"] = False
     indoor.setdefault("indoor_support_applied", indoor["indoor_support_receivers"] > 0)
+    for diagnostic, interval in zip(diagnostics, intervals):
+        diagnostic["range_interval_used"] = interval is not None and interval_telemetry["applied"]
     election_weighted = []
     for pt, diagnostic in zip(base, diagnostics):
         diagnostic["horizontal_residual_m"] = (math.dist(pt[:2], fix) - pt[2]) / scale
@@ -332,6 +358,12 @@ def solve_outdoor(floor, weighted, bounds, scale, min_weight_radius, max_age_s,
     )
     quality["receiver_diagnostics"] = diagnostics
     quality["range_trust_enabled"] = bool(nearby_trust)
+    quality["long_range_intervals_enabled"] = bool(long_range_intervals)
+    quality["range_interval_receivers"] = sum(d["range_interval_used"] for d in diagnostics)
+    quality["range_interval_attempted_receivers"] = sum(interval is not None for interval in intervals)
+    quality["range_interval_result"] = interval_telemetry
+    quality["position_solver_mode"] = "long_range_intervals" if interval_telemetry["applied"] else "point_ranges"
+    quality["range_interval_threshold_m"] = LOWER_TRUST_RANGE_M
     quality["obstruction_strength"] = obstruction_strength
     quality["fence_paths"] = sum(d.get("fence_paths", 0) > 0 for d in diagnostics)
     quality["fence_crossings"] = sum(d.get("fence_crossings", 0) for d in diagnostics)

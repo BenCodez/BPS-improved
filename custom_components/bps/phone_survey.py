@@ -18,7 +18,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.helpers.storage import Store
 
 from .gps_locations import ENTITY_ID, gps_locations, validate_georeference, _number
-from .receiver_sources import ReceiverSources
+from .receiver_sources import ReceiverSources, synchronous_reader
 from .storage import (
     BPS_FILE_LOCK,
     assert_layout_writable,
@@ -487,6 +487,7 @@ class PhoneSurvey:
         ]:
             raise ValueError("Selected BLE phone membership changed")
         sources = self.sources(self.hass)
+        read_source = synchronous_reader(sources)
         near = []
         bindings = sources.floor_bindings(floor)
         for rec, binding in zip(floor.get("receivers", []), bindings):
@@ -511,7 +512,7 @@ class PhoneSurvey:
             row = rows[0]
             # Use the canonical source resolver again. Slug-only or mismatched
             # publication evidence cannot authorize a scanner move.
-            source, state = sources.source(s["phone"], rec, binding, now=now)
+            source, state = read_source(s["phone"], rec, binding, now=now)
             if state is None or source != row.get("entity_id"):
                 continue
             if (

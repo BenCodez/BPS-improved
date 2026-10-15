@@ -32,7 +32,7 @@ SCANNER_FIELDS = ("scanner_id", "address", "name", "slug", "unique_id", "entity_
                   "area_id", "area_name", "scanner_last_seen_age", "hardware")
 MEASUREMENT_FIELDS = ("device_id", "source_id", "observed", "observed_clock", "stamp", "age", "status",
     "rssi", "raw_rssi", "filtered_rssi", "rssi_offset", "reference_power", "attenuation", "raw_distance",
-    "filtered_distance", "distance", "distance_raw", "model_version", "reference_power_verified", "quality",
+    "filtered_distance", "distance", "distance_raw", "tx_power", "model_version", "reference_power_verified", "quality",
     "unavailable", "history", "history_status", "history_omitted")
 DEVICE_FIELDS = ("device_id", "owner_id", "address", "name", "slug", "unique_id", "source_aliases", "tracked",
                  "address_type", "area_id", "area_name", "hardware")
@@ -222,6 +222,7 @@ class BermudaDirect:
                 "scanner_mac": mac, "status": "missing", "reason": "measurement_missing"}
         observed, value = None, None
         if ad is not None:
+            from .range_intervals import signal_interval
             quality = ad.get("quality") if isinstance(ad.get("quality"), Mapping) else {}
             source_age = number(ad.get("age"))
             age = source_age
@@ -235,6 +236,7 @@ class BermudaDirect:
                         source_status=ad.get("status"), source_observed=ad.get("observed"),
                         source_age_s=source_age, accepted_age_s=age, quality=detached(quality),
                         model_version=ad.get("model_version"))
+            info["range_interval"] = signal_interval(ad, clock)
             value = number(ad.get("filtered_distance", ad.get("distance")))
             if ad.get("status") != "current" or source_age is None or source_age < 0:
                 info["reason"], value = "source_not_current", None

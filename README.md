@@ -848,6 +848,68 @@ lives.)
 
 ## Live actual-location marks
 
+**Debugging → Download all diagnostic data** downloads a private ZIP containing
+the live report, fuller Bermuda direct measurements, complete retained actual-location
+snapshots, available diagnostic recordings, recent tracking, GPS sources and map
+alignment, saved layout context, editor context, and your phone survey candidates.
+`manifest.json` identifies every included file, source limit and unavailable section.
+**Copy full diagnostics** includes bounded actual-location summaries for quick pastes.
+Each mark retains its own capture ID, precise UTC timestamp, software versions and
+settings fingerprint; old labels are never applied to a later live position.
+
+New actual-location marks preserve per-pair raw/filtered RSSI and distances,
+effective reference power, scanner offset and attenuation, model consistency,
+packet/filter ages, rejection reasons, recent raw history with its original
+clocks, BPS corrections and receiver/beacon hardware. Older history is unlabelled
+context and is never scored against the new instant's location. This evidence
+is retained for the marked dog even when the general Bermuda clipboard view is
+truncated. Receiver properties include an optional **Advertised antenna gain
+(dBi)** field; this describes hardware and does not change RSSI or transmit power.
+
+The ZIP's `radio_survey.json` compares retained marks by canonical beacon/receiver,
+hardware, model, saved map and mapped path classification. It separates raw-model,
+filter and BPS errors into measured-range bands: under 5 m, 5–10 m, 10–25 m,
+25–50 m and 50 m or farther. This helps detect a model that works nearby but
+becomes biased at outdoor distances. These bands do not assert a 10 m radio limit.
+Packets older than three seconds, ambiguous identities, missing 3D geometry and
+model inconsistencies have explicit exclusions. Repeated packets count once.
+Older marks without radio evidence remain available and are counted as missing.
+
+For useful comparisons, let the dog settle at 3–5 accurately marked locations
+with different distances and clear/obstructed paths, then mark each location.
+The label describes only that instant. Repeated presses without fresh packets
+or distinct locations add no independent evidence. The export reports sample
+diversity; it does not fit or apply corrections. Validate any later adjustment
+at separate measured locations before leaving it enabled.
+
+Fresh Bermuda signal-quality data can also provide an asymmetric **signal-variation
+range**. It propagates ±2 observed RSSI standard deviations (with a stated 0.5 dB
+quantization floor) through the effective model. This is not a confidence interval
+and does not bound bias from walls, antenna direction or a wrong model. The survey
+reports whether measured truth fell within those bands, separately by distance.
+With at least three marked locations spanning a factor of two in range, each
+pair also reports an exploratory RSSI-error trend against log distance. A
+constant error suggests an offset; a changing slope can suggest attenuation
+or path-model trouble. Locations have equal weight, so repeated presses at one
+spot cannot dominate the trend. This is not verified calibration: label/map/
+height error and antenna/body orientation can produce similar patterns.
+**Show distances** displays available distant bands as a light shaded ring for
+an isolated tracker/group, with range labels; unavailable or stale bands disappear.
+
+To compare positioning, enable **Outdoor tracking → Experimental: use distance
+ranges beyond 10 m**, then **Save Floor Plan**. It is off by default. Eligible
+distant ranges use a soft interval constraint with a weak centre tie-break;
+nearby readings and readings without fresh, accepted quality data keep the
+existing calculation. BPS retains the original solve if refinement fails.
+Diagnostics record the actual mode, interval inputs and fallback reason, and each
+actual-location mark retains the setting. Test the same measured locations with
+the toggle off and on; it does not change Bermuda offsets or calibration.
+
+Phone GPS choices remain listed when their fix becomes stale or unavailable. Only
+fresh fixes qualify for placement. **Refresh trackers** updates BLE choices without
+reloading or discarding map edits; API-only Bermuda trackers keep stable identities.
+Hover a receiver to see its Home Assistant area when that scanner identity is known.
+
 In **Map & Setup**, start live tracking and select a dog group in the tracking
 list. Press **Mark actual location**, then click or tap where the dog actually
 is. Repeat whenever needed. Each click saves an independent full BLE snapshot,

@@ -29,7 +29,7 @@ def validate_outdoor_layout(layout, known_trackers=None):
         settings = layout["outdoor_tracking"]
         if not isinstance(settings, dict):
             return "outdoor_tracking must be an object"
-        for key in ("enabled", "show_uncertainty"):
+        for key in ("enabled", "show_uncertainty", "long_range_intervals"):
             if key in settings and not isinstance(settings[key], bool):
                 return f"outdoor_tracking.{key} must be true or false"
         if "hide_uncertainty_below_m" in settings and finite_number(
@@ -95,6 +95,8 @@ def validate_outdoor_layout(layout, known_trackers=None):
                 return "Receiver height unit must be m or ft"
             if "distance_accuracy_m" in receiver and finite_number(receiver["distance_accuracy_m"], minimum=0, maximum=1000) is None:
                 return "Receiver expected distance error must be a finite number from 0 to 1000 metres"
+            if "antenna_gain_dbi" in receiver and finite_number(receiver["antenna_gain_dbi"], minimum=-20, maximum=60) is None:
+                return "Receiver advertised antenna gain must be a finite number from -20 to 60 dBi"
             if isinstance(receiver, dict) and "outdoor_policy" in receiver:
                 policy = receiver["outdoor_policy"]
                 if not isinstance(policy, str) or policy not in RECEIVER_POLICIES:

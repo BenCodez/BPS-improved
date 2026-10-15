@@ -4,6 +4,7 @@ import math
 from collections.abc import Mapping
 
 from .environment import finite_number
+from .receiver_sources import synchronous_reader
 from .tracker_groups import GROUP_MAX_SPEED_MS, GROUP_MOTION_SLACK_M
 
 SILENT_RECEIVER_RADIUS_M = 3.0
@@ -62,6 +63,7 @@ def receiver_constraints(floor, members, sources, health, now, max_age_s, *, rea
     if scale is None or range_limit is None or not members:
         return []
     constraints = []
+    read_source = synchronous_reader(sources)
     for rec, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
         if not isinstance(rec, Mapping) or rec.get("outdoor_policy") == "ignore" or sources.blocked(binding):
             continue
@@ -93,7 +95,7 @@ def receiver_constraints(floor, members, sources, health, now, max_age_s, *, rea
             continue
         missing = []
         for member in members:
-            _eid, state = sources.source(member, rec, binding, now=now)
+            _eid, state = read_source(member, rec, binding, now=now)
             if state is None:
                 break  # missing/disabled entities and ambiguous tracker proofs are unknown
             value = _range(getattr(state, "state", None))

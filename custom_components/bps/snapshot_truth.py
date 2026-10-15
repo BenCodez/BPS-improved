@@ -3,6 +3,7 @@ import json
 import math
 
 from .environment import compile_environment, outdoor_settings, path_reliability, reading_max_age
+from .radio_diagnostics import RadioEvidence
 
 MAX_MARKERS = 32
 MAX_READINGS = 32768
@@ -210,6 +211,7 @@ def analyse(snapshot, markers):
     if not isinstance(readings, list) or len(readings) > MAX_READINGS:
         raise ValueError("Snapshot supports at most 32768 readings")
     context = snapshot["context"]
+    radio_evidence = RadioEvidence(snapshot)
     floors = {f["name"]: f for f in context["layout"]["floor"] if isinstance(f, dict) and isinstance(f.get("name"), str)}
     placements, links, positions, solver_inputs = {}, {}, {}, {}
     for name, floor in floors.items():
@@ -244,6 +246,7 @@ def analyse(snapshot, markers):
             for raw in rows_by_tracker.get(tracker, []):
                 row = {k: _scalar(raw.get(k)) for k in ("tracker", "receiver", "floor", "entity_id", "status", "age_s", "observed", "ignored", "assumed_unit_m", "measured_distance_m", "corrected_distance_m")}
                 row["environment"] = _unevaluated_path("reading_unscored")
+                rec = None
                 receiver_xy = None
                 evidence = _solver_evidence(raw, positions, solver_inputs)
                 if evidence is not None:
@@ -294,6 +297,9 @@ def analyse(snapshot, markers):
                                        relative_error_pct=relative if number(relative) else None,
                                        disagrees=abs(error) > marker["accuracy_m"])
                 identity = _identity(link_candidates[0]) if len(link_candidates) == 1 else None
+                row["radio"] = radio_evidence.row(raw, rec, row, identity)
+                row["receiver_correction"] = _scalar(raw.get("receiver_correction"))
+                row["tracker_distance_factor"] = _scalar(raw.get("tracker_distance_factor"))
                 source_key = (tracker, raw.get("entity_id"))
                 scanner_key = (tracker, identity)
                 if not reasons:

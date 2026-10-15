@@ -108,6 +108,8 @@
                                     <select id="entSelector" class="bps-input">
                                         <option value="">-- Please choose an option --</option>
                                     </select>
+                                    <button type="button" id="refreshTrackers" class="bps-btn bps-btn-outline">Refresh trackers</button>
+                                    <span id="trackerRefreshStatus" class="bps-hint" role="status"></span>
                                 </div>
                                 <div class="bps-field">
                                     <label class="bps-label">Tracker icon</label>
@@ -219,7 +221,7 @@
                                         <option value="estimated">Estimated position</option>
                                     </select>
                                     <span class="tooltip">❓
-                                        <span class="tooltip-text">Dashed BLE circles show the corrected and height-adjusted measured ranges. Solid estimated circles show the distance from each reporting receiver to BPS's estimated beacon or combined group position. Δ is BLE range minus estimated distance: positive reads farther, negative reads closer. This disagreement does not prove receiver error. Walls, trees and fences affect the position solver's trust, not an automatic range correction. Estimated circles follow that position and are not proof of accuracy. With several devices shown, lines replace circles; click a beacon to isolate it. Values use the Distances selector under View, independently of the grid.</span>
+                                        <span class="tooltip-text">Dashed BLE circles show the corrected and height-adjusted measured ranges. Solid estimated circles show the distance from each reporting receiver to BPS's estimated beacon or combined group position. Light shaded bands show available distant signal-variation ranges; these exclude systematic model error. Δ is BLE range minus estimated distance: positive reads farther, negative reads closer. This disagreement does not prove receiver error. Walls, trees and fences affect the position solver's trust, not an automatic range correction. Estimated circles follow that position and are not proof of accuracy. With several devices shown, lines replace circles; click a beacon to isolate it. Values use the Distances selector under View, independently of the grid.</span>
                                     </span>
                                 </span>
                                 <span id="traceControl" style="display: none">
@@ -382,6 +384,8 @@
                         <p class="bps-hint">Optional. Changes are persisted with Save Floor Plan. Environment shapes change measurement trust, not distance.</p>
                         <label class="bps-switch"><input type="checkbox" id="outdoorEnabled"><span>Enable Outdoor Tracking</span></label>
                         <div id="outdoorControls" hidden>
+                            <label class="bps-switch"><input type="checkbox" id="outdoorLongRangeIntervals"><span>Experimental: use distance ranges beyond 10 m</span></label>
+                            <p class="bps-hint">Allows signal variation instead of forcing one distant radius. Needs fresh Bermuda quality data; missing data uses normal tracking. Compare actual-location marks with this off and on.</p>
                             <label class="bps-switch"><input type="checkbox" id="outdoorUncertainty"><span>Show estimated uncertainty</span></label>
                             <label class="bps-label" for="outdoorThreshold">Hide circle below (metres)</label>
                             <input id="outdoorThreshold" type="number" min="0" max="10000" step="0.1" class="bps-input" value="0">
@@ -536,7 +540,9 @@
                 <p>Copy one live report with all trackers, groups, receiver readings, calibration decisions, saved map placements, and Bermuda sensors and settings. Also includes the selected map, displayed circles and editor placements, labelled separately from saved settings. No recording or tracker selection needed. Contains your property geometry, tracker locations and Bluetooth scanner identifiers.</p>
                 <div class="bps-btn-row">
                     <button type="button" id="diagnosticCopyAll" class="bps-btn bps-btn-primary">Copy full diagnostics</button>
+                    <button type="button" id="diagnosticBundle" class="bps-btn bps-btn-outline">Download all diagnostic data</button>
                 </div>
+                <p class="bps-hint">The ZIP includes complete retained actual-location snapshots and recordings, with capture times, settings, GPS alignment and an inventory of included or unavailable data.</p>
                 <h4>Where is the dog actually?</h4>
                 <p>Keep the dog still, choose its tracker or group, and pick its actual location on the saved map. Capture one full BLE snapshot to compare the receiver ranges and estimated positions with that location. This mark applies only to that snapshot.</p>
                 <div class="bps-btn-row"><button type="button" id="diagnosticSnapshotLoad" class="bps-btn bps-btn-outline">Load dogs / floors</button><button type="button" id="diagnosticSnapshotPick" class="bps-btn bps-btn-outline">Pick actual location on map</button></div>

@@ -341,6 +341,7 @@ def snapshot(hass, now):
                 address = getattr(advert, "scanner_address", None)
                 ad["scanner_mac"] = address if isinstance(address, str) and MAC.fullmatch(address) else None
                 stamp = scalar(getattr(advert, "stamp", None))
+                ad["stamp"] = stamp
                 ad["observation_age_s"] = mono - stamp if isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and 0 < stamp <= mono else None
                 result["adverts"].append(ad)
     result["available"] = bool(entries or result["entities"])

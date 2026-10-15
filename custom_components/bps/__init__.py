@@ -70,8 +70,8 @@ from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, sh
 from .ground_truth import BPSGroundTruthAPI
 from .phone_survey import BPSPhoneSurveyAPI
 from .receiver_matching import inventory as receiver_inventory
-from .receiver_sources import ReceiverSources
-from .gps_locations import BPSGPSLocationsAPI, validate_georeference
+from .receiver_sources import ReceiverSources, synchronous_reader
+from .gps_locations import BPSGPSLocationsAPI, gps_locations as _gps_locations, gps_sources as _gps_sources, validate_georeference
 from .height_sources import BPSHeightSourcesAPI, validate_height_surveys
 from . import bermuda_diagnostics
 from . import recent_tracking
@@ -1015,6 +1015,7 @@ def _scanner_linking(hass, coordinates_json):
 
     sources = ReceiverSources(hass)
     matching = sources.matching
+    read_source = synchronous_reader(sources)
     options = {row["entity_id"]: row for row in matching["options"]}
     owned_by_identity = {}
     if sources.registry is not None:
@@ -1034,7 +1035,7 @@ def _scanner_linking(hass, coordinates_json):
                 # exact legacy fallbacks remain local to this placement.
                 owned = set(owned_by_identity.get(key, ())) if isinstance(key, (str, tuple)) else set()
                 for tracker in {sensor["device"] for sensor in sensors}:
-                    source, state = sources.source(tracker, rec, binding)
+                    source, state = read_source(tracker, rec, binding)
                     if state is not None:
                         owned.add(source)
                 sensors = [sensor for sensor in sensors if sensor["entity_id"] in owned]
@@ -1054,7 +1055,7 @@ def _scanner_linking(hass, coordinates_json):
                 status = "unknown" if matched else "unmatched"
             selected = {}
             for tracker in {sensor["device"] for sensor in sensors}:
-                source, state = sources.source(tracker, rec, binding)
+                source, state = read_source(tracker, rec, binding)
                 if state is not None:
                     selected[tracker] = source
             rows.append({"entity_id": slug, "floor": floor.get("name"), "placement_index": index,
@@ -1087,6 +1088,7 @@ def _beacon_links(hass):
     """
     beacons = {}  # device -> [{scanner, distance, unit}]
     sources, seen = ReceiverSources(hass), set()
+    read_source = synchronous_reader(sources)
     allowed = set(_bermuda_distance_sensor_ids(hass))
     candidates = [(st.entity_id, st) for st in hass.states.async_all("sensor") if st.entity_id in allowed]
     included = {eid for eid, _state in candidates}
@@ -1107,7 +1109,7 @@ def _beacon_links(hass):
         device = device_part[len("sensor."):] if device_part.startswith("sensor.") else device_part
         beacons.setdefault(device, [])
         binding = sources.binding({"entity_id": slug})
-        selected, chosen = sources.source(device, {"entity_id": slug}, binding)
+        selected, chosen = read_source(device, {"entity_id": slug}, binding)
         provenance = getattr(chosen, "attributes", {}).get("bps_source", {}) if chosen is not None else {}
         is_direct = provenance.get("path") == "direct"
         identity = (device, binding["identity"] or slug, provenance.get("device_id") if is_direct else sources.tracker_ids.get(eid))
@@ -1435,6 +1437,7 @@ async def update_receiver_radii(hass, eids, receiver_sources=None):
     if outdoor:
         max_age = finite_number(max_age, READING_MAX_AGE_SECS, minimum=0.0, maximum=1e6)
     sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass)
+    read_source = synchronous_reader(sources)
     for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
         for receiver, binding in zip(floor["receivers"], sources.floor_bindings(floor)):
             receiver.pop("distance", None)
@@ -1444,7 +1447,7 @@ async def update_receiver_radii(hass, eids, receiver_sources=None):
                 # A saved or previous-cycle radius is never a current reading.
                 receiver.pop("distance", None)
                 receiver.pop("_outdoor_reading", None)
-            entity_id, rec_value = sources.source(eids["entity"], receiver, binding)
+            entity_id, rec_value = read_source(eids["entity"], receiver, binding)
             if rec_value is not None:
                 # Drop a STUCK reading: when a scanner stops hearing the
                 # tracker its distance sensor keeps the last value instead of
@@ -1531,6 +1534,15 @@ async def update_receiver_radii(hass, eids, receiver_sources=None):
                     if not math.isfinite(radius) or radius < 0:
                         continue
                     receiver["cords"]["r"] = radius
+                    if outdoor:
+                        from .range_intervals import project_interval
+                        provenance = rec_value.attributes.get("bps_source", {})
+                        interval = provenance.get("range_interval") if isinstance(provenance, dict) else None
+                        if isinstance(interval, dict):
+                            receiver["_outdoor_reading"]["range_interval"] = copy.deepcopy(interval)
+                            gain = (correction if isinstance(correction, (int, float)) and correction > 0 else 1.0) * tracker_factor
+                            dz_interval = float(height) - tracker_h if isinstance(height, (int, float)) and 0 <= height <= 10 else 0.0
+                            receiver["_outdoor_reading"]["horizontal_interval"] = project_interval(interval, gain, dz_interval, floor["scale"])
                     # Raw SLANT distance for the floor election: radii are in
                     # per-floor pixel scales and must not be compared across
                     # floors — and the dz correction must not leak in here
@@ -1666,6 +1678,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 _reading_max_age(entity_layout), prior, trilaterate,
                 position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS),
                 nearby_trust=True,
+                long_range_intervals=outdoor_settings(entity_layout)["long_range_intervals"],
                 obstruction_strength=outdoor_settings(entity_layout)["obstruction_strength"],
             ))
             # Map saves replace the cached layout. Do not feed an obsolete
@@ -2634,6 +2647,7 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSTrackerIconsListAPI())
             hass.http.register_view(BPSUploadTrackerIconAPI())
             hass.http.register_view(BPSReadAPIText())
+            hass.http.register_view(BPSTrackerInventoryAPI())
             hass.http.register_view(BPSAdjustZonesAPI())
             hass.http.register_view(BPSReceiverStatusAPI())
             hass.http.register_view(BPSScannerLinkingAPI())
@@ -3102,11 +3116,13 @@ class BPSReadAPIText(HomeAssistantView):
         # out of both the tracked-device list and the receiver picker.
         entities = []
         receivers = []
+        tracker_inventory = []
         try:
             allowed = _bermuda_distance_sensor_ids(hass)
             entities = sorted({eid[len("sensor."):].split("_distance_to_")[0] for eid in allowed})
             entities = sorted(set(entities) | ReceiverSources(hass).direct_trackers())
             receivers = sorted({eid.split("_distance_to_", 1)[1] for eid in allowed})
+            tracker_inventory = _diagnostic_inventory(hass)["trackers"]
         except Exception as e:
             _LOGGER.info(f"Error listing Bermuda distance sensors: {e}")
 
@@ -3131,6 +3147,7 @@ class BPSReadAPIText(HomeAssistantView):
                 "coordinates": content,
                 "layout_revision": layout_revision(layout),
                 "entities": entities,
+                "tracker_inventory": tracker_inventory or [{"key": key, "name": key} for key in entities],
                 "receivers": [row["entity_id"] for row in matching["options"]],
                 "receiver_matching": matching,
                 "offline_receivers": offline_receivers,
@@ -3147,13 +3164,38 @@ class BPSReadAPIText(HomeAssistantView):
                 return web.Response(status=503, text="Saved layout could not be reloaded. Check Home Assistant storage and refresh the BPS page again.")
             return web.Response(status=500, text="Failed to read coordinates")
 
-def _diagnostic_inventory(hass):
+class BPSTrackerInventoryAPI(HomeAssistantView):
+    """Refresh device choices without replacing saved or staged floor edits."""
+
+    url = "/api/bps/trackers"
+    name = "api:bps:trackers"
+    requires_auth = True
+
+    async def get(self, request):
+        hass = request.app["hass"]
+        sources = ReceiverSources(hass)
+        data = _diagnostic_inventory(hass, sources)
+        # Saved groups are not evidence that Bermuda's inventory is ready.
+        # Preserve existing API-only choices during partial entry reloads too;
+        # stock Bermuda without the optional API retains its legacy inventory.
+        statuses = sources.direct.statuses
+        entry_states = [getattr(entry, "state", None) for entry in sources.direct.entries]
+        loaded = all(getattr(state, "value", state) == "loaded" for state in entry_states)
+        ready = sources.registry is not None and loaded and all(
+            row.get("path") == "direct" or row.get("reason") == "api_unavailable" for row in statuses)
+        return web.json_response({**data, "ready": ready},
+                                 headers={"Cache-Control": "no-store"})
+
+
+def _diagnostic_inventory(hass, receiver_sources=None):
     """Only actual Bermuda beacons and enabled logical groups are selectable."""
+    sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass)
     known = sorted({eid[len("sensor."):].split("_distance_to_", 1)[0]
-                    for eid in _bermuda_distance_sensor_ids(hass)} | ReceiverSources(hass).direct_trackers())
+                    for eid in _bermuda_distance_sensor_ids(hass)} | sources.direct_trackers())
     data = get_bps_data(hass)
     groups = normalize_groups(data, known)
-    return {"trackers": [{"key": key, "name": key} for key in known] + [
+    labels = getattr(sources, "fallback_labels", {})
+    return {"trackers": [{"key": key, "name": labels.get(key, key)} for key in known] + [
         {"key": "bps_group_" + group["id"], "name": group["name"] + " (group)", "group": True}
         for group in groups], "floors": [f["name"] for f in data.get("floor", [])
         if isinstance(f.get("name"), str) and finite_number(f.get("scale"), minimum=1e-6) is not None]
@@ -3212,7 +3254,11 @@ def _diagnostic_snapshot(hass, targets, now):
         if not report:
             raise ValueError("Save a BPS layout before recording")
         data = {}
-    sources = ReceiverSources(hass)
+    if report:
+        from .bermuda_direct import BermudaDirect
+        sources = ReceiverSources(hass, direct=BermudaDirect(hass, now=now, include_history=True))
+    else:
+        sources = ReceiverSources(hass)
     known = {eid[len("sensor."):].split("_distance_to_", 1)[0]
              for eid in _bermuda_distance_sensor_ids(hass)} | sources.direct_trackers()
     groups = {"bps_group_" + g["id"]: g["beacons"] for g in normalize_groups(data, known)}
@@ -3245,6 +3291,7 @@ def _diagnostic_snapshot(hass, targets, now):
     cal = hass.data.get(DOMAIN, {}).get("calibration", {})
     context["calibration"] = {key: copy.deepcopy(cal.get(key)) for key in (
         "mode", "floor", "results", "applied", "last_solved_at")}
+    read_source = synchronous_reader(sources)
     readings = []
     max_age = _reading_max_age(data)
     for beacon in beacons:
@@ -3252,7 +3299,7 @@ def _diagnostic_snapshot(hass, targets, now):
         for floor in floors:
             for receiver, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
                 slug = receiver.get("entity_id", "")
-                source, state = sources.source(beacon, receiver, binding, now=now)
+                source, state = read_source(beacon, receiver, binding, now=now)
                 row = {"tracker": beacon, "receiver": slug, "floor": floor.get("name"),
                        "entity_id": source, "status": binding["status"] if sources.blocked(binding) else "missing",
                        "scanner_aliases": binding["aliases"], "tracker_height_m": tracker_height,
@@ -3301,10 +3348,26 @@ def _diagnostic_snapshot(hass, targets, now):
     wanted = set(targets) | set(beacons)
     positions = [copy.deepcopy(p) for p in hass.data.get(DOMAIN, {}).get("apitricords", [])
                  if p.get("ent") in wanted]
-    return {"time": now, "context": context, "readings": readings, "positions": positions,
+    snapshot = {"time": now, "context": context, "readings": readings, "positions": positions,
             "calibration_status": {"state": cal.get("state", "idle"), "error": cal.get("error"),
                 "pair_counts": {str(k): len(v) for k, v in list(cal.get("samples", {}).items())[:256]}},
             "offline_receivers": list(hass.data.get(DOMAIN, {}).get("rl_offline", []))[:128]}
+    if report:
+        from .bermuda_direct import public_id
+        from .receiver_matching import _RANGE_MAC
+        # Kept only until the executor builds marked-pair evidence. The normal
+        # clipboard report drops this private transport, avoiding its display cap.
+        identities = {}
+        for eid, did in sources.tracker_ids.items():
+            entry = sources.registry.entities.get(eid) if sources.registry is not None else None
+            uid, owner = sources.tracker_proofs[eid]
+            match = _RANGE_MAC.search(uid)
+            if entry is not None and did and match and sources._reading_current(eid):
+                identities[eid] = {"entry_id": owner, "device_id": public_id(did),
+                                   "scanner_mac": match[1].lower(), "ha_device_id": getattr(entry, "device_id", None)}
+        snapshot["_radio_sources"] = {"snapshots": list(sources.direct.snapshots.values()),
+                                      "legacy_identities": identities}
+    return snapshot
 
 
 def _recent_tracking_snapshot(hass, now):
@@ -3417,6 +3480,16 @@ def _diagnostic_report_snapshot(hass, now):
     snapshot["calibration_status"]["pair_counts"] = {str(k): len(v) for k, v in cal.get("samples", {}).items()}
     snapshot["offline_receivers"] = list(dom.get("rl_offline", []))
     snapshot["inventory"] = _diagnostic_inventory(hass)
+    snapshot["phone_gps"] = {"sources": _gps_sources(hass, now), "locations": _gps_locations(hass, now),
+        "guide": "Sources remain selectable while stale or unavailable; only fresh locations qualify for surveying. HA publication time is not the original GPS measurement time."}
+    snapshot["map_alignment"] = []
+    for floor in snapshot["context"]["layout"].get("floor", []):
+        geo = floor.get("georeference", {})
+        anchors = geo.get("anchors", []) if isinstance(geo, dict) else None
+        valid = isinstance(anchors, list)
+        snapshot["map_alignment"].append({"floor": floor.get("name"), "scale_px_per_m": floor.get("scale"),
+            "saved_anchor_count": len(anchors) if valid else 0,
+            "status": "invalid_saved_anchors" if not valid else "saved_anchors" if anchors else "no_saved_anchors"})
     snapshot["scanner_diagnostics"] = _scanner_diagnostics(hass, json.dumps(snapshot["context"]["layout"]))
     snapshot["scanner_linking"] = _scanner_linking(hass, json.dumps(snapshot["context"]["layout"]))
     updater = hass.data.get("bps_update_task")
@@ -3451,7 +3524,7 @@ def _diagnostic_report_snapshot(hass, now):
         observed = finite_number(observed, minimum=0.0)
         if observed is not None:
             age = max(0.0, now - observed)
-            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0))
+            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0), server_time=now)
     return snapshot
 
 
@@ -3622,7 +3695,7 @@ class BPSCordsAPI(HomeAssistantView):
             observed = position.get("updated", now) if quality.get("use_observation_age") is False \
                 else quality.get("observed", position.get("updated", now))
             age = max(0.0, now - observed)
-            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0))
+            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0), server_time=now)
             payload.append({**position, "outdoor": quality})
         return web.json_response(payload)
 

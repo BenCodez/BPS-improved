@@ -19,9 +19,10 @@
             for (const mark of marks.slice(-5).reverse()) {
                 const row = doc.createElement('div');
                 const error = mark.position_errors?.find(p => p.target === target);
-                row.textContent = new Date(mark.time * 1000).toLocaleTimeString() + ' · '
+                row.textContent = new Date(mark.time * 1000).toLocaleString() + ' · '
                     + (Number.isFinite(error?.error_m) && error.scored ? error.error_m.toFixed(1) + ' m error' : error?.status || 'Position unavailable')
                     + (mark.label ? ' · ' + mark.label : '');
+                row.title = `${mark.capture?.captured_at_utc || new Date(mark.time * 1000).toISOString()} · ${mark.id}`;
                 el('History').appendChild(row);
             }
         }

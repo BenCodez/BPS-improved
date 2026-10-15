@@ -19,7 +19,7 @@
         ? floor.environment.filter(p => p && typeof p.id === 'string' && typeof p.name === 'string') : [];
     function settings(layout) {
         const s = layout && layout.outdoor_tracking || {};
-        return {enabled: s.enabled === true, show_uncertainty: s.show_uncertainty !== false,
+        return {enabled: s.enabled === true, long_range_intervals: s.long_range_intervals === true, show_uncertainty: s.show_uncertainty !== false,
             obstruction_strength: number(s.obstruction_strength) && s.obstruction_strength >= 1
                 && s.obstruction_strength <= 4 ? s.obstruction_strength : 1,
             hide_uncertainty_below_m: number(s.hide_uncertainty_below_m) && s.hide_uncertainty_below_m >= 0
@@ -53,6 +53,37 @@
             }
         }
         return circles;
+    }
+    const elapsedNow = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
+    function freshDistanceIntervals(intervals, now = elapsedNow()) {
+        return (intervals || []).filter(c => {
+            const age = c[4];
+            return number(age?.server_age_s) && number(age?.received_elapsed_ms) && now >= age.received_elapsed_ms
+                && age.server_age_s >= 0 && age.server_age_s + (now - age.received_elapsed_ms) / 1000 <= 3;
+        });
+    }
+    function distanceIntervals(row, snapshot, sameFloor = (a, b) => a === b, received = elapsedNow()) {
+        const sources = row?.group ? (row.beacon_positions || []).map(member =>
+            (snapshot || []).find(p => p?.ent === member?.ent && !p.group)) : [row];
+        const intervals = [], seen = new Set();
+        for (const source of sources) {
+            if (!source || source.floor && row.floor && !sameFloor(source.floor, row.floor)) continue;
+            const serverTime = source.outdoor?.server_time;
+            const transportAge = number(source._bps_transport_age_s) && source._bps_transport_age_s >= 0 ? source._bps_transport_age_s : 0;
+            for (const reading of source.outdoor?.receiver_diagnostics || []) {
+                const band = reading.horizontal_interval, raw = reading.range_interval, xy = reading.receiver_xy_px;
+                if (reading.excluded || reading.used === false || raw?.status !== 'available' || raw.center_m < 10
+                    || !number(serverTime) || !number(raw.source_observed) || serverTime < raw.source_observed
+                    || serverTime - raw.source_observed + transportAge > 3
+                    || band?.status !== 'available' || !Array.isArray(xy) || !xy.slice(0, 2).every(number) || xy.length < 2
+                    || !number(band.lower_px) || !number(band.upper_px) || band.lower_px < 0 || band.upper_px <= band.lower_px) continue;
+                const item = [xy[0], xy[1], band.lower_px, band.upper_px, {source_observed: raw.source_observed,
+                    server_age_s: serverTime - raw.source_observed + transportAge, received_elapsed_ms: received}];
+                const key = JSON.stringify(item.slice(0, 4));
+                if (!seen.has(key)) {seen.add(key); intervals.push(item);}
+            }
+        }
+        return intervals;
     }
     function displayLimit(outdoor) {
         return number(outdoor?.display_radius_limit_m) && outdoor.display_radius_limit_m >= 0
@@ -317,13 +348,17 @@
         if (row.motion_gate) lines.push(`Group motion: ${row.motion_gate.state || 'filtered'} · candidate shift ${display(row.motion_gate.displacement_m, ' m')} · allowed step ${display(row.motion_gate.allowed_step_m, ' m')}`);
         if (out.receiver_guard) lines.push(`Group receiver check: ${out.receiver_guard.state} · no fresh member range at ${(out.receiver_guard.receivers || []).map(r => r.receiver).join(', ')} · near-station limit ${display(out.receiver_guard.radius_m, ' m')}`);
         if (number(out.position_age_s)) lines.push(`Position age: ${display(out.position_age_s, ' s')}${isStale(out) ? ' · stale / last known' : ''}`);
+        if (out.position_solver_mode) lines.push(`Position calculation: ${out.position_solver_mode === 'long_range_intervals' ? 'experimental distance ranges' : 'point ranges'} · ${out.range_interval_receivers || 0} range inputs`);
         if (row.group) lines.push(`${row.name || row.ent}: ${row.beacons_reporting || 0}/${row.total_beacons || 0} beacons · disagreement ${display(row.beacon_disagreement_m, ' m')} · ${row.fusion_confidence || 'unknown'}`);
         (row.beacon_positions || []).forEach(p => {
             if (!p) return;
             lines.push(`${p.ent}: estimated uncertainty ${display(p.estimated_uncertainty_m, ' m')}${p.floor ? ', ' + p.floor : ''}${number(p.age_s) ? ', age ' + display(p.age_s, ' s') : ''}${p.used === false ? ', excluded from fusion' : ''}`);
             radiusInputs(p.uncertainty_details, `${p.ent}: `);
+            if (p.position_solver_mode) lines.push(`${p.ent}: position calculation ${p.position_solver_mode}`);
         });
         (out.receiver_diagnostics || []).forEach(r => {
+            const band = r.range_interval;
+            if (band?.status === 'available') lines.push(`${r.receiver}: raw signal-variation range ${display(band.lower_m, ' m')}–${display(band.upper_m, ' m')}${r.range_interval_used ? ' · used in position calculation' : ''} · excludes systematic bias`);
             if (number(r.range_trust_weight)) lines.push(`${r.receiver}: distance trust ×${display(r.range_trust_weight)} · corrected slant ${display(r.range_trust_distance_m, ' m')}${number(r.nearby_priority_reference_m) ? ' · reference receiver range ' + display(r.nearby_priority_reference_m, ' m') : ''}`);
             lines.push(`${r.receiver}: measured ${display(r.measured_distance_m, ' m')}, corrected ${display(r.corrected_distance_m, ' m')}, age ${display(r.reading_age_s, ' s')}, ${r.classification || 'unknown'}, building crossings ${r.building_crossings ?? '—'}${r.fence_crossings !== undefined ? ', fence crossings ' + r.fence_crossings : ''}${r.reflection_risk ? ', reflection / multipath risk' : ''}, environment weight ${display(r.environmental_weight)}, reliability ${display(r.reliability_weight)}, ${r.status || 'unknown'}`);
             if (number(r.mapped_environmental_weight)) lines.push(`${r.receiver}: mapped trust ${display(r.mapped_environmental_weight)} → effective ${display(r.environmental_weight)} · tree depth ${display(r.vegetation_depth_m, ' m')}`);
@@ -333,7 +368,7 @@
         return lines.join('\n');
     }
     root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, MAX_UNCERTAINTY_THRESHOLD_M, MAX_ENVIRONMENT_POLYGONS,
-        groups, environment, settings, positionSnapshot, distanceRadii, markerPlacement, markerStatus, uncertaintyRadius,
+        groups, environment, settings, positionSnapshot, distanceRadii, distanceIntervals, freshDistanceIntervals, elapsedNow, markerPlacement, markerStatus, uncertaintyRadius,
         drawUncertainty, stabilizeUncertainty, beaconNumber, drawMiniBeacon, isStale, fixTime, validPolygon, validPolyline,
         validEnvironmentPoints, fenceStyle, drawFence, upsertEnvironment, upsertGroup, diagnosticsText});
 })(globalThis);
