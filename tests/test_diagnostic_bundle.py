@@ -278,7 +278,8 @@ def test_history_can_fill_remaining_budget_without_charging_manifest_reserve_twi
     actual = {"status": "empty", "records": [], "evicted": 0}
     baseline = diag.build_bundle({"time": 100}, actual, None, None)
     with zipfile.ZipFile(io.BytesIO(baseline)) as bundle:
-        earlier_bytes = sum(i.file_size for i in bundle.infolist() if i.filename != "manifest.json")
+        earlier_bytes = sum(i.file_size for i in bundle.infolist()
+                            if i.filename not in ("manifest.json", "full_report.txt"))
     budget = diag.MAX_BUNDLE_BYTES - earlier_bytes - diag.BUNDLE_MANIFEST_RESERVE_BYTES
     padding = budget - 2000
     for _ in range(10):
@@ -301,6 +302,29 @@ def test_history_can_fill_remaining_budget_without_charging_manifest_reserve_twi
         assert sum(i.file_size for i in bundle.infolist()) <= diag.MAX_BUNDLE_BYTES
         assert len(bundle.read("manifest.json")) <= diag.BUNDLE_MANIFEST_RESERVE_BYTES
         assert manifest["files"]["recent_tracking.json"]["bytes"] == budget
+
+
+@pytest.mark.parametrize("bundle_limit, expected_frames", [(200_000, 0), (250_000, 1)])
+def test_embedded_clipboard_history_cannot_displace_editor_or_standalone_history(monkeypatch, bundle_limit, expected_frames):
+    monkeypatch.setattr(diag, "MAX_BUNDLE_BYTES", bundle_limit)
+    actual = {"status": "empty", "records": [], "evicted": 0}
+    panel = {"editor": "x" * 70_000}
+    baseline = diag.build_bundle({"time": 100}, actual, None, panel)
+    with zipfile.ZipFile(io.BytesIO(baseline)) as bundle:
+        assert json.loads(bundle.read("panel_context.json")) == panel
+    history = recent.RecentTrackingHistory()
+    history.append(recent.pack({"time": 100, "context": {},
+        "positions": [{"ent": "synthetic_tag", "details": "x" * 100_000}]}))
+    payload = diag.build_bundle({"time": 100, "_recent_tracking_snapshot": history.snapshot(100)},
+                                actual, None, panel)
+    with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+        assert json.loads(bundle.read("panel_context.json")) == panel
+        result = json.loads(bundle.read("recent_tracking.json"))
+        assert result["metadata"]["retained_samples"] == 1
+        assert result["metadata"]["sample_count"] == expected_frames
+        manifest = json.loads(bundle.read("manifest.json"))
+        assert "full_report.txt" in manifest["omissions"]
+        assert sum(i.file_size for i in bundle.infolist()) <= bundle_limit
 
 
 def test_bundle_retains_direct_devices_omitted_by_clipboard_limits(hass, monkeypatch):

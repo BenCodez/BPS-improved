@@ -220,10 +220,6 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
     else:
         manifest["omissions"]["diagnostic_recording.json"] = (
             recording_omission or "No diagnostic recording is available")
-    try:
-        add("full_report.txt", format_report(report_input).encode("utf-8"))
-    except (ValueError, TypeError) as err:
-        manifest["omissions"]["full_report.txt"] = str(err)
     layout = live.get("context", {}).get("layout")
     if layout is not None:
         add("saved_layout.json", layout)
@@ -233,8 +229,8 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
         add("phone_survey.json", phone_survey)
     else:
         manifest["omissions"]["phone_survey.json"] = phone_omission or "Authenticated owner is unavailable"
-    # Keep map/editor/survey context before spending the remaining budget on
-    # optional history; larger history exports must not displace that evidence.
+    # Keep map/editor/survey context before optional history, including the
+    # duplicate history embedded in the clipboard-style full report.
     if recent is not None:
         try:
             add("recent_tracking.json", recent_tracking.export_json(
@@ -244,6 +240,10 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
             manifest["omissions"]["recent_tracking.json"] = "Bundle size limit cannot fit recent tracking metadata"
     else:
         manifest["omissions"]["recent_tracking.json"] = "No recent tracking is available"
+    try:
+        add("full_report.txt", format_report(report_input).encode("utf-8"))
+    except (ValueError, TypeError) as err:
+        manifest["omissions"]["full_report.txt"] = str(err)
     manifest["counts"] = {"actual_location_marks": len(actual.get("records", ())),
                           "actual_location_evicted": actual.get("evicted"),
                           "actual_location_status": actual["status"],
