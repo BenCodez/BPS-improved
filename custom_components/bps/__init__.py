@@ -3169,7 +3169,9 @@ class BPSTrackerInventoryAPI(HomeAssistantView):
         # Preserve existing API-only choices during partial entry reloads too;
         # stock Bermuda without the optional API retains its legacy inventory.
         statuses = sources.direct.statuses
-        ready = sources.registry is not None and all(
+        entry_states = [getattr(entry, "state", None) for entry in sources.direct.entries]
+        loaded = all(getattr(state, "value", state) == "loaded" for state in entry_states)
+        ready = sources.registry is not None and loaded and all(
             row.get("path") == "direct" or row.get("reason") == "api_unavailable" for row in statuses)
         return web.json_response({**data, "ready": ready},
                                  headers={"Cache-Control": "no-store"})

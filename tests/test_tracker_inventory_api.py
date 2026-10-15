@@ -82,6 +82,26 @@ def test_stock_bermuda_empty_registry_can_clear_deleted_last_tracker(hass, monke
     assert removed["trackers"] == [] and removed["ready"]
 
 
+def test_stock_bermuda_setup_waits_for_loaded_inventory_before_clearing(hass, monkeypatch):
+    import sys
+    data, entries, states, _add, _old, _new, _payloads, _calls = prepared(hass, monkeypatch)
+    hass.data["bps"]["layout"] = data
+    monkeypatch.setitem(sys.modules, "custom_components.bermuda.api", NS())
+    config = hass.config_entries.async_entries("bermuda")[0]
+    api = bps.BPSTrackerInventoryAPI()
+    request = NS(app={"hass": hass})
+    assert asyncio.run(api.get(request)).json_body["ready"]
+    states.clear()
+    assert entries  # Identity registry persists while states are republished.
+    for state in ["setup_in_progress", NS(value="setup_in_progress"), None]:
+        config.state = state
+        waiting = asyncio.run(api.get(request)).json_body
+        assert waiting["trackers"] == [] and not waiting["ready"]
+    config.state = NS(value="loaded")
+    loaded = asyncio.run(api.get(request)).json_body
+    assert loaded["trackers"] == [] and loaded["ready"]
+
+
 def test_authoritative_empty_inventory_is_ready_after_last_device_is_untracked(hass, monkeypatch):
     data, entries, states, _add, _old, _new, payloads, _calls = prepared(hass, monkeypatch)
     entries.clear()
