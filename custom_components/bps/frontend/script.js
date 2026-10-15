@@ -29,6 +29,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     let truthUI = null;
     let layoutSavePending = false;
     let layoutRevision = null;
+    let savedFloorPlanAvailable = false;
+    let trackingModeUnverified = false;
     let heightUI = null;
 
     // --- API auth token (see bps-panel.js) ---------------------------------
@@ -2983,6 +2985,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             // yet the receiver picker is needed exactly then.
             receiverInventoryLoaded = true;
             layoutRevision = data.layout_revision || null;
+            savedFloorPlanAvailable = false;
             receiverMatching = data.receiver_matching || {revision: null, options: []};
             receiverOptions = Array.isArray(data.receivers) ? [...data.receivers].sort() : [];
             offlineReceivers = Array.isArray(data.offline_receivers) ? data.offline_receivers : [];
@@ -2993,6 +2996,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             if (data.coordinates) {
                 finalcords = JSON.parse(data.coordinates);
+                savedFloorPlanAvailable = Array.isArray(finalcords.floor) && finalcords.floor.length > 0;
                 mergeDuplicateFloors();
                 tmpfinalcords = finalcords; //Store original cords in a temp to compare later if it is changed
             }
@@ -6518,11 +6522,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     async function savedata(skipScaleCheck = false){
+        if (trackingModeUnverified) {
+            bpsToast('Reload BPS before saving; tracking mode could not be verified. Preserve any unsaved map edits first.');
+            return false;
+        }
         if (layoutSavePending || gpsUI?.isVerifying?.()) {
             bpsToast('Wait for the current map save or receiver verification to finish.');
             return false;
         }
         layoutSavePending = true;
+        syncTrackingModeControl();
         try {
         if(!skipScaleCheck && myScaleVal == null){
             bpsToast("You have not added a scale, it won't work without it!");
@@ -6531,6 +6540,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         removeListeners();
         const data = new FormData();
+        const savingHasFloors = Array.isArray(finalcords.floor) && finalcords.floor.length > 0;
         data.append('coordinates', JSON.stringify(finalcords)); 
         if (layoutRevision) data.append('layout_revision', layoutRevision);
         data.append('new_floor', new_floor);
@@ -6580,6 +6590,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     SetScaleButton.remove();
                 }
                 saveButton.remove();
+                savedFloorPlanAvailable = savingHasFloors;
                 new_floor = false;
                 return true;
             } else {
@@ -6589,18 +6600,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.error('Error saving data:', error);
             bpsToast('Error saving data!');
         }
-        } finally {layoutSavePending = false;}
+        } finally {
+            layoutSavePending = false;
+            syncTrackingModeControl();
+        }
     }
 
     // =================================================================
     // Optional outdoor configuration uses the existing authenticated layout save.
     // No defaults are written until the user changes a setting.
+    function syncTrackingModeControl() {
+        const control = document.getElementById('outdoorLongRangeIntervals');
+        control.checked = outdoor.settings(finalcords).long_range_intervals;
+        control.disabled = layoutSavePending || trackingModeUnverified || !layoutRevision || !savedFloorPlanAvailable;
+    }
     function syncOutdoorSettings() {
         const settings = outdoor.settings(finalcords);
         document.getElementById('outdoorEnabled').checked = settings.enabled;
         document.getElementById('outdoorControls').hidden = !settings.enabled;
         document.getElementById('outdoorUncertainty').checked = settings.show_uncertainty;
-        document.getElementById('outdoorLongRangeIntervals').checked = settings.long_range_intervals;
+        syncTrackingModeControl();
         document.getElementById('outdoorThreshold').value = settings.hide_uncertainty_below_m;
         const strengthSelect = document.getElementById('outdoorObstructionStrength');
         for (const option of Array.from(strengthSelect.options)) {
@@ -6620,7 +6639,45 @@ document.addEventListener('DOMContentLoaded', async () => {
         savebuttondiv.appendChild(saveButton);
         if (mapReady()) redrawAll();
     }
-    for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold', 'outdoorObstructionStrength', 'outdoorLongRangeIntervals']) {
+    document.getElementById('outdoorLongRangeIntervals').addEventListener('change', async event => {
+        const control = event.target;
+        if (!savedFloorPlanAvailable) {
+            syncTrackingModeControl(); bpsToast('Save a floor plan before changing tracking mode.'); return;
+        }
+        if (layoutSavePending || gpsUI?.isVerifying?.() || trackingModeUnverified || !layoutRevision) {
+            syncOutdoorSettings(); bpsToast('Wait for the current save or verification, or reload BPS if the saved state is unknown.'); return;
+        }
+        const requested = control.checked;
+        layoutSavePending = true; control.disabled = true;
+        const startDisabled = starttrackbtn.disabled;
+        starttrackbtn.disabled = true;
+        const enabledControl = document.getElementById('outdoorEnabled');
+        enabledControl.disabled = true;
+        try {
+            const response = await bpsFetch('/api/bps/tracking_settings', {method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({long_range_intervals: requested, layout_revision: layoutRevision})});
+            if (!response.ok) throw new Error('Tracking mode could not be saved.');
+            const saved = await response.json();
+            if (!/^[a-f0-9]{64}$/.test(saved.layout_revision) || saved.outdoor_tracking?.long_range_intervals !== requested
+                || requested && saved.outdoor_tracking?.enabled !== true) throw new Error('Tracking mode was not verified.');
+            layoutRevision = saved.layout_revision;
+            finalcords.outdoor_tracking = {...(finalcords.outdoor_tracking || {}), long_range_intervals: requested,
+                ...(requested ? {enabled: true} : {})};
+            bpsToast(`Long-range mode ${requested ? 'on' : 'off'} — saved.`);
+            refreshGroupEditor({preserveDraft: true});
+        } catch (error) {
+            trackingModeUnverified = true;
+            bpsToast('Tracking mode could not be verified. Reload BPS before changing settings; preserve any unsaved map edits first.');
+        } finally {
+            layoutSavePending = false; enabledControl.disabled = false;
+            starttrackbtn.disabled = startDisabled;
+            syncOutdoorSettings();
+            renderOutdoorDiagnostics((lastTracks.get(activeDevice) || {}).payload);
+            if (mapReady()) redrawAll();
+        }
+    });
+    for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold', 'outdoorObstructionStrength']) {
         document.getElementById(id).addEventListener('change', () => {
             const threshold = Number(document.getElementById('outdoorThreshold').value);
             const strength = Number(document.getElementById('outdoorObstructionStrength').value);
@@ -6635,7 +6692,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             finalcords.outdoor_tracking = {...(finalcords.outdoor_tracking || {}),
                 enabled: document.getElementById('outdoorEnabled').checked,
                 show_uncertainty: document.getElementById('outdoorUncertainty').checked,
-                long_range_intervals: document.getElementById('outdoorLongRangeIntervals').checked,
                 hide_uncertainty_below_m: threshold, obstruction_strength: strength};
             syncOutdoorSettings();
             if (!finalcords.outdoor_tracking.enabled && editTarget && editTarget.kind === 'environment') cancelShapeEdit();

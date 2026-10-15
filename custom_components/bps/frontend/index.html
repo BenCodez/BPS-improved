@@ -250,6 +250,9 @@
                                         <span class="tooltip-text">Show or hide the position-history scrubber under the map, and the recorded trail it draws. On by default; hiding it also stops it polling.</span>
                                     </span>
                                 </span>
+                                <label class="bps-switch" title="Saves immediately. Uses experimental distance ranges beyond 10 m and enables Outdoor Tracking when needed. Leaves map edits unsaved.">
+                                    <input type="checkbox" id="outdoorLongRangeIntervals" disabled><span class="bps-slider"></span><span>Long-range mode (experimental)</span>
+                                </label>
                                 <button type="button" id="starttrack" class="bps-btn bps-btn-primary" style="display: none">Start tracking</button>
                                 <button type="button" id="stoptrack" class="bps-btn bps-btn-primary" style="display: none">Stop tracking</button>
                             </div>
@@ -384,8 +387,7 @@
                         <p class="bps-hint">Optional. Changes are persisted with Save Floor Plan. Environment shapes change measurement trust, not distance.</p>
                         <label class="bps-switch"><input type="checkbox" id="outdoorEnabled"><span>Enable Outdoor Tracking</span></label>
                         <div id="outdoorControls" hidden>
-                            <label class="bps-switch"><input type="checkbox" id="outdoorLongRangeIntervals"><span>Experimental: use distance ranges beyond 10 m</span></label>
-                            <p class="bps-hint">Allows signal variation instead of forcing one distant radius. Needs fresh Bermuda quality data; missing data uses normal tracking. Compare actual-location marks with this off and on.</p>
+                            <p class="bps-hint">Long-range mode is beside Start tracking and saves immediately. Compare actual-location marks with it off and on; missing Bermuda quality data uses normal tracking.</p>
                             <label class="bps-switch"><input type="checkbox" id="outdoorUncertainty"><span>Show estimated uncertainty</span></label>
                             <label class="bps-label" for="outdoorThreshold">Hide circle below (metres)</label>
                             <input id="outdoorThreshold" type="number" min="0" max="10000" step="0.1" class="bps-input" value="0">
