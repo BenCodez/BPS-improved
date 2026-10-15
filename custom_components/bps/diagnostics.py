@@ -26,6 +26,8 @@ FORMAT = "bps-diagnostics-v1"
 MAX_REPORT_BYTES = 4 * 1024 * 1024
 MAX_HISTORY_REPORT_BYTES = 1024 * 1024
 MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+MAX_RECENT_BUNDLE_BYTES = 16 * 1024 * 1024
+BUNDLE_MANIFEST_RESERVE_BYTES = 32 * 1024
 GUIDE = (
     "Coordinates in positions/raw/radii and layout are map pixels; layout floor.scale is pixels per metre. "
     "Readings are current sensor snapshots; positions contain their own solve/observation timestamps and may be older. "
@@ -177,15 +179,16 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
                 "versions": {"bps": live["bps_version"], "home_assistant": live["home_assistant_version"],
                              "python": live["python_version"], "bermuda": live.get("bermuda", {}).get("version")},
                 "limits": {"max_uncompressed_bytes": MAX_BUNDLE_BYTES,
-                           "full_report_bytes": MAX_REPORT_BYTES},
+                           "full_report_bytes": MAX_REPORT_BYTES,
+                           "recent_tracking_bytes": MAX_RECENT_BUNDLE_BYTES},
                 "files": {}, "omissions": {}}
     payloads = {}
     total = 0
 
-    def add(name, value, required=False):
+    def add(name, value, required=False, reserve_bytes=BUNDLE_MANIFEST_RESERVE_BYTES):
         nonlocal total
         data = value if isinstance(value, bytes) else encode(value)
-        if total + len(data) + 32768 > MAX_BUNDLE_BYTES:
+        if total + len(data) + reserve_bytes > MAX_BUNDLE_BYTES:
             manifest["omissions"][name] = "Bundle size limit"
             if required:
                 raise ValueError("Live diagnostic snapshot exceeds the bundle size limit")
@@ -217,19 +220,6 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
     else:
         manifest["omissions"]["diagnostic_recording.json"] = (
             recording_omission or "No diagnostic recording is available")
-    try:
-        add("full_report.txt", format_report(report_input).encode("utf-8"))
-    except (ValueError, TypeError) as err:
-        manifest["omissions"]["full_report.txt"] = str(err)
-    if recent is not None:
-        try:
-            add("recent_tracking.json", recent_tracking.export_snapshot(
-                recent, min(recent_tracking.EXPORT_MAX_BYTES,
-                            MAX_BUNDLE_BYTES - total - 32768)))
-        except ValueError:
-            manifest["omissions"]["recent_tracking.json"] = "Bundle size limit cannot fit recent tracking metadata"
-    else:
-        manifest["omissions"]["recent_tracking.json"] = "No recent tracking is available"
     layout = live.get("context", {}).get("layout")
     if layout is not None:
         add("saved_layout.json", layout)
@@ -239,12 +229,28 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
         add("phone_survey.json", phone_survey)
     else:
         manifest["omissions"]["phone_survey.json"] = phone_omission or "Authenticated owner is unavailable"
+    # Keep map/editor/survey context before optional history, including the
+    # duplicate history embedded in the clipboard-style full report.
+    if recent is not None:
+        try:
+            add("recent_tracking.json", recent_tracking.export_json(
+                recent, min(MAX_RECENT_BUNDLE_BYTES,
+                            MAX_BUNDLE_BYTES - total - BUNDLE_MANIFEST_RESERVE_BYTES)))
+        except ValueError:
+            manifest["omissions"]["recent_tracking.json"] = "Bundle size limit cannot fit recent tracking metadata"
+    else:
+        manifest["omissions"]["recent_tracking.json"] = "No recent tracking is available"
+    try:
+        add("full_report.txt", format_report(report_input).encode("utf-8"))
+    except (ValueError, TypeError) as err:
+        manifest["omissions"]["full_report.txt"] = str(err)
     manifest["counts"] = {"actual_location_marks": len(actual.get("records", ())),
                           "actual_location_evicted": actual.get("evicted"),
                           "actual_location_status": actual["status"],
                           "data_files": len(payloads),
                           "data_bytes_excluding_manifest": total}
-    add("manifest.json", manifest, required=True)
+    # Earlier entries already reserved this headroom for the final manifest.
+    add("manifest.json", manifest, required=True, reserve_bytes=0)
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED,
                          compresslevel=6) as archive:

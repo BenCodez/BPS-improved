@@ -11,12 +11,14 @@ import hashlib
 import json
 import math
 from typing import Any
+import zlib
 
 WINDOW_SECONDS = 600.0
 SAMPLE_INTERVAL_SECONDS = 2.0
 MAX_FRAMES = 300
 MAX_BYTES = 2 * 1024 * 1024
 MAX_FRAME_BYTES = 64 * 1024
+MAX_RAW_FRAME_BYTES = 1024 * 1024
 MAX_CONTEXT_BYTES = 256 * 1024
 EXPORT_MAX_BYTES = 1024 * 1024
 MAX_COUNTER = (1 << 63) - 1
@@ -50,14 +52,37 @@ class PackedSample:
     time: float
     context_id: str
     context_json: bytes
+    # UTF-8 JSON, or its lossless compressed representation when marked zlib.
     frame_json: bytes
+    frame_encoding: str = "json"
+    frame_size: int = 0
+
+
+def _frame_size(sample: PackedSample) -> int:
+    return sample.frame_size or len(sample.frame_json)
+
+
+def _frame_bytes(sample: PackedSample) -> bytes:
+    """Decode only within the declared and hard expanded-size bounds."""
+    if sample.frame_encoding == "json":
+        return sample.frame_json
+    size = _frame_size(sample)
+    if sample.frame_encoding != "zlib" or not 0 < size <= MAX_RAW_FRAME_BYTES:
+        raise ValueError("invalid compressed frame metadata")
+    decoder = zlib.decompressobj()
+    frame = decoder.decompress(sample.frame_json, size + 1)
+    if (len(frame) != size or not decoder.eof or decoder.unused_data
+            or decoder.unconsumed_tail):
+        raise ValueError("compressed frame does not match its declared size")
+    return frame
 
 
 def pack(payload: dict) -> PackedSample:
     """Encode ``{time, context, positions, ...}`` without retaining input refs.
 
     Context keys are sorted before hashing, so equivalent settings deduplicate.
-    The frame retains original nested observation timestamps verbatim.
+    Large frames use bounded lossless compression. Original nested observation
+    timestamps and measurement values are retained verbatim.
     """
     try:
         if not isinstance(payload, dict) or not isinstance(payload.get("context"), dict):
@@ -74,9 +99,16 @@ def pack(payload: dict) -> PackedSample:
         frame_json = _encode(frame)
     except (ValueError, TypeError, OverflowError, RecursionError) as err:
         raise PackError("malformed", "sample is not finite JSON data") from err
-    if len(context) > MAX_CONTEXT_BYTES or len(frame_json) > MAX_FRAME_BYTES:
+    frame_size = len(frame_json)
+    if len(context) > MAX_CONTEXT_BYTES or frame_size > MAX_RAW_FRAME_BYTES:
+        raise PackError("oversize", "sample exceeds the expanded frame or context byte limit")
+    encoding = "json"
+    if frame_size > MAX_FRAME_BYTES:
+        frame_json = zlib.compress(frame_json, level=1)
+        encoding = "zlib"
+    if len(frame_json) > MAX_FRAME_BYTES:
         raise PackError("oversize", "sample exceeds the frame or context byte limit")
-    return PackedSample(time, context_id, context, frame_json)
+    return PackedSample(time, context_id, context, frame_json, encoding, frame_size)
 
 
 @dataclass(frozen=True)
@@ -152,6 +184,15 @@ class RecentTrackingHistory:
         if len(sample.context_json) > MAX_CONTEXT_BYTES or len(sample.frame_json) > MAX_FRAME_BYTES:
             self.record_failure("oversize")
             return False
+        if (sample.frame_encoding not in ("json", "zlib") or type(sample.frame_size) is not int
+                or sample.frame_size < 0 or (sample.frame_encoding == "json"
+                    and sample.frame_size not in (0, len(sample.frame_json)))
+                or (sample.frame_encoding == "zlib" and sample.frame_size == 0)):
+            self.record_failure()
+            return False
+        if _frame_size(sample) > MAX_RAW_FRAME_BYTES:
+            self.record_failure("oversize")
+            return False
         existing = self._contexts.get(sample.context_id)
         if existing and existing[0] != sample.context_json:
             self.record_failure()
@@ -171,7 +212,8 @@ class RecentTrackingHistory:
         # Packed samples with the same hash share the canonical bytes object.
         if existing:
             context, refs = existing
-            sample = PackedSample(time, sample.context_id, context, sample.frame_json)
+            sample = PackedSample(time, sample.context_id, context, sample.frame_json,
+                                  sample.frame_encoding, sample.frame_size)
             self._contexts[sample.context_id] = (context, refs + 1)
         else:
             self._contexts[sample.context_id] = (sample.context_json, 1)
@@ -193,6 +235,9 @@ class RecentTrackingHistory:
         metadata = {
             "window_seconds": WINDOW_SECONDS, "sample_interval_seconds": SAMPLE_INTERVAL_SECONDS,
             "max_frames": MAX_FRAMES, "max_bytes": MAX_BYTES,
+            "max_frame_bytes": MAX_FRAME_BYTES, "max_expanded_frame_bytes": MAX_RAW_FRAME_BYTES,
+            "retained_samples": len(frames),
+            "retained_compressed_samples": sum(f.frame_encoding == "zlib" for f in frames),
             "snapshot_time": now, "dropped_frames": self._dropped,
             "skipped_samples": self._skipped, "malformed_samples": self._malformed,
             "oversize_samples": self._oversize, "clock_resets": self._clock_resets,
@@ -208,22 +253,40 @@ def export_snapshot(snapshot: HistorySnapshot, max_bytes: int = EXPORT_MAX_BYTES
     """
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
         raise ValueError("export byte limit must be a positive integer")
-    decoded_frames = [json.loads(f.frame_json) for f in snapshot.frames]
-    decoded_contexts = {key: json.loads(value) for key, value in snapshot.contexts}
+    # Compact JSON cannot exceed its pretty export's size. Choose a possible
+    # newest suffix before decoding, so a highly compressible history cannot
+    # expand hundreds of MiB just to emit a 1 MiB report.
+    context_bytes = dict(snapshot.contexts)
+    initial_start, expanded_bytes = len(snapshot.frames), 0
+    ids = set()
+    for index in range(len(snapshot.frames) - 1, -1, -1):
+        frame = snapshot.frames[index]
+        extra = _frame_size(frame) + (len(context_bytes[frame.context_id]) if frame.context_id not in ids else 0)
+        if expanded_bytes + extra > max_bytes:
+            break
+        expanded_bytes += extra
+        ids.add(frame.context_id)
+        initial_start = index
+    selected = snapshot.frames[initial_start:]
+    decoded_frames = [json.loads(_frame_bytes(f)) for f in selected]
+    decoded_contexts = {key: json.loads(context_bytes[key]) for key in ids}
     base_metadata = dict(snapshot.metadata)
 
     def build(start: int) -> tuple[dict, int]:
         frames = decoded_frames[start:]
         ids = {f["context_id"] for f in frames}
-        retained = snapshot.frames[start:]
+        retained = selected[start:]
         contexts = {key: value for key, value in decoded_contexts.items() if key in ids}
         meta = dict(base_metadata)
         meta.update({"sample_count": len(frames), "context_count": len(contexts),
+                     "compressed_samples": sum(f.frame_encoding == "zlib" for f in retained),
+                     "expanded_frame_bytes": sum(_frame_size(f) for f in retained),
                      "first_time": frames[0]["time"] if frames else None,
                      "last_time": frames[-1]["time"] if frames else None,
                      "encoded_bytes": sum(len(f.frame_json) for f in retained)
                      + sum(len(value) for key, value in snapshot.contexts if key in ids),
-                     "export_truncated": start > 0, "export_dropped_frames": start,
+                     "export_truncated": initial_start + start > 0,
+                     "export_dropped_frames": initial_start + start,
                      "export_bytes": 0})
         result = {"metadata": meta, "contexts": contexts, "frames": frames}
         size = len(_encode(result, pretty=True))
@@ -250,3 +313,8 @@ def export_snapshot(snapshot: HistorySnapshot, max_bytes: int = EXPORT_MAX_BYTES
         else:
             low = mid + 1
     return result
+
+
+def export_json(snapshot: HistorySnapshot, max_bytes: int = EXPORT_MAX_BYTES) -> bytes:
+    """Return the exact UTF-8 representation used to enforce the export cap."""
+    return _encode(export_snapshot(snapshot, max_bytes), pretty=True)

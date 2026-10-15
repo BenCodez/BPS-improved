@@ -200,6 +200,133 @@ def test_bundle_carries_full_saved_reports_and_manifest_without_recursion(hass, 
     asyncio.run(scenario())
 
 
+def test_bundle_retains_more_compressed_history_than_clipboard_with_explicit_limits():
+    history = recent.RecentTrackingHistory()
+    for now in range(100, 120, 2):
+        history.append(recent.pack({"time": now, "context": {"version": 1},
+            "positions": [{"ent": "synthetic_tag", "updated": 90.125,
+                "outdoor": {"observed": 90.125, "details": "synthetic receiver details " * 10_000}}]}))
+    frozen = history.snapshot(118)
+    actual = {"status": "empty", "records": [], "evicted": 0}
+    payload = diag.build_bundle({"time": 118, "_recent_tracking_snapshot": frozen}, actual, None, None)
+    with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+        full = json.loads(bundle.read("recent_tracking.json"))
+        report = bundle.read("full_report.txt").decode()
+        clipboard = json.loads(report[report.index("{"):])["recent_tracking"]
+        assert full["metadata"]["sample_count"] == 10 > clipboard["metadata"]["sample_count"]
+        assert full["metadata"]["export_truncated"] is False
+        assert all(f["positions"][0]["outdoor"]["observed"] == 90.125 for f in full["frames"])
+        assert full["metadata"]["export_bytes"] <= diag.MAX_RECENT_BUNDLE_BYTES
+        assert sum(i.file_size for i in bundle.infolist()) <= diag.MAX_BUNDLE_BYTES
+        manifest = json.loads(bundle.read("manifest.json"))
+        assert manifest["limits"]["recent_tracking_bytes"] == diag.MAX_RECENT_BUNDLE_BYTES
+    assert len(history.snapshot(118).frames) == 10
+
+
+def test_larger_bundle_history_does_not_displace_map_editor_and_phone_context(monkeypatch):
+    monkeypatch.setattr(diag, "MAX_BUNDLE_BYTES", 200_000)
+    history = recent.RecentTrackingHistory()
+    for now in range(100, 140, 2):
+        history.append(recent.pack({"time": now, "context": {},
+            "positions": [{"ent": "synthetic_tag", "details": "x" * 10_000}]}))
+    layout = {"synthetic_map_context": "x" * 50_000}
+    panel = {"synthetic_editor_context": "x" * 30_000}
+    phone = {"synthetic_phone_context": "x" * 8_000}
+    payload = diag.build_bundle({"time": 138, "context": {"layout": layout},
+        "_recent_tracking_snapshot": history.snapshot(138)},
+        {"status": "empty", "records": [], "evicted": 0}, None, panel, phone)
+    with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+        assert json.loads(bundle.read("saved_layout.json")) == layout
+        assert json.loads(bundle.read("panel_context.json")) == panel
+        assert json.loads(bundle.read("phone_survey.json")) == phone
+        result = json.loads(bundle.read("recent_tracking.json"))
+        assert 0 < result["metadata"]["sample_count"] < 20
+        assert result["frames"][-1]["time"] == 138
+        assert result["metadata"]["export_truncated"] is True
+        assert sum(i.file_size for i in bundle.infolist()) <= diag.MAX_BUNDLE_BYTES
+
+
+@pytest.mark.parametrize("bundle_limit", [64 * 1024 * 1024, 200_000])
+def test_unicode_history_enforces_actual_archive_file_bytes_and_remaining_budget(monkeypatch, bundle_limit):
+    monkeypatch.setattr(diag, "MAX_BUNDLE_BYTES", bundle_limit)
+    monkeypatch.setattr(diag, "MAX_RECENT_BUNDLE_BYTES", 250_000)
+    history = recent.RecentTrackingHistory()
+    for now in range(100, 140, 2):
+        history.append(recent.pack({"time": now, "context": {},
+            "positions": [{"ent": "synthetic_tag", "details": "🛰" * 25_000}]}))
+    frozen = history.snapshot(138)
+    assert dict(frozen.metadata)["retained_compressed_samples"] == 20
+    payload = diag.build_bundle({"time": 138, "_recent_tracking_snapshot": frozen},
+        {"status": "empty", "records": [], "evicted": 0}, {"padding": "x" * 20_000}, None)
+    with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+        data = bundle.read("recent_tracking.json")
+        result = json.loads(data)
+        assert 0 < result["metadata"]["sample_count"] < 20
+        assert result["frames"][-1]["time"] == 138
+        assert result["frames"][-1]["positions"][0]["details"] == "🛰" * 25_000
+        assert len(data) == result["metadata"]["export_bytes"] <= diag.MAX_RECENT_BUNDLE_BYTES
+        manifest = json.loads(bundle.read("manifest.json"))
+        assert manifest["files"]["recent_tracking.json"]["bytes"] == len(data)
+        assert sum(i.file_size for i in bundle.infolist()) <= bundle_limit
+
+
+def test_history_can_fill_remaining_budget_without_charging_manifest_reserve_twice(monkeypatch):
+    monkeypatch.setattr(diag, "MAX_BUNDLE_BYTES", 200_000)
+    # Keep the duplicate clipboard report constant to isolate the archive budget;
+    # history itself uses the real packing, compression, and export pipeline.
+    monkeypatch.setattr(diag, "format_report", lambda _snapshot: "synthetic report")
+    actual = {"status": "empty", "records": [], "evicted": 0}
+    baseline = diag.build_bundle({"time": 100}, actual, None, None)
+    with zipfile.ZipFile(io.BytesIO(baseline)) as bundle:
+        earlier_bytes = sum(i.file_size for i in bundle.infolist()
+                            if i.filename not in ("manifest.json", "full_report.txt"))
+    budget = diag.MAX_BUNDLE_BYTES - earlier_bytes - diag.BUNDLE_MANIFEST_RESERVE_BYTES
+    padding = budget - 2000
+    for _ in range(10):
+        history = recent.RecentTrackingHistory()
+        history.append(recent.pack({"time": 100, "context": {},
+            "positions": [{"ent": "synthetic_tag", "observed": 90.125, "details": "x" * padding}]}))
+        frozen = history.snapshot(100)
+        encoded = recent.export_json(frozen, diag.MAX_RECENT_BUNDLE_BYTES)
+        if len(encoded) == budget:
+            break
+        padding += budget - len(encoded)
+    assert len(encoded) == budget, 'the real history export exactly fills its available budget'
+    payload = diag.build_bundle({"time": 100, "_recent_tracking_snapshot": frozen}, actual, None, None)
+    with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+        result = json.loads(bundle.read("recent_tracking.json"))
+        manifest = json.loads(bundle.read("manifest.json"))
+        assert result["metadata"]["sample_count"] == 1
+        assert result["frames"][0]["positions"][0]["observed"] == 90.125
+        assert len(bundle.read("recent_tracking.json")) == budget
+        assert sum(i.file_size for i in bundle.infolist()) <= diag.MAX_BUNDLE_BYTES
+        assert len(bundle.read("manifest.json")) <= diag.BUNDLE_MANIFEST_RESERVE_BYTES
+        assert manifest["files"]["recent_tracking.json"]["bytes"] == budget
+
+
+@pytest.mark.parametrize("bundle_limit, expected_frames", [(200_000, 0), (250_000, 1)])
+def test_embedded_clipboard_history_cannot_displace_editor_or_standalone_history(monkeypatch, bundle_limit, expected_frames):
+    monkeypatch.setattr(diag, "MAX_BUNDLE_BYTES", bundle_limit)
+    actual = {"status": "empty", "records": [], "evicted": 0}
+    panel = {"editor": "x" * 70_000}
+    baseline = diag.build_bundle({"time": 100}, actual, None, panel)
+    with zipfile.ZipFile(io.BytesIO(baseline)) as bundle:
+        assert json.loads(bundle.read("panel_context.json")) == panel
+    history = recent.RecentTrackingHistory()
+    history.append(recent.pack({"time": 100, "context": {},
+        "positions": [{"ent": "synthetic_tag", "details": "x" * 100_000}]}))
+    payload = diag.build_bundle({"time": 100, "_recent_tracking_snapshot": history.snapshot(100)},
+                                actual, None, panel)
+    with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+        assert json.loads(bundle.read("panel_context.json")) == panel
+        result = json.loads(bundle.read("recent_tracking.json"))
+        assert result["metadata"]["retained_samples"] == 1
+        assert result["metadata"]["sample_count"] == expected_frames
+        manifest = json.loads(bundle.read("manifest.json"))
+        assert "full_report.txt" in manifest["omissions"]
+        assert sum(i.file_size for i in bundle.infolist()) <= bundle_limit
+
+
 def test_bundle_retains_direct_devices_omitted_by_clipboard_limits(hass, monkeypatch):
     from bps.bermuda_direct import BermudaDirect
     from test_bermuda_direct import prepared

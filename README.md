@@ -1042,11 +1042,18 @@ when a group excludes them.
 
 Recent history stays in Home Assistant memory and clears on integration unload,
 restart or disabling Outdoor Tracking. Retention is up to **10 minutes, 300
-samples and 2 MiB**, whichever limit is reached first; each sample is limited to
-64 KiB, settings contexts to 256 KiB, and includes up to 128 positions. Oversized
-or malformed samples are skipped and counted. The copy report exports the newest
+samples and 2 MiB**, whichever limit is reached first. Large samples use lossless
+compression so detailed receiver paths and distance ranges can be retained with
+the tracking batch. Each sample is limited to 64 KiB stored and 1 MiB expanded,
+settings contexts to 256 KiB, and includes up to 128 positions. Oversized or
+malformed samples are skipped and counted. The copy report exports the newest
 history fitting a 1 MiB history budget (less when the live report is large), with
-actual time coverage and truncation/drop counters. It does not upload anything,
+actual time coverage, retained/exported sample counts and truncation/drop counters.
+**Download full diagnostics** includes a separate `recent_tracking.json` with up
+to 16 MiB of history, subject to the archive's total limit; use it when the copy
+report shows truncated history.
+Only a suffix within that expanded byte budget is decoded for export; the report
+contains normal JSON with the original values and timestamps. It does not upload anything,
 write additional history files, trigger extra Bluetooth scans or change tracking.
 Sampling timestamps never refresh the underlying BLE observations. Very brief
 events between completed batches can be missed. Current full Bermuda sensors
