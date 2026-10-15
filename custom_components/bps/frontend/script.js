@@ -1431,9 +1431,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const hueOf = (c) => solo ? floorReceiverHue(c[0], c[1]) : deviceBaseHue(entKey);
             ctx.save();
             ctx.lineCap = "round";
-            const intervalNow = Date.now() / 1000;
-            const intervals = document.getElementById('trackingDistanceMode')?.value === 'estimated' ? [] : (t.rangeIntervals || []).filter(c =>
-                Number.isFinite(c[4]) && intervalNow >= c[4] && intervalNow - c[4] <= 3);
+            const intervals = document.getElementById('trackingDistanceMode')?.value === 'estimated' ? [] : outdoor.freshDistanceIntervals(t.rangeIntervals);
             if (solo) intervals.forEach(c => {
                 ctx.beginPath(); ctx.moveTo(c[0] + c[3], c[1]); ctx.arc(c[0], c[1], c[3], 0, Math.PI * 2);
                 ctx.moveTo(c[0] + c[2], c[1]); ctx.arc(c[0], c[1], c[2], 0, Math.PI * 2, true);
@@ -3019,6 +3017,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         async function fetchBPSCords() {
             const apiUrl = "/api/bps/cords"; 
+            const requestedAt = outdoor.elapsedNow();
         
             try {
                 const response = await bpsFetch(apiUrl); // Make a GET request to the API
@@ -3028,6 +3027,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 console.error("Failed to fetch BPS data:", response.statusText); // Handle error status
                 return null;
             }
+            const transportAge = Math.max(0, outdoor.elapsedNow() - requestedAt) / 1000;
+            data.forEach(position => {if (position && typeof position === 'object') position._bps_transport_age_s = transportAge;});
             return data;
 
             } catch (error) {
@@ -7534,7 +7535,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 display_uncertainty_m: position.outdoor?.display_uncertainty_m,
                 displayed_receiver_radii: circleToggle.checked ? trackingDistanceMarks(position) : [],
                 displayed_receiver_intervals: circleToggle.checked && trackingDistanceMode?.value !== 'estimated'
-                    ? (position.rangeIntervals || []).filter(c => Date.now() / 1000 >= c[4] && Date.now() / 1000 - c[4] <= 3) : [],
+                    ? outdoor.freshDistanceIntervals(position.rangeIntervals) : [],
                 received_at: position.receivedAt / 1000})),
             editor_layout: editor, gps_setup: gpsUI?.snapshot(), height_survey: heightUI?.snapshot()};
     }, snapshotLocationTools);

@@ -97,13 +97,21 @@ function radiusFix(raw, seconds, previous, floor = 'Property', extra = {}) {
 test('live long-range bands keep original clocks, group members and floor boundaries', () => {
     const reading = {receiver_xy_px: [50, 60], range_interval: {status: 'available', center_m: 20, source_observed: 999},
         horizontal_interval: {status: 'available', lower_px: 100, upper_px: 300}};
-    const a = {ent: 'a', floor: 'Property', outdoor: {receiver_diagnostics: [reading]}};
-    const b = {ent: 'b', floor: 'Property', outdoor: {receiver_diagnostics: [structuredClone(reading)]}};
-    const c = {ent: 'c', floor: 'Barn', outdoor: {receiver_diagnostics: [reading]}};
+    const a = {ent: 'a', floor: 'Property', outdoor: {server_time: 1000, receiver_diagnostics: [reading]}};
+    const b = {ent: 'b', floor: 'Property', outdoor: {server_time: 1000, receiver_diagnostics: [structuredClone(reading)]}};
+    const c = {ent: 'c', floor: 'Barn', outdoor: {server_time: 1000, receiver_diagnostics: [reading]}};
     const group = {group: true, floor: 'Property', beacon_positions: [{ent: 'a'}, {ent: 'b'}, {ent: 'c'}]};
-    assert.deepEqual(plain(out.distanceIntervals(group, [a, b, c], undefined, 1000)), [[50, 60, 100, 300, 999]]);
-    assert.deepEqual(plain(out.distanceIntervals(group, [a, b, c], undefined, 1003)), []);
-    assert.deepEqual(plain(out.distanceIntervals(a, [], undefined, 998)), []);
+    const intervals = out.distanceIntervals(group, [a, b, c], undefined, 1000);
+    assert.deepEqual(plain(intervals), [[50, 60, 100, 300, {source_observed: 999, server_age_s: 1, received_elapsed_ms: 1000}]]);
+    assert.equal(out.freshDistanceIntervals(intervals, 2500).length, 1);
+    assert.deepEqual(plain(out.freshDistanceIntervals(intervals, 4001)), []);
+    a.outdoor.server_time = 1003;
+    assert.deepEqual(plain(out.distanceIntervals(a, [], undefined, 1000)), []);
+    a.outdoor.server_time = 998;
+    assert.deepEqual(plain(out.distanceIntervals(a, [], undefined, 1000)), []);
+    a.outdoor.server_time = 1000; a._bps_transport_age_s = 4;
+    assert.deepEqual(plain(out.distanceIntervals(a, [], undefined, 1000)), []);
+    a._bps_transport_age_s = 0;
     a.outdoor.receiver_diagnostics[0].range_interval.center_m = 5;
     assert.deepEqual(plain(out.distanceIntervals(a, [], undefined, 1000)), []);
     assert.equal(out.settings({}).long_range_intervals, false);

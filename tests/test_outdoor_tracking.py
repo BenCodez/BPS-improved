@@ -60,6 +60,16 @@ def test_long_range_toggle_is_a_strict_optional_boolean(value, valid):
     assert (validate_outdoor_layout({"outdoor_tracking": {"long_range_intervals": value}}) is None) == valid
 
 
+def test_live_position_response_supplies_server_clock_without_mutating_frozen_fix(hass, monkeypatch):
+    monkeypatch.setattr(bps.time, "time", lambda: 1000)
+    position = {"ent": "beacon", "updated": 990, "outdoor": {"observed": 990}}
+    hass.data.setdefault("bps", {})["apitricords"] = [position]
+    response = run(bps.BPSCordsAPI(hass).get(None)).json_body[0]
+    assert response["outdoor"]["server_time"] == 1000
+    assert response["outdoor"]["position_age_s"] == 10
+    assert position == {"ent": "beacon", "updated": 990, "outdoor": {"observed": 990}}
+
+
 @pytest.mark.parametrize("initial, displacement, expected", [
     ("good", 4.0, "moderate"), ("moderate", 0.0, "moderate"),
     ("poor", 1.0, "poor"), ("stale", 1.0, "stale"),

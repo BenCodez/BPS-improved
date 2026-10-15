@@ -3524,7 +3524,7 @@ def _diagnostic_report_snapshot(hass, now):
         observed = finite_number(observed, minimum=0.0)
         if observed is not None:
             age = max(0.0, now - observed)
-            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0))
+            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0), server_time=now)
     return snapshot
 
 
@@ -3695,7 +3695,7 @@ class BPSCordsAPI(HomeAssistantView):
             observed = position.get("updated", now) if quality.get("use_observation_age") is False \
                 else quality.get("observed", position.get("updated", now))
             age = max(0.0, now - observed)
-            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0))
+            quality.update(position_age_s=age, stale=age >= quality.get("stale_after_s", 30.0), server_time=now)
             payload.append({**position, "outdoor": quality})
         return web.json_response(payload)
 

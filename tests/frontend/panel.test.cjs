@@ -46,7 +46,9 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
         addEventListener: (name, cb) => listeners.set(name, cb), removeEventListener: name => listeners.delete(name), body: element(), documentElement: element()};
     const window = {location: {origin: 'https://home.test'}, scrollX: 0, scrollY: 0, innerHeight: 1000,
         addEventListener: (name, cb) => listeners.set(`window:${name}`, cb)}; window.parent = window;
+    let elapsed = 0;
     const sandbox = vm.createContext({document, window, console: {log() {}, warn() {}, error() {}}, Date: ClockDate, URL, FormData, Response, TextEncoder,
+        performance: {now: () => elapsed},
         navigator: {geolocation: {watchPosition(done) {gpsWatchers.set(++gpsWatchId, done); return gpsWatchId;}, clearWatch(id) {gpsWatchers.delete(id);}}},
         Image: class {constructor() {this.naturalWidth = iconsLoaded ? 24 : 0; this.complete = iconsLoaded;}}, setTimeout: () => 1, clearTimeout() {}, setInterval: (cb, ms) => {intervals.push({cb, ms}); return intervals.length;}, clearInterval() {},
         requestAnimationFrame: () => 1, localStorage: {getItem: key => preferences.get(key) ?? null, setItem: (key, value) => preferences.set(key, value)},
@@ -83,7 +85,8 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
     await ready;
     await new Promise(resolve => setImmediate(resolve));
     return {hooks: sandbox.hooks, el: id => document.getElementById(id), requests, intervals, canvasCalls, network, document, listeners, preferences,
-        setClock: now => {clock = now;}, clock: () => clock, gpsWatchers,
+        setClock: now => {elapsed += Math.max(0, now - clock); clock = now;}, clock: () => clock, gpsWatchers,
+        setWallClock: now => {clock = now;}, setElapsed: now => {elapsed = now;},
         emitGPS: (coordinates, accuracy = 1) => {for (const callback of gpsWatchers.values()) callback({coords: {...coordinates, accuracy}, timestamp: clock});}};
 }
 const layout = () => ({floor: [{name: 'Property', scale: 20, zones: [], receivers: []}]});
@@ -437,11 +440,16 @@ test('live distance bands draw and label signal variation, then expire during a 
     p.el('entSelector').value = 'beacon_a'; await p.el('entSelector').fire('change');
     await p.el('starttrack').fire('click'); p.el('circleToggle').checked = true; p.setClock(100000);
     p.network.cords = [{ent: 'beacon_a', floor: 'Property', cords: [100, 100], radii: [[0, 0, 400]],
-        outdoor: {receiver_diagnostics: [{receiver_xy_px: [0, 0], range_interval: {status: 'available', center_m: 20, source_observed: 99},
+        outdoor: {server_time: 100, receiver_diagnostics: [{receiver_xy_px: [0, 0], range_interval: {status: 'available', center_m: 20, source_observed: 99},
             horizontal_interval: {status: 'available', lower_px: 200, upper_px: 600}}]}}];
     p.canvasCalls.length = 0; await p.intervals.findLast(i => i.ms === 500).cb();
     assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600));
     assert.ok(p.canvasCalls.some(c => c[0] === 'text' && c[1] === 'BLE range 10.0 m–30.0 m · signal variation'));
+    p.setWallClock(1000000000); p.canvasCalls.length = 0; await p.hooks.redrawAll();
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600), 'skewed client epoch does not hide fresh server evidence');
+    p.setWallClock(0); p.canvasCalls.length = 0; await p.hooks.redrawAll();
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600), 'a slow browser clock also keeps fresh server evidence visible');
+    p.setWallClock(100000);
     p.setClock(104000); p.canvasCalls.length = 0;
     p.el('distanceUnit').value = 'ft'; await p.el('distanceUnit').fire('change');
     assert.equal(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600), false);

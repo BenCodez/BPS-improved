@@ -54,19 +54,31 @@
         }
         return circles;
     }
-    function distanceIntervals(row, snapshot, sameFloor = (a, b) => a === b, now = Date.now() / 1000) {
+    const elapsedNow = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
+    function freshDistanceIntervals(intervals, now = elapsedNow()) {
+        return (intervals || []).filter(c => {
+            const age = c[4];
+            return number(age?.server_age_s) && number(age?.received_elapsed_ms) && now >= age.received_elapsed_ms
+                && age.server_age_s >= 0 && age.server_age_s + (now - age.received_elapsed_ms) / 1000 <= 3;
+        });
+    }
+    function distanceIntervals(row, snapshot, sameFloor = (a, b) => a === b, received = elapsedNow()) {
         const sources = row?.group ? (row.beacon_positions || []).map(member =>
             (snapshot || []).find(p => p?.ent === member?.ent && !p.group)) : [row];
         const intervals = [], seen = new Set();
         for (const source of sources) {
             if (!source || source.floor && row.floor && !sameFloor(source.floor, row.floor)) continue;
+            const serverTime = source.outdoor?.server_time;
+            const transportAge = number(source._bps_transport_age_s) && source._bps_transport_age_s >= 0 ? source._bps_transport_age_s : 0;
             for (const reading of source.outdoor?.receiver_diagnostics || []) {
                 const band = reading.horizontal_interval, raw = reading.range_interval, xy = reading.receiver_xy_px;
                 if (reading.excluded || reading.used === false || raw?.status !== 'available' || raw.center_m < 10
-                    || !number(raw.source_observed) || now < raw.source_observed || now - raw.source_observed > 3
+                    || !number(serverTime) || !number(raw.source_observed) || serverTime < raw.source_observed
+                    || serverTime - raw.source_observed + transportAge > 3
                     || band?.status !== 'available' || !Array.isArray(xy) || !xy.slice(0, 2).every(number) || xy.length < 2
                     || !number(band.lower_px) || !number(band.upper_px) || band.lower_px < 0 || band.upper_px <= band.lower_px) continue;
-                const item = [xy[0], xy[1], band.lower_px, band.upper_px, raw.source_observed];
+                const item = [xy[0], xy[1], band.lower_px, band.upper_px, {source_observed: raw.source_observed,
+                    server_age_s: serverTime - raw.source_observed + transportAge, received_elapsed_ms: received}];
                 const key = JSON.stringify(item.slice(0, 4));
                 if (!seen.has(key)) {seen.add(key); intervals.push(item);}
             }
@@ -356,7 +368,7 @@
         return lines.join('\n');
     }
     root.BPSOutdoor = Object.freeze({TYPES, MATERIALS, POLICIES, MAX_UNCERTAINTY_THRESHOLD_M, MAX_ENVIRONMENT_POLYGONS,
-        groups, environment, settings, positionSnapshot, distanceRadii, distanceIntervals, markerPlacement, markerStatus, uncertaintyRadius,
+        groups, environment, settings, positionSnapshot, distanceRadii, distanceIntervals, freshDistanceIntervals, elapsedNow, markerPlacement, markerStatus, uncertaintyRadius,
         drawUncertainty, stabilizeUncertainty, beaconNumber, drawMiniBeacon, isStale, fixTime, validPolygon, validPolyline,
         validEnvironmentPoints, fenceStyle, drawFence, upsertEnvironment, upsertGroup, diagnosticsText});
 })(globalThis);
