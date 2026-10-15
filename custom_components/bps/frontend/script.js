@@ -451,6 +451,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const hardware = opts.receiverHardware;
             const hardwareInfo = opts.receiverMetadata ? document.createElement('p') : null;
             const externalAntenna = opts.receiverMetadata ? document.createElement('select') : null;
+            const antennaGain = opts.receiverMetadata ? document.createElement('input') : null;
             if (opts.receiverMetadata) {
                 for (const [key, label, maxLength] of [
                     ['hardware_model', 'Hardware / model (optional)', 128],
@@ -478,6 +479,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const option = document.createElement('option'); option.value = value; option.textContent = label; externalAntenna.appendChild(option);
                 }
                 externalAntenna.value = typeof opts.receiverMetadata.external_antenna === 'boolean' ? String(opts.receiverMetadata.external_antenna) : '';
+                antennaGain.type = 'number'; antennaGain.step = '0.1'; antennaGain.min = '-20'; antennaGain.max = '60';
+                antennaGain.className = 'bps-modal-input'; antennaGain.dataset.role = 'antenna-gain';
+                antennaGain.value = Number.isFinite(opts.receiverMetadata.antenna_gain_dbi) ? String(opts.receiverMetadata.antenna_gain_dbi) : '';
+                antennaGain.placeholder = 'Optional; descriptive, does not change RSSI';
             }
             const row = document.createElement("div");
             row.className = "bps-modal-actions";
@@ -499,6 +504,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (hardwareInfo) {
                 dialog.appendChild(hardwareInfo);
                 const label = document.createElement('label'); label.textContent = 'External antenna'; label.appendChild(externalAntenna); dialog.appendChild(label);
+                const gainLabel = document.createElement('label'); gainLabel.textContent = 'Advertised antenna gain (dBi)';
+                gainLabel.appendChild(antennaGain); dialog.appendChild(gainLabel);
             }
             dialog.appendChild(row);
             overlay.appendChild(dialog);
@@ -520,6 +527,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                     distance_accuracy_m: accuracy === null ? null : Number(accuracy.toFixed(10))};
                 if (!['', 'true', 'false'].includes(externalAntenna.value)) {bpsToast('Choose an antenna option.'); return;}
                 properties.external_antenna = externalAntenna.value === '' ? null : externalAntenna.value === 'true';
+                const gain = antennaGain.value.trim() === '' ? null : Number(antennaGain.value);
+                if (antennaGain.validity.badInput || gain !== null && (!Number.isFinite(gain) || gain < -20 || gain > 60)) {
+                    bpsToast('Advertised antenna gain must be between -20 and 60 dBi.'); antennaGain.focus(); return;
+                }
+                properties.antenna_gain_dbi = gain;
                 for (const {key, maxLength, field} of metadataInputs) {
                     const value = field.value.trim();
                     if (value.length > maxLength) {
@@ -3393,7 +3405,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (val === undefined) return;                       // cancelled
                 const heightChanged = rec.height !== (val.height === null ? undefined : val.height);
                 if (heightChanged) delete rec.height_survey;
-                for (const key of ['height', 'height_unit', 'hardware_model', 'antenna_notes', 'distance_accuracy_m', 'external_antenna']) {
+                for (const key of ['height', 'height_unit', 'hardware_model', 'antenna_notes', 'distance_accuracy_m', 'external_antenna', 'antenna_gain_dbi']) {
                     if (val[key] === null) delete rec[key]; else rec[key] = val[key];
                 }
                 savebuttondiv.appendChild(saveButton);               // reveal Save Floor Plan

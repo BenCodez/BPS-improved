@@ -3334,10 +3334,26 @@ def _diagnostic_snapshot(hass, targets, now):
     wanted = set(targets) | set(beacons)
     positions = [copy.deepcopy(p) for p in hass.data.get(DOMAIN, {}).get("apitricords", [])
                  if p.get("ent") in wanted]
-    return {"time": now, "context": context, "readings": readings, "positions": positions,
+    snapshot = {"time": now, "context": context, "readings": readings, "positions": positions,
             "calibration_status": {"state": cal.get("state", "idle"), "error": cal.get("error"),
                 "pair_counts": {str(k): len(v) for k, v in list(cal.get("samples", {}).items())[:256]}},
             "offline_receivers": list(hass.data.get(DOMAIN, {}).get("rl_offline", []))[:128]}
+    if report:
+        from .bermuda_direct import public_id
+        from .receiver_matching import _RANGE_MAC
+        # Kept only until the executor builds marked-pair evidence. The normal
+        # clipboard report drops this private transport, avoiding its display cap.
+        identities = {}
+        for eid, did in sources.tracker_ids.items():
+            entry = sources.registry.entities.get(eid) if sources.registry is not None else None
+            uid, owner = sources.tracker_proofs[eid]
+            match = _RANGE_MAC.search(uid)
+            if entry is not None and did and match and sources._reading_current(eid):
+                identities[eid] = {"entry_id": owner, "device_id": public_id(did),
+                                   "scanner_mac": match[1].lower(), "ha_device_id": getattr(entry, "device_id", None)}
+        snapshot["_radio_sources"] = {"snapshots": list(sources.direct.snapshots.values()),
+                                      "legacy_identities": identities}
+    return snapshot
 
 
 def _recent_tracking_snapshot(hass, now):

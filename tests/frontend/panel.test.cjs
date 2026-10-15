@@ -94,7 +94,7 @@ function receiverProperties(p, id = 'proxy') {
     p.listeners.get('click')({target: {closest: selector => selector === '[data-type="recheight"]' ? button : null}});
     const dialog = p.document.body.children.findLast(e => e.className === 'bps-modal-overlay').children[0];
     return {height: dialog.children[1], unit: dialog.children[2], model: dialog.children[3].children[0], antenna: dialog.children[4].children[0],
-        accuracy: dialog.children[5].children[0], hardware: dialog.children[6], external: dialog.children[7].children[0],
+        accuracy: dialog.children[5].children[0], hardware: dialog.children[6], external: dialog.children[7].children[0], gain: dialog.children[8].children[0],
         save: dialog.children.at(-1).children[1], cancel: dialog.children.at(-1).children[0]};
 }
 
@@ -123,6 +123,26 @@ test('receiver expected distance error converts selected feet and metres, persis
     edit = receiverProperties(p); edit.accuracy.value = '0'; await edit.save.fire('click'); await Promise.resolve(); assert.equal(receiver.distance_accuracy_m, 0);
     edit = receiverProperties(p); edit.accuracy.value = ''; await edit.save.fire('click'); await Promise.resolve();
     assert.equal(receiver.distance_accuracy_m, undefined); assert.equal(receiver.height_unit, undefined);
+});
+
+test('receiver advertised dBi gain persists as metadata without changing range corrections', async () => {
+    const source = layout(); source.floor[0].receivers = [{entity_id: 'proxy', cords: {x: 100, y: 200}, height: 2, correction: 1.8}];
+    const p = await panel(source); p.hooks.select('Property'); const receiver = p.hooks.layout().floor[0].receivers[0];
+    let edit = receiverProperties(p); edit.gain.value = '20'; await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.antenna_gain_dbi, 20); assert.equal(receiver.correction, 1.8);
+    await p.hooks.savedata(true);
+    const saved = JSON.parse(p.requests.find(r => r.url === '/api/bps/save_text').options.body.get('coordinates'));
+    assert.equal(saved.floor[0].receivers[0].antenna_gain_dbi, 20);
+    for (const value of ['61', '-21', 'Infinity', 'bad']) {
+        edit = receiverProperties(p); edit.gain.value = value; edit.model.value = 'changed';
+        await edit.save.fire('click'); assert.equal(receiver.antenna_gain_dbi, 20); assert.equal(receiver.hardware_model, undefined);
+        await edit.cancel.fire('click'); await Promise.resolve();
+    }
+    edit = receiverProperties(p); edit.gain.value = ''; edit.gain.validity.badInput = true;
+    await edit.save.fire('click'); assert.equal(receiver.antenna_gain_dbi, 20);
+    await edit.cancel.fire('click'); await Promise.resolve();
+    edit = receiverProperties(p); edit.gain.value = ''; await edit.save.fire('click'); await Promise.resolve();
+    assert.equal(receiver.antenna_gain_dbi, undefined); assert.equal(receiver.correction, 1.8);
 });
 
 test('beacon hardware profiles persist per beacon, remain independent of tuning and reject invalid or cancelled edits', async () => {

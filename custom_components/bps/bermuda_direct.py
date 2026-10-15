@@ -32,7 +32,7 @@ SCANNER_FIELDS = ("scanner_id", "address", "name", "slug", "unique_id", "entity_
                   "area_id", "area_name", "scanner_last_seen_age", "hardware")
 MEASUREMENT_FIELDS = ("device_id", "source_id", "observed", "observed_clock", "stamp", "age", "status",
     "rssi", "raw_rssi", "filtered_rssi", "rssi_offset", "reference_power", "attenuation", "raw_distance",
-    "filtered_distance", "distance", "distance_raw", "model_version", "reference_power_verified", "quality",
+    "filtered_distance", "distance", "distance_raw", "tx_power", "model_version", "reference_power_verified", "quality",
     "unavailable", "history", "history_status", "history_omitted")
 DEVICE_FIELDS = ("device_id", "owner_id", "address", "name", "slug", "unique_id", "source_aliases", "tracked",
                  "address_type", "area_id", "area_name", "hardware")

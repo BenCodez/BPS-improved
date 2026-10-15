@@ -62,6 +62,7 @@ def format_report(snapshot):
               "python_version": sys.version.split()[0], **snapshot}
     recent = report.pop("_recent_tracking_snapshot", None)
     actual = report.pop("_actual_location_history", None)
+    report.pop("_radio_sources", None)
     explicit_panel = "_panel_bytes" in report
     panel_bytes = report.pop("_panel_bytes", 256 * 1024)
     limit = MAX_REPORT_BYTES - panel_bytes
@@ -199,12 +200,18 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
         add("bermuda_measurements.json", direct)
     if actual["status"] in ("available", "empty"):
         from .ground_truth import GUIDE as HISTORY_GUIDE
+        from .radio_survey import export as export_radio_survey
         add("actual_location_history.json", {
             "format": "bps-ground-truth-v1", "guide": HISTORY_GUIDE,
             "records": actual["records"], "count": len(actual["records"]),
             "evicted": actual["evicted"]})
+        try:
+            add("radio_survey.json", export_radio_survey(actual["records"]))
+        except (ValueError, TypeError) as err:
+            manifest["omissions"]["radio_survey.json"] = str(err)
     else:
         manifest["omissions"]["actual_location_history.json"] = actual["reason"]
+        manifest["omissions"]["radio_survey.json"] = actual["reason"]
     if recording is not None:
         add("diagnostic_recording.json", recording)
     else:

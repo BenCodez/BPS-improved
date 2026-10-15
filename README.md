@@ -857,6 +857,29 @@ alignment, saved layout context, editor context, and your phone survey candidate
 Each mark retains its own capture ID, precise UTC timestamp, software versions and
 settings fingerprint; old labels are never applied to a later live position.
 
+New actual-location marks preserve per-pair raw/filtered RSSI and distances,
+effective reference power, scanner offset and attenuation, model consistency,
+packet/filter ages, BPS corrections and receiver/beacon hardware. This evidence
+is retained for the marked dog even when the general Bermuda clipboard view is
+truncated. Receiver properties include an optional **Advertised antenna gain
+(dBi)** field; this describes hardware and does not change RSSI or transmit power.
+
+The ZIP's `radio_survey.json` compares retained marks by canonical beacon/receiver,
+hardware, model, saved map and mapped path classification. It separates raw-model,
+filter and BPS errors into measured-range bands: under 5 m, 5–10 m, 10–25 m,
+25–50 m and 50 m or farther. This helps detect a model that works nearby but
+becomes biased at outdoor distances. These bands do not assert a 10 m radio limit.
+Packets older than three seconds, ambiguous identities, missing 3D geometry and
+model inconsistencies have explicit exclusions. Repeated packets count once.
+Older marks without radio evidence remain available and are counted as missing.
+
+For useful comparisons, let the dog settle at 3–5 accurately marked locations
+with different distances and clear/obstructed paths, then mark each location.
+The label describes only that instant. Repeated presses without fresh packets
+or distinct locations add no independent evidence. The export reports sample
+diversity; it does not fit or apply corrections. Validate any later adjustment
+at separate measured locations before leaving it enabled.
+
 Phone GPS choices remain listed when their fix becomes stale or unavailable. Only
 fresh fixes qualify for placement. **Refresh trackers** updates BLE choices without
 reloading or discarding map edits; API-only Bermuda trackers keep stable identities.
