@@ -192,14 +192,18 @@ def direct_monitor(hass, monkeypatch):
     def at(now, age):
         clock[0] = now
         payloads["entry"]["captured"] = now
-        payloads["entry"]["scanners"][MAC]["scanner_last_seen_age"] = age
+        for scanner in payloads["entry"]["scanners"].values():
+            scanner["scanner_last_seen_age"] = age
     return data, payloads, calls, at
 
 
-def test_direct_activity_without_dogs_alias_dedup_and_identity_rename(hass, notices, monkeypatch):
+@pytest.mark.parametrize("conflicting_geometry", [False, True])
+def test_direct_activity_without_dogs_alias_dedup_and_identity_rename(hass, notices, monkeypatch, conflicting_geometry):
     data, payloads, calls, at = direct_monitor(hass, monkeypatch)
     clone = copy.deepcopy(data["floor"][0]["receivers"][0])
     clone["entity_id"] = "current_station"
+    if conflicting_geometry:
+        clone["cords"]["x"] += 100
     data["floor"][0]["receivers"].append(clone)
     async def run():
         at(20000, 2)
@@ -248,6 +252,7 @@ def test_legacy_scanner_clock_not_distance_absence_and_unmatched_excluded(hass, 
     hass.data["bps_initialized"] = True
     clock = [20000.]
     monkeypatch.setattr(bps.time, "time", lambda: clock[0])
+    monkeypatch.setattr(A.time, "monotonic", lambda: clock[0] - 19000)
     dump = {}
     async def call(*args, **kwargs):
         return dump
@@ -266,4 +271,74 @@ def test_legacy_scanner_clock_not_distance_absence_and_unmatched_excluded(hass, 
         data["floor"][0]["receivers"][0]["scanner_mac"] = MAC
         await bps.update_receiver_liveness(hass)
         assert A.snapshot(hass)["monitored"] == 0 and not A.snapshot(hass)["active"]
+    asyncio.run(run())
+
+
+def test_direct_api_fallback_to_entirely_stale_legacy_dump_preserves_silence(hass, notices, monkeypatch):
+    data, payloads, calls, at = direct_monitor(hass, monkeypatch)
+    async def call(*args, **kwargs):
+        return {MAC: {"_is_scanner": True, "address": MAC, "name": "Current station", "last_seen": 1000}}
+    hass.services.async_call = call
+    monkeypatch.setattr(A.time, "monotonic", lambda: 21015.)
+    async def run():
+        at(40000, 20000)
+        await bps.update_receiver_liveness(hass)
+        assert A.snapshot(hass)["active"][0]["last_seen"] == 20000
+        payloads["entry"] = RuntimeError("synthetic direct outage")
+        monkeypatch.setattr(bps.time, "time", lambda: 40015.)
+        await bps.update_receiver_liveness(hass)
+        assert A.snapshot(hass)["active"][0]["last_seen"] == 20000
+        assert not any(call[0] == "dismiss" for call in notices), "fallback cannot clear the notice"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("source", [MAC, "dd:ee:ff:11:22:33"])
+def test_ha_radio_clock_not_receiver_beacon_reception_and_missing_scanner(hass, notices, monkeypatch, source):
+    data, payloads, calls, at = direct_monitor(hass, monkeypatch)
+    if source != MAC:
+        from test_bermuda_direct import snapshot
+        payloads["entry"] = snapshot(sid=source, retained=MAC)
+        payloads["entry"]["devices"].clear()
+    radio_age = [0.]
+    scanner = NS(source=source.upper(), time_since_last_detection=lambda: radio_age[0])
+    scanners = {source: scanner}
+    module = NS(async_scanner_by_source=lambda hass, address: scanners.get(address.lower()))
+    monkeypatch.setitem(sys.modules, "homeassistant.components.bluetooth", module)
+    async def run():
+        at(20000, 0)
+        if source != MAC:
+            payloads["entry"]["scanners"][source]["scanner_last_seen_age"] = 0
+        await bps.update_receiver_liveness(hass)
+        radio_age[0] = 10800
+        monkeypatch.setattr(bps.time, "time", lambda: 30800.)
+        # Bermuda's device-level last_seen is fresh because a different
+        # scanner can still hear this station's transmitted beacon.
+        await bps.update_receiver_liveness(hass)
+        assert A.snapshot(hass)["active"][0]["silent_s"] == 10800
+        scanners.clear()
+        monkeypatch.setattr(bps.time, "time", lambda: 30815.)
+        await bps.update_receiver_liveness(hass)
+        assert len(A.snapshot(hass)["active"]) == 1
+        scanners[source] = scanner
+        radio_age[0] = 0
+        await bps.update_receiver_liveness(hass)
+        assert not A.snapshot(hass)["active"] and notices[-1][0] == "dismiss"
+    asyncio.run(run())
+
+
+def test_registered_radio_without_first_packet_gets_three_hour_grace(hass, notices, monkeypatch):
+    data, payloads, calls, at = direct_monitor(hass, monkeypatch)
+    scanner = NS(source=MAC.upper(), time_since_last_detection=lambda: float("inf"))
+    module = NS(async_scanner_by_source=lambda hass, address: scanner if address.lower() == MAC else None)
+    monkeypatch.setitem(sys.modules, "homeassistant.components.bluetooth", module)
+    async def run():
+        at(20000, None)
+        await bps.update_receiver_liveness(hass)
+        assert A.snapshot(hass)["monitored"] == 1 and not A.snapshot(hass)["active"]
+        at(30799, None)
+        await bps.update_receiver_liveness(hass)
+        assert not A.snapshot(hass)["active"]
+        at(30800, None)
+        await bps.update_receiver_liveness(hass)
+        assert A.snapshot(hass)["active"][0]["silent_s"] == 10800
     asyncio.run(run())

@@ -3,6 +3,7 @@ import asyncio
 import copy
 import logging
 import math
+import time
 
 from homeassistant.helpers.storage import Store
 
@@ -22,6 +23,59 @@ def _number(value):
                 and math.isfinite(value) and value >= 0 else None)
     except OverflowError:
         return None
+
+
+def scanner_activity(hass, sources, identity, dump):
+    """Return (reception age, scanner known) independently of map validity.
+
+    Prefer HA's scanner clock: Bermuda's device last_seen can also advance
+    when another scanner hears the receiver's own beacon transmission.
+    """
+    addresses = {address for address, keys in sources.by_ble_address.items() if identity in keys}
+    rows = sources.direct.scanners.get(identity, [])
+    if len(rows) == 1:
+        addresses.add(rows[0][0])
+    if not addresses:
+        addresses.add(identity[1])
+    try:
+        from homeassistant.components.bluetooth import async_scanner_by_source
+    except ImportError:
+        pass
+    else:
+        ages, known = [], False
+        try:
+            for address in addresses:
+                scanner = async_scanner_by_source(hass, address.upper())
+                if scanner is not None and scanner.source.lower() == address.lower():
+                    known = True
+                    if (age := _number(scanner.time_since_last_detection())) is not None:
+                        ages.append(age)
+        except Exception:
+            # A missing manager or indeterminate source cannot prove activity.
+            return None, False
+        return (min(ages) if ages else None), known
+
+    age = _number(sources.direct.scanner_age(identity))
+    if age is not None:
+        return age + max(0.0, time.time() - sources.direct.now), True
+    if len(rows) == 1:
+        return None, True
+    if len(sources.owners_by_mac.get(identity[1], ())) != 1 or not isinstance(dump, dict):
+        return None, False
+    # Legacy last_seen uses HA's monotonic clock. Relative ages anchored to the
+    # newest device in a dump can falsely make an entirely stale fleet fresh.
+    stamps, known = [], False
+    clock = time.monotonic()
+    for address, device in dump.items():
+        if not isinstance(device, dict) or device.get("_is_scanner") is not True:
+            continue
+        mac = device.get("address_wifi_mac") or device.get("address", address)
+        stamp = _number(device.get("last_seen"))
+        if isinstance(mac, str) and mac.lower() == identity[1] and stamp is not None and stamp <= clock + 2:
+            known = True
+            if stamp > 0:
+                stamps.append(stamp)
+    return (max(0.0, clock - max(stamps)) if stamps else None), known
 
 
 class ReceiverAlerts:
@@ -64,7 +118,7 @@ class ReceiverAlerts:
                 age = _number(observation.get("age_s"))
                 previous = self.records.get(key, {})
                 # Missing distances alone do not prove a scanner is silent:
-                # start monitoring only after scanner-wide activity evidence.
+                # start monitoring only when the scanner itself is known.
                 if not previous and not observation.get("scanner_activity_known"):
                     continue
                 last_seen = min(previous.get("last_seen", now), now)

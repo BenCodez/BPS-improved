@@ -1577,11 +1577,15 @@ resumes. One notification lists all affected receivers; duplicate placements or
 old/current aliases of the same scanner count once. Tracking does not need to
 be started, and the dogs do not need to be nearby.
 
-The silence timer uses Bermuda's scanner-wide activity, including advertisements
-from other devices. A live network connection alone does not reset it. Monitoring
-starts once scanner-wide activity timing is available; unmatched or ambiguous
+The silence timer prefers Home Assistant's Bluetooth scanner reception clock,
+falling back to Bermuda's scanner timing on older installations. Reception from
+other devices counts; hearing a receiver's transmitted beacon at a different
+station does not reset its HA scanner clock. A live network connection alone
+does not reset the timer. Monitoring
+requires a known scanner or previously established timing; unmatched or ambiguous
 receivers and installations exposing only per-tracker distances cannot establish
-scanner silence. Match those receivers first or check Bermuda's scanner data.
+scanner silence. Newly registered scanners without a first packet get a full
+three-hour grace period. Match unknown receivers first or check Bermuda's scanner data.
 Existing timers can continue through a Bermuda API outage. Activity times are
 stored locally every five minutes, at alert/recovery transitions and on graceful
 shutdown. An abrupt stop can lose up to five minutes of recent activity until

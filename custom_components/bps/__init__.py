@@ -1343,7 +1343,6 @@ async def update_receiver_liveness(hass):
         return list(dict.fromkeys(names))
 
     source_evidence_ages = {}
-    scanner_evidence_slugs = set()
 
     def live_distance(slug):
         binding = bindings.get(slug, {})
@@ -1394,7 +1393,6 @@ async def update_receiver_liveness(hass):
             if direct_age is not None and direct_age >= 0:
                 source_age = direct_age + max(0.0, time.time() - sources.direct.now)
                 source_evidence_ages[slug] = source_age
-                scanner_evidence_slugs.add(slug)
                 return source_age <= RECEIVER_OFFLINE_SECS
         age = (dom.get("rl_mac_ages", {}).get(mac) if len(sources.owners_by_mac.get(mac, ())) <= 1
                and identity not in sources.direct.scanners else None)
@@ -1404,7 +1402,6 @@ async def update_receiver_liveness(hass):
             age = ages.get(slug, ages.get(slugify(name)) if name else None)
         if age is not None:
             source_evidence_ages[slug] = age + elapsed
-            scanner_evidence_slugs.add(slug)
             return (age + elapsed) <= RECEIVER_OFFLINE_SECS
         aliases = evidence_slugs(slug)
         for alias in aliases:
@@ -1434,6 +1431,7 @@ async def update_receiver_liveness(hass):
 
     if hass.data.get("bps_initialized") and _tracking_context_current(context):
         observations = {}
+        activity = {}
         for floor in layout.get("floor", []):
             if not isinstance(floor, dict):
                 continue
@@ -1445,20 +1443,20 @@ async def update_receiver_liveness(hass):
                 identity = binding.get("identity")
                 if not identity or sources.blocked(binding) or slug in identity_conflicts:
                     continue
-                if slug not in source_evidence_ages:
-                    live_distance(slug)  # A live network link alone is not BLE activity.
                 key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
                 option = next((option for name in binding["aliases"]
                                if (option := sources.resolved_option(name, binding)) is not None), {})
                 row = observations.setdefault(key, {"name": (option.get("name") or slug)[:128],
                     "receivers": [], "floors": [], "age_s": None, "scanner_activity_known": False})
-                row["scanner_activity_known"] |= slug in scanner_evidence_slugs
                 if slug not in row["receivers"]:
                     row["receivers"].append(slug)
                 floor_name = floor.get("name") if isinstance(floor.get("name"), str) else "Unnamed floor"
                 if floor_name not in row["floors"]:
                     row["floors"].append(floor_name)
-                age = finite_number(source_evidence_ages.get(slug), minimum=0)
+                if identity not in activity:
+                    activity[identity] = receiver_alerts.scanner_activity(hass, sources, identity, devices)
+                age, known = activity[identity]
+                row["scanner_activity_known"] |= known
                 if age is not None:
                     row["age_s"] = age if row["age_s"] is None else min(age, row["age_s"])
         try:
