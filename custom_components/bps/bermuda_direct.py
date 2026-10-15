@@ -222,6 +222,7 @@ class BermudaDirect:
                 "scanner_mac": mac, "status": "missing", "reason": "measurement_missing"}
         observed, value = None, None
         if ad is not None:
+            from .range_intervals import signal_interval
             quality = ad.get("quality") if isinstance(ad.get("quality"), Mapping) else {}
             source_age = number(ad.get("age"))
             age = source_age
@@ -235,6 +236,7 @@ class BermudaDirect:
                         source_status=ad.get("status"), source_observed=ad.get("observed"),
                         source_age_s=source_age, accepted_age_s=age, quality=detached(quality),
                         model_version=ad.get("model_version"))
+            info["range_interval"] = signal_interval(ad, clock)
             value = number(ad.get("filtered_distance", ad.get("distance")))
             if ad.get("status") != "current" or source_age is None or source_age < 0:
                 info["reason"], value = "source_not_current", None

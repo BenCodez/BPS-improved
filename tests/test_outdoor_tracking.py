@@ -19,6 +19,47 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def test_optional_long_range_solver_uses_only_eligible_distant_bands_and_reports_fallback(monkeypatch):
+    from bps import range_intervals
+    truth = (40., 35.)
+    places = [(0., 0.), (80., 0.), (0., 80.), (300., 300.)]
+    floor = {"name": "Property", "receivers": []}
+    points = []
+    for i, (x, y) in enumerate(places):
+        actual = math.dist((x, y), truth)
+        radius = actual + (100 if i == 3 else 0)
+        points.append((x, y, radius, 1., radius))
+        reading = {"measured_distance_m": radius, "reading_age_s": 1, "observed": 999}
+        if i == 3:
+            reading.update(range_interval={"status": "available", "solver_eligible": True, "center_m": radius},
+                           horizontal_interval={"status": "available", "lower_px": actual - 20, "upper_px": radius + 20})
+        floor["receivers"].append({"entity_id": f"p{i}", "distance": radius, "cords": {"x": x, "y": y, "r": radius},
+                                   "_outdoor_reading": reading})
+    before = copy.deepcopy((floor, points))
+    def solve_band(enabled=False):
+        return solve_outdoor(floor, points, None, 1, .5, 30, None, bps.trilaterate, long_range_intervals=enabled)
+    ordinary = solve_band()
+    ranged = solve_band(True)
+    assert (floor, points) == before
+    assert ordinary["outdoor"]["position_solver_mode"] == "point_ranges"
+    assert ranged["outdoor"]["position_solver_mode"] == "long_range_intervals"
+    assert ranged["outdoor"]["range_interval_receivers"] == 1
+    assert math.dist(ranged["fix"], truth) < math.dist(ordinary["fix"], truth)
+    monkeypatch.setattr(range_intervals, "least_squares", lambda *_a, **_k: SimpleNamespace(success=False))
+    fallback = solve_band(True)
+    assert fallback["fix"] == ordinary["fix"]
+    assert fallback["outdoor"]["position_solver_mode"] == "point_ranges"
+    assert fallback["outdoor"]["range_interval_receivers"] == 0
+    assert fallback["outdoor"]["range_interval_result"]["reason"] == "interval_solve_failed"
+    floor["receivers"][-1]["_outdoor_reading"]["range_interval"]["solver_eligible"] = False
+    assert solve_band(True)["outdoor"]["range_interval_attempted_receivers"] == 0
+
+
+@pytest.mark.parametrize("value,valid", [(True, True), (False, True), ("true", False), (1, False), (None, False)])
+def test_long_range_toggle_is_a_strict_optional_boolean(value, valid):
+    assert (validate_outdoor_layout({"outdoor_tracking": {"long_range_intervals": value}}) is None) == valid
+
+
 @pytest.mark.parametrize("initial, displacement, expected", [
     ("good", 4.0, "moderate"), ("moderate", 0.0, "moderate"),
     ("poor", 1.0, "poor"), ("stale", 1.0, "stale"),

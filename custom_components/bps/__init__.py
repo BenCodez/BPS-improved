@@ -1534,6 +1534,15 @@ async def update_receiver_radii(hass, eids, receiver_sources=None):
                     if not math.isfinite(radius) or radius < 0:
                         continue
                     receiver["cords"]["r"] = radius
+                    if outdoor:
+                        from .range_intervals import project_interval
+                        provenance = rec_value.attributes.get("bps_source", {})
+                        interval = provenance.get("range_interval") if isinstance(provenance, dict) else None
+                        if isinstance(interval, dict):
+                            receiver["_outdoor_reading"]["range_interval"] = copy.deepcopy(interval)
+                            gain = (correction if isinstance(correction, (int, float)) and correction > 0 else 1.0) * tracker_factor
+                            dz_interval = float(height) - tracker_h if isinstance(height, (int, float)) and 0 <= height <= 10 else 0.0
+                            receiver["_outdoor_reading"]["horizontal_interval"] = project_interval(interval, gain, dz_interval, floor["scale"])
                     # Raw SLANT distance for the floor election: radii are in
                     # per-floor pixel scales and must not be compared across
                     # floors — and the dz correction must not leak in here
@@ -1669,6 +1678,7 @@ async def update_trilateration_and_zone(hass, new_global_data, entity):
                 _reading_max_age(entity_layout), prior, trilaterate,
                 position_timeout_s=entity_layout.get("position_timeout", STALE_POSITION_SECS),
                 nearby_trust=True,
+                long_range_intervals=outdoor_settings(entity_layout)["long_range_intervals"],
                 obstruction_strength=outdoor_settings(entity_layout)["obstruction_strength"],
             ))
             # Map saves replace the cached layout. Do not feed an obsolete
@@ -3244,7 +3254,11 @@ def _diagnostic_snapshot(hass, targets, now):
         if not report:
             raise ValueError("Save a BPS layout before recording")
         data = {}
-    sources = ReceiverSources(hass)
+    if report:
+        from .bermuda_direct import BermudaDirect
+        sources = ReceiverSources(hass, direct=BermudaDirect(hass, now=now, include_history=True))
+    else:
+        sources = ReceiverSources(hass)
     known = {eid[len("sensor."):].split("_distance_to_", 1)[0]
              for eid in _bermuda_distance_sensor_ids(hass)} | sources.direct_trackers()
     groups = {"bps_group_" + g["id"]: g["beacons"] for g in normalize_groups(data, known)}

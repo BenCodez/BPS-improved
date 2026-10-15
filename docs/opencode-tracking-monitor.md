@@ -55,6 +55,19 @@ diagnostics, tokens or identifiers to GitHub or external services.
    proposed station placement was verified. A location-update request does not
    prove the phone returned a new GPS measurement.
 
+10. When available, use the private diagnostic ZIP's radio_survey.json and join
+    each capture ID to actual_location_history.json. Compare raw-model, filtered
+    and corrected range errors in measured-distance bands, separated by receiver
+    and beacon hardware, antenna metadata, model, map and environment. Account
+    for exclusions, sample limits, repeated packets and missing older radio data.
+    Recent packet history is unlabelled context, never extra truth observations.
+    Report how often actual distance falls outside signal-variation intervals;
+    these intervals do not bound systematic bias. Compare repeated locations
+    with experimental long-range interval positioning off and on, preserving the
+    actual published solve mode/fallback and source ages rather than assuming
+    the saved toggle proves which mode produced a position. Do not change it
+    or any radio settings automatically.
+
 Keep bounded local retention, single-flight collection, backoff and anomaly
 cooldowns. Report only new or materially changed findings. For each finding show
 the evidence, confidence, a small verification experiment, and validation needed

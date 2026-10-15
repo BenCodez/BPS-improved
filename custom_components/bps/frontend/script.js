@@ -931,6 +931,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     lastTracks.set(entKey, {
                         x, y,
                         circles: sameFloor ? outdoor.distanceRadii(result, apiresponse, sameFloorName) : null,
+                        rangeIntervals: sameFloor ? outdoor.distanceIntervals(result, apiresponse, sameFloorName) : [],
                         offFloor: !sameFloor,
                         floor: result.floor,
                         ...outdoor.stabilizeUncertainty(result, lastTracks.get(entKey)),
@@ -1430,6 +1431,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             const hueOf = (c) => solo ? floorReceiverHue(c[0], c[1]) : deviceBaseHue(entKey);
             ctx.save();
             ctx.lineCap = "round";
+            const intervalNow = Date.now() / 1000;
+            const intervals = document.getElementById('trackingDistanceMode')?.value === 'estimated' ? [] : (t.rangeIntervals || []).filter(c =>
+                Number.isFinite(c[4]) && intervalNow >= c[4] && intervalNow - c[4] <= 3);
+            if (solo) intervals.forEach(c => {
+                ctx.beginPath(); ctx.moveTo(c[0] + c[3], c[1]); ctx.arc(c[0], c[1], c[3], 0, Math.PI * 2);
+                ctx.moveTo(c[0] + c[2], c[1]); ctx.arc(c[0], c[1], c[2], 0, Math.PI * 2, true);
+                ctx.fillStyle = `hsla(${hueOf(c)}, 90%, 55%, 0.08)`; ctx.fill('evenodd');
+            });
             if (solo) {
                 // Thick receiver -> tracker connectors first, so the circle rings
                 // (next) overlap them at the edge.
@@ -1471,6 +1480,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                 });
             }
             ctx.restore();
+            intervals.forEach(c => {
+                const lower = distanceLabel(c[2]), upper = distanceLabel(c[3]);
+                if (!lower || !upper) return;
+                const key = `${Math.round(c[0])},${Math.round(c[1])}`;
+                let arr = labels.get(key);
+                if (!arr) {arr = []; labels.set(key, arr);}
+                arr.push({order, text: `BLE range ${lower}–${upper} · signal variation`, hue: hueOf(c), x: c[0], y: c[1]});
+            });
             valid.forEach((c) => {
                 const distance = distanceLabel(c[2]);
                 if (!distance) return;
@@ -6582,6 +6599,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('outdoorEnabled').checked = settings.enabled;
         document.getElementById('outdoorControls').hidden = !settings.enabled;
         document.getElementById('outdoorUncertainty').checked = settings.show_uncertainty;
+        document.getElementById('outdoorLongRangeIntervals').checked = settings.long_range_intervals;
         document.getElementById('outdoorThreshold').value = settings.hide_uncertainty_below_m;
         const strengthSelect = document.getElementById('outdoorObstructionStrength');
         for (const option of Array.from(strengthSelect.options)) {
@@ -6601,7 +6619,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         savebuttondiv.appendChild(saveButton);
         if (mapReady()) redrawAll();
     }
-    for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold', 'outdoorObstructionStrength']) {
+    for (const id of ['outdoorEnabled', 'outdoorUncertainty', 'outdoorThreshold', 'outdoorObstructionStrength', 'outdoorLongRangeIntervals']) {
         document.getElementById(id).addEventListener('change', () => {
             const threshold = Number(document.getElementById('outdoorThreshold').value);
             const strength = Number(document.getElementById('outdoorObstructionStrength').value);
@@ -6616,6 +6634,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             finalcords.outdoor_tracking = {...(finalcords.outdoor_tracking || {}),
                 enabled: document.getElementById('outdoorEnabled').checked,
                 show_uncertainty: document.getElementById('outdoorUncertainty').checked,
+                long_range_intervals: document.getElementById('outdoorLongRangeIntervals').checked,
                 hide_uncertainty_below_m: threshold, obstruction_strength: strength};
             syncOutdoorSettings();
             if (!finalcords.outdoor_tracking.enabled && editTarget && editTarget.kind === 'environment') cancelShapeEdit();
@@ -7514,6 +7533,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 raw_uncertainty_m: position.outdoor?.estimated_uncertainty_m,
                 display_uncertainty_m: position.outdoor?.display_uncertainty_m,
                 displayed_receiver_radii: circleToggle.checked ? trackingDistanceMarks(position) : [],
+                displayed_receiver_intervals: circleToggle.checked && trackingDistanceMode?.value !== 'estimated'
+                    ? (position.rangeIntervals || []).filter(c => Date.now() / 1000 >= c[4] && Date.now() / 1000 - c[4] <= 3) : [],
                 received_at: position.receivedAt / 1000})),
             editor_layout: editor, gps_setup: gpsUI?.snapshot(), height_survey: heightUI?.snapshot()};
     }, snapshotLocationTools);

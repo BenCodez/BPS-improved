@@ -431,6 +431,23 @@ test('both distance styles for two trackers keep all four labels apart at the ma
     assert.ok(y.every((value,index)=>index===0||value-y[index-1]>=28));
 });
 
+test('live distance bands draw and label signal variation, then expire during a redraw without a fresh poll', async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    const p = await panel(source); p.hooks.select('Property');
+    p.el('entSelector').value = 'beacon_a'; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click'); p.el('circleToggle').checked = true; p.setClock(100000);
+    p.network.cords = [{ent: 'beacon_a', floor: 'Property', cords: [100, 100], radii: [[0, 0, 400]],
+        outdoor: {receiver_diagnostics: [{receiver_xy_px: [0, 0], range_interval: {status: 'available', center_m: 20, source_observed: 99},
+            horizontal_interval: {status: 'available', lower_px: 200, upper_px: 600}}]}}];
+    p.canvasCalls.length = 0; await p.intervals.findLast(i => i.ms === 500).cb();
+    assert.ok(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600));
+    assert.ok(p.canvasCalls.some(c => c[0] === 'text' && c[1] === 'BLE range 10.0 m–30.0 m · signal variation'));
+    p.setClock(104000); p.canvasCalls.length = 0;
+    p.el('distanceUnit').value = 'ft'; await p.el('distanceUnit').fire('change');
+    assert.equal(p.canvasCalls.some(c => c[0] === 'arc' && c[3] === 600), false);
+    assert.equal(p.canvasCalls.some(c => c[0] === 'text' && /signal variation/.test(c[1])), false);
+});
+
 test('saving a floor retains receiver placement controls', async () => {
     const p=await panel(layout()); p.hooks.select('Property');
     p.el('mapbuttondiv').appendChild(p.hooks.addDeviceButton);
@@ -513,11 +530,14 @@ test('panel old layout loads without outdoor fields and opt-in saves via authent
     assert.ok(p.hooks, 'panel initialization completed');
     assert.equal(p.hooks.layout().outdoor_tracking, undefined);
     assert.equal(p.el('outdoorEnabled').checked, false);
+    assert.equal(p.el('outdoorLongRangeIntervals').checked, false);
     assert.equal(p.el('outdoorControls').hidden, true);
     p.el('outdoorEnabled').checked = true;
     await p.el('outdoorEnabled').fire('change');
     assert.equal(p.hooks.layout().outdoor_tracking.enabled, true);
     assert.equal(p.el('outdoorControls').hidden, false);
+    p.el('outdoorLongRangeIntervals').checked = true; await p.el('outdoorLongRangeIntervals').fire('change');
+    assert.equal(p.hooks.layout().outdoor_tracking.long_range_intervals, true);
     p.el('outdoorUncertainty').checked = false; await p.el('outdoorUncertainty').fire('change');
     assert.equal(p.hooks.layout().outdoor_tracking.show_uncertainty, false);
     p.el('outdoorThreshold').value = '7.4'; await p.el('outdoorThreshold').fire('change');
@@ -526,6 +546,7 @@ test('panel old layout loads without outdoor fields and opt-in saves via authent
     const request = p.requests.find(r => r.url === '/api/bps/save_text');
     assert.equal(request.options.headers.Authorization, 'Bearer test-token');
     assert.equal(JSON.parse(request.options.body.get('coordinates')).outdoor_tracking.enabled, true);
+    assert.equal(JSON.parse(request.options.body.get('coordinates')).outdoor_tracking.long_range_intervals, true);
 });
 
 test('panel enforces uncertainty threshold bounds before changing or saving the layout', async () => {

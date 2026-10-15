@@ -185,7 +185,10 @@ def test_bundle_carries_full_saved_reports_and_manifest_without_recursion(hass, 
         assert response.status == 200, getattr(response, "json_body", None)
         assert response.content_type == "application/zip"
         files = archive(response)
-        assert {"manifest.json", "live_snapshot.json", "full_report.txt", "actual_location_history.json", "panel_context.json"} <= files.keys()
+        assert {"manifest.json", "live_snapshot.json", "full_report.txt", "actual_location_history.json", "panel_context.json", "radio_survey.json"} <= files.keys()
+        survey = json.loads(files["radio_survey.json"])
+        assert survey["counts"]["records"] == 1
+        assert survey["counts"]["records_missing_radio"] == 0
         history = json.loads(files["actual_location_history.json"])
         assert history["records"][0]["report"] == record["report"]
         assert "actual_location_history" not in history["records"][0]["report"]

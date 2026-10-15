@@ -77,6 +77,7 @@ def outdoor_settings(layout):
     if not isinstance(settings, dict):
         settings = {}
     return {"enabled": settings.get("enabled") is True,
+            "long_range_intervals": settings.get("long_range_intervals") is True,
             "show_uncertainty": settings.get("show_uncertainty", True) is not False,
             "obstruction_strength": finite_number(
                 settings.get("obstruction_strength"), 1.0,

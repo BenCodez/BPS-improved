@@ -859,7 +859,9 @@ settings fingerprint; old labels are never applied to a later live position.
 
 New actual-location marks preserve per-pair raw/filtered RSSI and distances,
 effective reference power, scanner offset and attenuation, model consistency,
-packet/filter ages, BPS corrections and receiver/beacon hardware. This evidence
+packet/filter ages, rejection reasons, recent raw history with its original
+clocks, BPS corrections and receiver/beacon hardware. Older history is unlabelled
+context and is never scored against the new instant's location. This evidence
 is retained for the marked dog even when the general Bermuda clipboard view is
 truncated. Receiver properties include an optional **Advertised antenna gain
 (dBi)** field; this describes hardware and does not change RSSI or transmit power.
@@ -879,6 +881,23 @@ The label describes only that instant. Repeated presses without fresh packets
 or distinct locations add no independent evidence. The export reports sample
 diversity; it does not fit or apply corrections. Validate any later adjustment
 at separate measured locations before leaving it enabled.
+
+Fresh Bermuda signal-quality data can also provide an asymmetric **signal-variation
+range**. It propagates ±2 observed RSSI standard deviations (with a stated 0.5 dB
+quantization floor) through the effective model. This is not a confidence interval
+and does not bound bias from walls, antenna direction or a wrong model. The survey
+reports whether measured truth fell within those bands, separately by distance.
+**Show distances** displays available distant bands as a light shaded ring for
+an isolated tracker/group, with range labels; unavailable or stale bands disappear.
+
+To compare positioning, enable **Outdoor tracking → Experimental: use distance
+ranges beyond 10 m**, then **Save Floor Plan**. It is off by default. Eligible
+distant ranges use a soft interval constraint with a weak centre tie-break;
+nearby readings and readings without fresh, accepted quality data keep the
+existing calculation. BPS retains the original solve if refinement fails.
+Diagnostics record the actual mode, interval inputs and fallback reason, and each
+actual-location mark retains the setting. Test the same measured locations with
+the toggle off and on; it does not change Bermuda offsets or calibration.
 
 Phone GPS choices remain listed when their fix becomes stale or unavailable. Only
 fresh fixes qualify for placement. **Refresh trackers** updates BLE choices without

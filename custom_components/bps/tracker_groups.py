@@ -189,6 +189,7 @@ def _fix(beacon, position, scales, now, max_age_s, use_observation_age):
             "detection_receiver": outdoor.get("detection_receiver") if isinstance(outdoor.get("detection_receiver"), str) else None,
             "detection_range_m": _number(outdoor.get("detection_range_m")),
             "environment_fallback": outdoor.get("environment_fallback") is True,
+            "position_solver_mode": outdoor.get("position_solver_mode", "detection_only" if outdoor.get("detection_only") else "point_ranges"),
             "uncertainty_details": {key: value for key in (
                 "residual_m", "unadjusted_residual_m", "noise_floor_m",
                 "geometry_factor", "effective_receivers", "receiver_count_factor",

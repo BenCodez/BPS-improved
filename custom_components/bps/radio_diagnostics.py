@@ -5,6 +5,7 @@ import math
 
 from .bermuda_direct import detached, scanner_mac
 from .scanner_hardware import hardware_metadata
+from .range_intervals import signal_interval
 
 MAX_PACKET_AGE_S = 3.0
 PROFILE_FIELDS = ("manufacturer", "model", "hardware_type", "antenna", "external_antenna",
@@ -73,6 +74,7 @@ class RadioEvidence:
             if len(self.snapshots.get(owner, [])) != 1 or len(matches) != 1:
                 return {"status": "unavailable", "exclusions": ["radio_pair_missing_or_ambiguous"]}
             ad, device = matches[0]
+            source_context = safe_fields(self.snapshots[owner][0], ("version", "captured", "stamp", "clocks", "limits", "omitted"))
             if ad.get("device_id") != did or device.get("device_id") != did:
                 return {"status": "unavailable", "exclusions": ["radio_device_identity_conflict"]}
             scanners = self.scanners.get((owner, mac), [])
@@ -92,6 +94,7 @@ class RadioEvidence:
             if not did or scanner_identity != (owner, mac) or len(matches) != 1:
                 return {"status": "unavailable", "exclusions": ["legacy_radio_pair_not_proven"]}
             ad, scanner_hw, beacon_hw = matches[0], None, None
+            source_context = {"scope": "legacy_runtime"}
             age = ad.get("observation_age_s")
             packet = {"age_s": age if numeric(age) else None,
                       "observed": self.now - age if numeric(age) and numeric(self.now) else None,
@@ -109,10 +112,14 @@ class RadioEvidence:
         if any(not isinstance(value, str) or not value for value in (owner, did, mac)):
             return {"status": "unavailable", "exclusions": ["radio_identity_unavailable"]}
         radio = {"status": "available", "path": source["path"],
+                 "source_context": source_context,
                  "identity": {"entry_id": owner, "device_id": did, "scanner_mac": mac},
                  "packet": packet, "model_version": detached(ad.get("model_version")),
                  "reference_power_verified": ad.get("reference_power_verified") if type(ad.get("reference_power_verified")) is bool else None,
-                 "quality": safe_fields(ad.get("quality"), ("mode", "status", "age", "samples", "noise_db", "reliability", "last_raw_stamp", "last_valid_stamp", "last_valid_observed")),
+                 "quality": safe_fields(ad.get("quality"), ("mode", "status", "age", "samples", "noise_db", "variance_db2", "cadence_s", "timeout_s", "signal_reliability", "reliability", "last_raw_stamp", "last_raw_observed", "last_valid_stamp", "last_valid_observed", "accepted", "fresh", "rejection_reasons", "reasons", "distance_variance_m2", "range_error_m", "accuracy_reliability")),
+                 "recent_history": {"scope": "unlabelled_recent_context", "status": detached(ad.get("history_status")),
+                                    "omitted": detached(ad.get("history_omitted")),
+                                    "readings": detached(ad.get("history", []))},
                  "context_sha256": self.context_hash, "exclusions": [],
                  **{key: value if numeric(value) else None for key, value in values.items()}}
         radio["receiver_hardware"] = self.hardware(scanner_hw, receiver, owner, "receiver_profiles", mac)
@@ -146,11 +153,17 @@ class RadioEvidence:
             except (OverflowError, ZeroDivisionError):
                 pass
         radio["model_check"] = check
+        radio["signal_interval"] = signal_interval(ad, self.now) if source["path"] == "direct" else {
+            "status": "unavailable", "reason": "legacy_source_has_no_signal_variance"}
         if check["status"] != "matches":
             excluded.append("radio_model_" + check["status"])
         residuals = {"raw_error_m": None, "filtered_error_m": None, "corrected_error_m": None,
-                     "expected_rssi_dbm": None, "rssi_residual_db": None, "required_offset_delta_db": None}
+                     "expected_rssi_dbm": None, "rssi_residual_db": None, "required_offset_delta_db": None,
+                     "within_signal_interval": None}
         if numeric(expected) and expected > 0:
+            interval = radio["signal_interval"]
+            if interval["status"] == "available":
+                residuals["within_signal_interval"] = interval["lower_m"] <= expected <= interval["upper_m"]
             for name, value in (("raw_error_m", radio["raw_distance_m"]), ("filtered_error_m", radio["filtered_distance_m"]),
                                 ("corrected_error_m", raw.get("corrected_distance_m"))):
                 residuals[name] = value - expected if numeric(value) and value >= 0 else None

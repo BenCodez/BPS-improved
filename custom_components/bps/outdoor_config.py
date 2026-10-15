@@ -29,7 +29,7 @@ def validate_outdoor_layout(layout, known_trackers=None):
         settings = layout["outdoor_tracking"]
         if not isinstance(settings, dict):
             return "outdoor_tracking must be an object"
-        for key in ("enabled", "show_uncertainty"):
+        for key in ("enabled", "show_uncertainty", "long_range_intervals"):
             if key in settings and not isinstance(settings[key], bool):
                 return f"outdoor_tracking.{key} must be true or false"
         if "hide_uncertainty_below_m" in settings and finite_number(

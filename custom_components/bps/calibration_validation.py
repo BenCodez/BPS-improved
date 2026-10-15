@@ -8,6 +8,7 @@ import json
 import math
 
 from .outdoor_tracking import solve_outdoor
+from .range_intervals import project_interval
 from .environment import reading_max_age, outdoor_settings
 from .uncertainty import estimate_uncertainty
 
@@ -101,6 +102,12 @@ def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_
         receiver.update(distance=slant, cords={**xy, "r": horizontal * scale},
             _outdoor_reading={"measured_distance_m": row["measured_distance_m"],
                 "observed": row["observed"], "reading_age_s": now - row["observed"]})
+        source = row.get("measurement_source", {})
+        interval = source.get("range_interval") if isinstance(source, dict) else None
+        if isinstance(interval, dict):
+            dz = height - row.get("tracker_height_m", .8) if number(height) and 0 <= height <= 10 else 0.0
+            receiver["_outdoor_reading"].update(range_interval=interval, horizontal_interval=project_interval(
+                interval, factor * row.get("tracker_distance_factor", 1.0), dz, scale))
         selected.append(receiver)
     candidate["receivers"] = selected
     if len(weighted) < 3:
@@ -116,6 +123,7 @@ def replay(floor, readings, corrections, scale, layout, now, solver, *, max_age_
     if layout.get("outdoor_tracking", {}).get("enabled") is True:
         result = solve_outdoor(candidate, weighted, bounds, scale, .5 * scale,
             max_age_s, None, solver, nearby_trust=True,
+            long_range_intervals=outdoor_settings(layout)["long_range_intervals"],
             obstruction_strength=outdoor_settings(layout)["obstruction_strength"])
         if result is None:
             return None
@@ -225,9 +233,12 @@ def compare_tracking(bundle, floor_name, corrections, current_floor, solver,
             continue
         b = math.dist([v / scale for v in baseline["cords"]], point)
         c = math.dist([v / scale for v in proposed["cords"]], point)
-        before.append(b); after.append(c)
-        stats["baseline"].append(b); stats["candidate"].append(c)
-        local["baseline"].append(b); local["candidate"].append(c)
+        before.append(b)
+        after.append(c)
+        stats["baseline"].append(b)
+        stats["candidate"].append(c)
+        local["baseline"].append(b)
+        local["candidate"].append(c)
         locations.add(point)
     b, c = metrics(before), metrics(after)
     tracker_reports = {}

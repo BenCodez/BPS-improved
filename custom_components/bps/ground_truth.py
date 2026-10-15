@@ -76,6 +76,7 @@ def capture_metadata(record):
             "settings_in_saved_report": [name for name, value in settings.items()
                                          if value is not None and value != {}],
             "general_settings": {"defaults": context.get("defaults"),
+                                 "outdoor_tracking": context.get("layout", {}).get("outdoor_tracking"),
                                  "bermuda_settings": bermuda_settings or None,
                                  "effective_history_settings": runtime.get("effective_history_settings")}}
 

@@ -94,6 +94,23 @@ function radiusFix(raw, seconds, previous, floor = 'Property', extra = {}) {
     return {...out.stabilizeUncertainty(row, previous, now), receivedAt: out.fixTime(row, now)};
 }
 
+test('live long-range bands keep original clocks, group members and floor boundaries', () => {
+    const reading = {receiver_xy_px: [50, 60], range_interval: {status: 'available', center_m: 20, source_observed: 999},
+        horizontal_interval: {status: 'available', lower_px: 100, upper_px: 300}};
+    const a = {ent: 'a', floor: 'Property', outdoor: {receiver_diagnostics: [reading]}};
+    const b = {ent: 'b', floor: 'Property', outdoor: {receiver_diagnostics: [structuredClone(reading)]}};
+    const c = {ent: 'c', floor: 'Barn', outdoor: {receiver_diagnostics: [reading]}};
+    const group = {group: true, floor: 'Property', beacon_positions: [{ent: 'a'}, {ent: 'b'}, {ent: 'c'}]};
+    assert.deepEqual(plain(out.distanceIntervals(group, [a, b, c], undefined, 1000)), [[50, 60, 100, 300, 999]]);
+    assert.deepEqual(plain(out.distanceIntervals(group, [a, b, c], undefined, 1003)), []);
+    assert.deepEqual(plain(out.distanceIntervals(a, [], undefined, 998)), []);
+    a.outdoor.receiver_diagnostics[0].range_interval.center_m = 5;
+    assert.deepEqual(plain(out.distanceIntervals(a, [], undefined, 1000)), []);
+    assert.equal(out.settings({}).long_range_intervals, false);
+    assert.equal(out.settings({outdoor_tracking: {long_range_intervals: 'true'}}).long_range_intervals, false);
+    assert.equal(out.settings({outdoor_tracking: {long_range_intervals: true}}).long_range_intervals, true);
+});
+
 test('reporting receiver display bound caps initial and sustained uncertainty while retaining diagnostic estimate', () => {
     let fix = radiusFix(120, 0, undefined, 'Property', {display_radius_limit_m: 8});
     assert.equal(fix.outdoor.display_uncertainty_m, 8);

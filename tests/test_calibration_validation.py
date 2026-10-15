@@ -50,6 +50,25 @@ def test_actual_paired_tracking_improves_without_mutating_inputs():
     assert (data, floor, FACTORS) == before
 
 
+def test_replay_preserves_opt_in_interval_mode_and_reprojects_candidate_corrections(monkeypatch):
+    from bps import calibration_validation as validation
+    data, floor = recording()
+    layout = data['contexts']['c']['layout']
+    layout['outdoor_tracking']['long_range_intervals'] = True
+    readings = data['frames'][1]['readings']
+    readings[0]['measurement_source'] = {'range_interval': {'status': 'available', 'solver_eligible': True,
+        'lower_m': 5, 'center_m': 10, 'upper_m': 20}}
+    captured = {}
+    def solver(candidate, weighted, *args, **kwargs):
+        captured.update(floor=candidate, kwargs=kwargs)
+        return {'fix': (0, 0), 'outdoor': {}}
+    monkeypatch.setattr(validation, 'solve_outdoor', solver)
+    validation.replay(floor, readings, {'r0': 2}, 10, layout, 1, bps.trilaterate)
+    assert captured['kwargs']['long_range_intervals'] is True
+    band = captured['floor']['receivers'][0]['_outdoor_reading']['horizontal_interval']
+    assert (band['lower_px'], band['center_px'], band['upper_px']) == (100, 200, 400)
+
+
 def test_bad_corrections_make_tracking_worse_and_one_location_is_inconclusive():
     data, floor = recording()
     for frame in data['frames']:
@@ -149,10 +168,14 @@ def test_invalid_observations_cannot_count_as_tracking_improvement(bad):
     data, floor = recording()
     for frame in data['frames']:
         for row in frame['readings']:
-            if bad == 'old': row['observed'] = 0.
-            if bad == 'future': row['observed'] = frame['time'] + 1
-            if bad == 'assumed': row['assumed_unit_m'] = True
-            if bad == 'stale': row['status'] = 'stale'
+            if bad == 'old':
+                row['observed'] = 0.
+            if bad == 'future':
+                row['observed'] = frame['time'] + 1
+            if bad == 'assumed':
+                row['assumed_unit_m'] = True
+            if bad == 'stale':
+                row['status'] = 'stale'
     assert compare(data, floor)['baseline']['samples'] == 0
 
 

@@ -189,6 +189,9 @@ def _sample(record, marker, source, radio):
             "quality": _fields(radio.get("quality"), ("mode", "status", "age", "samples", "noise_db",
                                                         "reliability", "last_raw_stamp", "last_valid_stamp",
                                                         "last_valid_observed")),
+            "signal_interval": _fields(radio.get("signal_interval"), ("status", "reason", "lower_m", "center_m", "upper_m",
+                "noise_db", "noise_floor_db", "noise_multiplier", "delta_db", "source_observed", "source_stamp",
+                "solver_eligible", "solver_reason", "model_version")),
             "receiver_hardware": _hardware(radio.get("receiver_hardware")),
             "beacon_hardware": _hardware(radio.get("beacon_hardware")),
             "context_sha256": _sha(radio.get("context_sha256")),
@@ -279,6 +282,10 @@ def _range_summary(group):
     ratios = [s["radio"]["raw_distance_m"] / s["reading"]["expected_distance_m"] for s in group]
     ratios = [value for value in ratios if _number(value)]
     result["median_raw_to_true_ratio"] = _median(ratios) if ratios else None
+    intervals = [s for s in group if s["radio"]["signal_interval"].get("status") == "available"]
+    result["observed_interval_coverage"] = {"samples": len(intervals), "truth_inside": sum(
+        s["radio"]["signal_interval"]["lower_m"] <= s["reading"]["expected_distance_m"] <= s["radio"]["signal_interval"]["upper_m"]
+        for s in intervals)}
     return result
 
 
@@ -352,8 +359,8 @@ def export(records):
     Input records are detached dictionaries. Invalid inputs raise ValueError;
     missing historic radio fields are counted and omitted from samples.
     """
-    if not isinstance(records, list):
-        raise ValueError("Radio survey records must be a list")
+    if not isinstance(records, (list, tuple)):
+        raise ValueError("Radio survey records must be a list or tuple")
     counts = {"records": len(records), "records_missing_radio": 0,
               "rows_missing_radio": 0, "candidate_rows": 0,
               "samples": 0, "eligible_samples": 0, "excluded_samples": 0,

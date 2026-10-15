@@ -1,5 +1,6 @@
 """Measured marks preserve pair-specific radio stages and hardware evidence."""
 import copy
+import asyncio
 import json
 import math
 import io
@@ -67,6 +68,11 @@ def test_mark_preserves_raw_filter_bps_stages_and_hardware_despite_display_trunc
     assert radio["receiver_hardware"]["bps_profile"]["antenna_gain_dbi"] == 20
     assert radio["beacon_hardware"]["bps_profile"]["hardware_model"] == "Synthetic pet tag"
     assert radio["tx_power_dbm"] is None and radio["reference_power_verified"] is False
+    assert radio["signal_interval"]["status"] == "available"
+    assert radio["signal_interval"]["solver_eligible"] is True
+    assert radio["comparison"]["within_signal_interval"] is True
+    assert radio["recent_history"]["scope"] == "unlabelled_recent_context"
+    assert len(radio["recent_history"]["readings"]) == 5
 
 
 def test_model_mismatch_stale_raw_and_pending_filtered_stages_are_explicit(hass, monkeypatch):
@@ -113,6 +119,23 @@ def test_three_real_captures_export_frozen_radio_survey_in_diagnostic_zip(hass, 
     assert {s["capture"]["time"] for s in survey["samples"]} == {1000, 1030, 1060}
     assert all(s["radio"]["tx_power_dbm"] is None for s in survey["samples"])
     assert {s["radio"]["packet"]["observed"] for s in survey["samples"]} == {999, 1029, 1059}
+
+
+def test_live_native_ranges_are_projected_without_changing_measured_radii(hass, monkeypatch):
+    layout, payloads, known = located_capture(hass, monkeypatch, distance=20)
+    layout["outdoor_tracking"] = {"enabled": True, "long_range_intervals": True}
+    item = {"entity": "tag", "data": layout}
+    asyncio.run(bps.update_receiver_radii(hass, item))
+    receiver = layout["floor"][0]["receivers"][0]
+    band = receiver["_outdoor_reading"]["range_interval"]
+    horizontal = receiver["_outdoor_reading"]["horizontal_interval"]
+    assert band["status"] == "available" and band["solver_eligible"] is True
+    assert horizontal["status"] == "available"
+    assert horizontal["lower_px"] < receiver["cords"]["r"] < horizontal["upper_px"]
+    assert receiver["distance"] == pytest.approx(48)
+    report = bps._diagnostic_report_snapshot(hass, 1000)
+    record = ground_truth.prepare(report, known, "synthetic-mode-capture")
+    assert record["capture"]["general_settings"]["outdoor_tracking"]["long_range_intervals"] is True
 
 
 def test_scanner_owner_and_conflicting_hardware_are_never_guessed(hass, monkeypatch):
