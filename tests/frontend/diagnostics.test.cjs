@@ -35,7 +35,7 @@ function panel(panelSnapshot, locationTools = {}) {
         navigator: {clipboard: {writeText: async text => {if (network.clipboardError) throw new Error('denied'); copied.push(text);}}},
         setTimeout: cb => {cb();}});
     vm.runInContext(readFileSync(join(__dirname, '../../custom_components/bps/frontend/diagnostics.js'), 'utf8'), sandbox);
-    sandbox.BPSDiagnostics.init(async (url, options) => {
+    const controller = sandbox.BPSDiagnostics.init(async (url, options) => {
         requests.push({url, options});
         if (network.pending) await network.pending;
         if (network.error) return {ok: false, status: 400, json: async () => ({error: network.error})};
@@ -57,7 +57,7 @@ function panel(panelSnapshot, locationTools = {}) {
         }
         return {ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(network.status)), blob: async () => 'diagnostic-blob'};
     }, panelSnapshot, locationTools);
-    return {el, network, timers, requests, downloads, copied};
+    return {el, network, timers, requests, downloads, copied, controller};
 }
 
 test('panel context is frozen separately before the server fetch and is included in copied text', async () => {
@@ -108,6 +108,22 @@ test('bundle errors preserve the previous clipboard report and restore controls'
     assert.match(p.el('ReportStatus').textContent, /synthetic bundle unavailable/);
     assert.equal(p.el('Bundle').disabled, false);
     assert.equal(p.el('CopyAll').disabled, false);
+});
+
+test('the map survey shares the same bundle action and receives busy and failure results', async () => {
+    const p = panel(() => ({selected_tracker: 'dog'}));
+    let release; p.network.pending = new Promise(resolve => {release = resolve;});
+    const download = p.controller.downloadBundle();
+    const busy = await p.controller.downloadBundle();
+    assert.equal(busy.ok, false);
+    assert.match(busy.error, /still running/);
+    release(); assert.equal((await download).ok, true);
+    assert.equal(p.downloads[0].name, 'bps-diagnostics-full.zip');
+    p.network.error = 'disk unavailable';
+    const failure = await p.controller.downloadBundle();
+    assert.equal(failure.ok, false);
+    assert.match(failure.error, /disk unavailable/);
+    assert.equal(p.el('Bundle').disabled, false);
 });
 
 test('oversized combined reports preserve the previous report and do not copy incomplete output', async () => {

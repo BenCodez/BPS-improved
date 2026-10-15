@@ -927,6 +927,24 @@ when history is accessed; expired and evicted counts are reported.
 Use the map's **Live** mode when marking. Existing stationary recording labels
 remain available for calibration validation.
 
+For a phone range survey, start tracking and press **Phone survey** beside the
+tracking buttons, or **Phone survey view** below the map. This hides the setup
+cards and keeps the map, dog/group selector and
+large capture buttons together. Drag with one finger to pan; pinch to zoom.
+Press **Choose survey spot**, tap the dogs' measured location, then press
+**Collect 5 snapshots**. Keep the beacons still: BPS waits 30 seconds and saves
+five independent full BLE snapshots at least 10 seconds apart. It does not
+change calibration or declare a location between those snapshots.
+
+Press **Stop / cancel spot** before moving. Collection also stops when the page
+is hidden, the selected tracker or saved map changes, live tracking ends, or a
+capture fails. A snapshot already being saved can finish after Stop; no further
+snapshot is scheduled. **Exit survey view** restores the normal controls and
+stops collection. Use **Download diagnostic ZIP** beside the map after each
+location, before older marks are evicted. The download includes raw Bermuda
+measurements, retained location marks, settings and map context. Collect near
+and far samples with the same settings, and save the ZIP from every location.
+
 Authenticated APIs: `GET /api/bps/ground_truth` lists marks;
 `GET /api/bps/ground_truth?download=1` exports their captured data. A local monitor
 can use these point labels to distinguish position error from range disagreement.

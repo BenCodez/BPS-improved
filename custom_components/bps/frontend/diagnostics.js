@@ -58,8 +58,8 @@
             }
         }
         el('CopyAll').addEventListener('click', () => captureReport());
-        el('Bundle')?.addEventListener('click', async () => {
-            if (reportBusy) return;
+        async function downloadBundle() {
+            if (reportBusy) return {ok: false, error: 'Another diagnostic request is still running. Try again when it finishes.'};
             reportBusy = true; el('CopyAll').disabled = true; el('Bundle').disabled = true;
             if (el('SnapshotCapture')) el('SnapshotCapture').disabled = true;
             el('ReportStatus').textContent = 'Preparing complete diagnostic bundle…';
@@ -76,12 +76,15 @@
                 link.href = url; link.download = 'bps-diagnostics-full.zip'; document.body.appendChild(link);
                 try {link.click();} finally {link.remove(); root.setTimeout(() => root.URL.revokeObjectURL(url), 1000);}
                 el('ReportStatus').textContent = 'Diagnostic bundle downloaded. It includes retained snapshots and recordings; manifest.json lists every included or unavailable section.';
-            } catch (error) {el('ReportStatus').textContent = `Could not download diagnostic bundle: ${error.message}`;}
+                return {ok: true};
+            } catch (error) {el('ReportStatus').textContent = `Could not download diagnostic bundle: ${error.message}`;
+                return {ok: false, error: error.message};}
             finally {
                 reportBusy = false; el('CopyAll').disabled = false; el('Bundle').disabled = false;
                 if (el('SnapshotCapture')) el('SnapshotCapture').disabled = false;
             }
-        });
+        }
+        el('Bundle')?.addEventListener('click', downloadBundle);
         const make = (tag, text = '') => {const node = document.createElement(tag); node.textContent = text; return node;};
         const metric = value => Number.isFinite(value) ? value.toFixed(2) : '—';
         function renderComparison(comparison) {
@@ -282,6 +285,7 @@
             setTimeout(() => URL.revokeObjectURL(url), 1000);
         }));
         controls();
+        return {downloadBundle};
     }
     root.BPSDiagnostics = {init};
 })(globalThis);

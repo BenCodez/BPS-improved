@@ -27,6 +27,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     let outdoorFloorSignature = '';
     let gpsUI = null;
     let truthUI = null;
+    let diagnosticsUI = null;
     let layoutSavePending = false;
     let layoutRevision = null;
     let savedFloorPlanAvailable = false;
@@ -5009,6 +5010,51 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (zoneDrawActive) drawZonePreview(); else redrawAll();
     }, { passive: false });
 
+    // In phone survey view, one finger pans and two fingers zoom the map.
+    // Consume touch gestures so a drag never becomes a location-mark click.
+    let surveyTouch = null;
+    const surveyTouchPoints = event => Array.from(event.touches, touch => ({x: touch.clientX, y: touch.clientY}));
+    canvas.addEventListener('touchstart', event => {
+        if (!document.body.classList.contains('bps-survey-view') || !mapReady()) return;
+        event.preventDefault();
+        surveyTouch = {points: surveyTouchPoints(event), travel: 0, multi: event.touches.length > 1};
+    }, {passive: false});
+    canvas.addEventListener('touchmove', event => {
+        if (!surveyTouch) return;
+        event.preventDefault();
+        const points = surveyTouchPoints(event), old = surveyTouch.points;
+        if (points.length && old.length && points.length === old.length) {
+            const rect = canvas.getBoundingClientRect();
+            const midpoint = list => list.length > 1
+                ? {x: (list[0].x + list[1].x) / 2, y: (list[0].y + list[1].y) / 2} : list[0];
+            const before = midpoint(old), after = midpoint(points);
+            let zoom = view.zoom;
+            if (points.length > 1) {
+                const distance = list => Math.hypot(list[1].x - list[0].x, list[1].y - list[0].y);
+                if (distance(old) > 0) zoom = Math.max(1, Math.min(8, view.zoom * distance(points) / distance(old)));
+            }
+            const px = (before.x - rect.left) * canvas.width / rect.width;
+            const py = (before.y - rect.top) * canvas.height / rect.height;
+            view.x = px + (after.x - before.x) * canvas.width / rect.width - (px - view.x) * zoom / view.zoom;
+            view.y = py + (after.y - before.y) * canvas.height / rect.height - (py - view.y) * zoom / view.zoom;
+            view.zoom = zoom;
+            surveyTouch.travel += Math.hypot(after.x - before.x, after.y - before.y);
+            clampView(); redrawAll();
+        }
+        surveyTouch.points = points;
+    }, {passive: false});
+    canvas.addEventListener('touchend', event => {
+        if (!surveyTouch) return;
+        event.preventDefault();
+        if (event.touches.length) {surveyTouch.points = surveyTouchPoints(event); return;}
+        const gesture = surveyTouch; surveyTouch = null;
+        if (!gesture.multi && gesture.travel < 8 && event.changedTouches.length) {
+            const touch = event.changedTouches[0];
+            canvas.dispatchEvent(new MouseEvent('click', {bubbles: true, clientX: touch.clientX, clientY: touch.clientY, button: 0}));
+        }
+    }, {passive: false});
+    canvas.addEventListener('touchcancel', () => {surveyTouch = null;});
+
     viewReset.addEventListener("click", () => {
         view.zoom = 1;
         view.x = 0;
@@ -7566,8 +7612,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (globalThis.BPSGroundTruth) truthUI = globalThis.BPSGroundTruth.init(bpsFetch, {
         getTarget: () => pollTrackActive ? activeDevice : null,
+        getTargets: () => trackedDevices.map(key => ({key, name: outdoor.groups(finalcords)
+            .find(group => `bps_group_${group.id}` === key)?.name || availableBeaconLabels.get(key) || key})),
+        selectTarget: key => {if (trackedDevices.includes(key)) makeDeviceActive?.(key);},
+        getContext: () => JSON.stringify([SelMapName, layoutRevision, historyState.live,
+            finalcords.outdoor_tracking?.long_range_intervals, trackingModeUnverified]),
+        showMap: () => canvas.scrollIntoView?.({block: 'start', behavior: 'smooth'}),
+        focusView(enabled) {
+            document.body.classList.toggle('bps-survey-view', enabled);
+            if (enabled) canvas.scrollIntoView?.({block: 'start', behavior: 'smooth'});
+        },
+        download: () => diagnosticsUI?.downloadBundle(),
         validate() {
             snapshotLocationTools.validate();
+            if (layoutSavePending) throw new Error('Wait for the floor-plan save to finish.');
+            if (!mapReady() || anyLayoutToolActive() || adjustPreview || dragReceiverRef)
+                throw new Error('Open a saved map and finish the map editing tool first.');
             if (!pollTrackActive) throw new Error('Start live tracking before marking an actual location.');
             if (historyOn() && !historyState.live) throw new Error('Return the position history to Live before marking a location.');
         },
@@ -7577,7 +7637,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             {confirmText: 'Clear marks', danger: true}),
     });
     if (globalThis.BPSBermudaCalibration) globalThis.BPSBermudaCalibration.init(bpsFetch);
-    if (globalThis.BPSDiagnostics) globalThis.BPSDiagnostics.init(bpsFetch, () => {
+    if (globalThis.BPSDiagnostics) diagnosticsUI = globalThis.BPSDiagnostics.init(bpsFetch, () => {
         const keys = ['outdoor_tracking', 'tracker_groups', 'tracker_height', 'tracker_heights', 'tracker_hardware',
             'tracker_ref_offsets', 'reading_max_age', 'position_timeout', 'history_enabled', 'history_max_age',
             'history_min_interval', 'history_min_move_m', 'history_max_points', 'history_heartbeat'];

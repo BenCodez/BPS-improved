@@ -4,19 +4,29 @@ const {readFileSync} = require('node:fs');
 const vm = require('node:vm');
 
 function setup(initialError = null) {
-    const nodes = new Map(), requests = [], copied = [];
+    const nodes = new Map(), requests = [], copied = [], timers = new Map(), events = new Map();
+    let timerId = 0;
     function node() {return {value: '', hidden: false, disabled: false, textContent: '', children: [], events: {},
-        addEventListener(type, fn) {this.events[type] = fn;}, fire() {return this.events.click();},
+        addEventListener(type, fn) {this.events[type] = fn;}, fire(type = 'click') {return this.events[type]();},
         replaceChildren() {this.children = [];}, appendChild(item) {this.children.push(item);},
         focus() {this.focused = true;}, select() {this.selected = true;}};}
-    for (const name of ['Panel', 'Mark', 'Copy', 'Clear', 'History', 'Status', 'Accuracy', 'Label', 'Report']) nodes.set('liveTruth' + name, node());
+    for (const name of ['Panel', 'Mark', 'Copy', 'Clear', 'History', 'Status', 'Accuracy', 'Label', 'Report',
+        'Target', 'Focus', 'Shortcut', 'SurveyPick', 'SurveyStart', 'SurveyStop', 'SurveyPanel', 'Progress', 'SurveyStatus', 'Download']) nodes.set('liveTruth' + name, node());
     const el = name => nodes.get('liveTruth' + name);
     const options = {open: false}; el('Report').closest = selector => selector === 'details' ? options : null;
     el('Accuracy').value = '1';
     const state = {target: 'bps_group_dog', pick: null, cancelled: null, clears: 0, marks: [], pending: null, error: initialError,
-        valid: true, clipboard: true, now: 100000};
-    const sandbox = vm.createContext({document: {getElementById: name => nodes.get(name), createElement: node},
-        Date, Math, navigator: {clipboard: {writeText: async text => {if (!state.clipboard) throw new Error('denied'); copied.push(text);}}}});
+        valid: true, clipboard: true, now: 100000, context: 'saved-map-a', focused: false, downloadError: null, downloads: 0,
+        targets: [{key: 'bps_group_dog', name: 'Dog'}, {key: 'bps_group_other', name: 'Other dog'}],
+        wakeRequests: 0, wakeReleases: 0, wakePending: null};
+    const document = {hidden: false, getElementById: name => nodes.get(name), createElement: node,
+        addEventListener: (type, fn) => events.set(type, fn)};
+    const sandbox = vm.createContext({document,
+        setTimeout: (fn, ms) => {timers.set(++timerId, {fn, at: state.now + ms}); return timerId;},
+        clearTimeout: id => timers.delete(id),
+        Date, Math, navigator: {clipboard: {writeText: async text => {if (!state.clipboard) throw new Error('denied'); copied.push(text);}},
+            wakeLock: {request: async () => {state.wakeRequests++; if (state.wakePending) await state.wakePending;
+                return {release: async () => {state.wakeReleases++;}};}}}});
     vm.runInContext(readFileSync('custom_components/bps/frontend/ground-truth.js', 'utf8'), sandbox);
     const controller = sandbox.BPSGroundTruth.init(async (url, options) => {
         requests.push({url, options});
@@ -34,10 +44,19 @@ function setup(initialError = null) {
         }
         return {ok: true, json: async () => ({marks: [...state.marks], saved, evicted: 0,
             ...(url.includes('download') ? {records: [{report: {readings: ['original BLE data']}}]} : {})})};
-    }, {getTarget: () => state.target, validate() {if (!state.valid) throw new Error('Return to Live first.');},
+    }, {getTarget: () => state.target, getTargets: () => state.targets, selectTarget: key => {state.target = key;},
+        getContext: () => state.context, focusView: value => {state.focused = value;},
+        download: async () => {state.downloads++; return state.downloadError ? {ok: false, error: state.downloadError} : {ok: true};},
+        validate() {if (!state.valid) throw new Error('Return to Live first.');},
         pick(done, cancelled) {state.pick = done; state.cancelled = cancelled; return () => cancelled();},
         clearPoint() {state.clears++;}, confirmClear: async () => true}, {now: () => state.now});
-    return {el, state, requests, copied, controller, options};
+    return {el, state, requests, copied, controller, options, timers, document,
+        async hide() {document.hidden = true; events.get('visibilitychange')(); await settle();},
+        async advance(ms) {
+            state.now += ms;
+            for (const [id, timer] of [...timers]) if (timer.at <= state.now) {timers.delete(id); await timer.fn();}
+            await settle();
+        }};
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -118,4 +137,110 @@ test('Clear stays available when expiry failure prevents stored marks from loadi
     await p.el('Clear').fire();
     assert.deepEqual(JSON.parse(p.requests.at(-1).options.body), {action: 'clear'});
     assert.match(p.el('Status').textContent, /history cleared/);
+});
+
+async function chooseSurvey(p) {
+    p.el('SurveyPick').fire();
+    await p.state.pick({floor: 'Yard', x_m: 12, y_m: 8});
+}
+const posts = p => p.requests.filter(r => r.options).map(r => JSON.parse(r.options.body));
+
+test('stationary survey waits, saves five spaced instantaneous labels and does not apply settings', async () => {
+    const p = setup(); await settle(); await chooseSurvey(p);
+    assert.equal(posts(p).length, 0, 'choosing a spot does not capture before settling');
+    p.el('SurveyStart').fire();
+    assert.equal(p.el('Download').disabled, true);
+    await p.advance(29000); assert.equal(posts(p).length, 0);
+    await p.advance(1000); assert.equal(posts(p).length, 1);
+    for (let i = 0; i < 4; i++) {
+        await p.advance(9000); assert.equal(posts(p).length, i + 1);
+        await p.advance(1000); assert.equal(posts(p).length, i + 2);
+    }
+    assert.deepEqual(posts(p).map(r => r.marker), Array.from({length: 5}, () => ({target: 'bps_group_dog', floor: 'Yard', x_m: 12, y_m: 8, accuracy_m: 1, label: ''})));
+    assert.equal(new Set(posts(p).map(r => r.id)).size, 5);
+    assert.equal(p.timers.size, 0);
+    assert.equal(p.state.wakeRequests, 1);
+    assert.equal(p.state.wakeReleases, 1);
+    assert.equal(p.el('Download').disabled, false);
+    assert.match(p.el('Status').textContent, /5 snapshots saved.*Download/);
+    assert.ok(p.requests.every(r => r.url.startsWith('/api/bps/ground_truth')));
+});
+
+test('delayed timers never backfill multiple labels for time spent away', async () => {
+    const p = setup(); await settle(); await chooseSurvey(p); p.el('SurveyStart').fire();
+    await p.advance(180000);
+    assert.equal(posts(p).length, 1);
+    await p.advance(1000); assert.equal(posts(p).length, 1);
+    p.el('SurveyStop').fire(); await p.advance(100000);
+    assert.equal(posts(p).length, 1);
+});
+
+for (const change of ['target', 'map', 'replay', 'hidden']) {
+    test(`survey stops before another label when ${change} changes`, async () => {
+        const p = setup(); await settle(); await chooseSurvey(p); p.el('SurveyStart').fire();
+        if (change === 'target') {p.state.target = 'bps_group_other'; p.controller.sync();}
+        if (change === 'map') p.state.context = 'saved-map-b';
+        if (change === 'replay') p.state.valid = false;
+        if (change === 'hidden') await p.hide();
+        await p.advance(30000);
+        assert.equal(posts(p).length, 0);
+        assert.equal(p.timers.size, 0);
+        assert.equal(p.el('SurveyStart').disabled, true);
+        assert.match(p.el('Status').textContent, /stopped/i);
+    });
+}
+
+test('stop during an in-flight save preserves that mark without scheduling the next one', async () => {
+    const p = setup(); await settle(); await chooseSurvey(p); p.el('SurveyStart').fire();
+    let release; p.state.pending = new Promise(resolve => {release = resolve;});
+    await p.advance(30000);
+    assert.equal(posts(p).length, 1);
+    assert.equal(p.el('SurveyStop').disabled, false);
+    p.el('SurveyStop').fire(); release(); await settle();
+    await p.advance(100000);
+    assert.equal(posts(p).length, 1);
+    assert.equal(p.timers.size, 0);
+    assert.equal(p.state.marks.length, 1);
+});
+
+test('capture errors stop a sequence and do not count a failed snapshot', async () => {
+    const p = setup(); await settle(); await chooseSurvey(p); p.el('SurveyStart').fire();
+    await p.advance(30000);
+    p.state.error = 'disk unavailable'; await p.advance(10000);
+    assert.equal(p.timers.size, 0);
+    assert.match(p.el('Status').textContent, /stopped after 1 confirmed.*disk unavailable/);
+    assert.equal(p.el('Download').disabled, false);
+});
+
+test('phone view and target chooser retain the same tracked selection and cancel old picks', async () => {
+    const p = setup(); await settle();
+    p.el('Shortcut').fire(); assert.equal(p.state.focused, true);
+    p.el('SurveyPick').fire(); const previous = p.state.pick;
+    p.el('Target').value = 'bps_group_other'; p.el('Target').fire('change');
+    await previous({floor: 'Yard', x_m: 1, y_m: 2});
+    assert.equal(posts(p).length, 0);
+    assert.equal(p.el('Target').value, 'bps_group_other');
+    p.state.target = null; p.controller.sync();
+    assert.equal(p.state.focused, false);
+});
+
+test('map download reports server failure beside the map and restores its button', async () => {
+    const p = setup(); await settle();
+    await p.el('Download').fire();
+    assert.equal(p.state.downloads, 1);
+    assert.match(p.el('Status').textContent, /download started/);
+    p.state.downloadError = 'bundle too large';
+    await p.el('Download').fire();
+    assert.match(p.el('Status').textContent, /Could not download.*bundle too large/);
+    assert.equal(p.el('Download').disabled, false);
+});
+
+test('a wake lock granted after cancellation is released instead of keeping the screen awake', async () => {
+    const p = setup(); await settle(); await chooseSurvey(p);
+    let grant; p.state.wakePending = new Promise(resolve => {grant = resolve;});
+    p.el('SurveyStart').fire(); p.el('SurveyStop').fire();
+    grant(); await settle();
+    assert.equal(p.state.wakeRequests, 1);
+    assert.equal(p.state.wakeReleases, 1);
+    assert.equal(p.timers.size, 0);
 });
