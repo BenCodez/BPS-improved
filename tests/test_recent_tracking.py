@@ -3,6 +3,8 @@ import asyncio
 from dataclasses import FrozenInstanceError, replace
 import json
 import math
+import random
+import zlib
 
 import pytest
 
@@ -126,8 +128,13 @@ def test_frame_and_context_exact_size_boundaries():
     base = sample(100, padding="")
     exact = sample(100, padding="x" * (R.MAX_FRAME_BYTES - len(base.frame_json)))
     assert len(exact.frame_json) == R.MAX_FRAME_BYTES
+    compressed = sample(100, padding="x" * (R.MAX_FRAME_BYTES - len(base.frame_json) + 1))
+    assert compressed.frame_encoding == "zlib"
+    assert compressed.frame_size == R.MAX_FRAME_BYTES + 1
+    raw_limit = sample(100, padding="x" * (R.MAX_RAW_FRAME_BYTES - len(base.frame_json)))
+    assert raw_limit.frame_size == R.MAX_RAW_FRAME_BYTES
     with pytest.raises(R.PackError) as err:
-        sample(100, padding="x" * (R.MAX_FRAME_BYTES - len(base.frame_json) + 1))
+        sample(100, padding="x" * (R.MAX_RAW_FRAME_BYTES - len(base.frame_json) + 1))
     assert err.value.reason == "oversize"
     empty_context = sample(100, {"padding": ""})
     exact_context = sample(100, {"padding": "x" * (R.MAX_CONTEXT_BYTES - len(empty_context.context_json))})
@@ -135,6 +142,78 @@ def test_frame_and_context_exact_size_boundaries():
     with pytest.raises(R.PackError) as err:
         sample(100, {"padding": "x" * (R.MAX_CONTEXT_BYTES - len(empty_context.context_json) + 1)})
     assert err.value.reason == "oversize"
+
+
+def test_large_frames_round_trip_losslessly_with_context_deduplication():
+    history = R.RecentTrackingHistory()
+    evidence = [{"receiver": f"synthetic-{i}", "observed": 90.125,
+        "used": i % 2 == 0, "quality": {"raw_rssi": -75, "noise_db": 3.2},
+        "intersections": [{"material": "metal", "weight": .4, "walls": [1, 3]}]}
+        for i in range(1000)]
+    packed = sample(100, readings=evidence)
+    assert packed.frame_encoding == "zlib"
+    assert len(packed.frame_json) <= R.MAX_FRAME_BYTES < packed.frame_size
+    history.append(packed)
+    history.append(sample(102, readings=evidence))
+    evidence[0]["observed"] = 102
+    result = exported(history, 102)
+    assert result["frames"][0]["readings"][0]["observed"] == 90.125
+    assert result["frames"][1]["readings"] == result["frames"][0]["readings"]
+    assert result["metadata"]["compressed_samples"] == 2
+    assert result["metadata"]["retained_compressed_samples"] == 2
+    assert len(result["contexts"]) == 1
+    assert_accounting(history)
+
+
+def test_incompressible_frame_still_respects_stored_byte_limit():
+    padding = random.Random(0).randbytes(80_000).hex()
+    with pytest.raises(R.PackError) as err:
+        sample(100, padding=padding)
+    assert err.value.reason == "oversize"
+
+
+def test_compressed_history_export_decodes_only_a_budgeted_newest_suffix(monkeypatch):
+    history = R.RecentTrackingHistory()
+    for now in range(0, 600, 2):
+        assert history.append(sample(now, padding="x" * 200_000,
+            readings={"observed": 12.125}))
+    snapshot = history.snapshot(598)
+    assert len(snapshot.frames) == 300
+    original = R._frame_bytes
+    decoded_sizes = []
+    def decode(frame):
+        decoded_sizes.append(frame.frame_size)
+        return original(frame)
+    monkeypatch.setattr(R, "_frame_bytes", decode)
+    result = R.export_snapshot(snapshot)
+    assert sum(decoded_sizes) <= R.EXPORT_MAX_BYTES
+    assert pretty_size(result) == result["metadata"]["export_bytes"] <= R.EXPORT_MAX_BYTES
+    assert result["metadata"]["retained_samples"] == 300
+    assert result["metadata"]["export_dropped_frames"] + len(result["frames"]) == 300
+    assert result["frames"][-1]["time"] == 598
+    assert all(f["readings"]["observed"] == 12.125 for f in result["frames"])
+    assert result["metadata"]["export_truncated"] is True
+    assert len(history.snapshot(598).frames) == 300
+    assert_accounting(history)
+
+
+def test_compressed_sample_validation_is_bounded_and_append_does_not_decompress(monkeypatch):
+    packed = sample(100, padding="x" * 100_000)
+    for invalid in [replace(packed, frame_size=100),
+            replace(packed, frame_json=packed.frame_json[:-1]),
+            replace(packed, frame_json=packed.frame_json + b"trailing"),
+            replace(packed, frame_size=R.MAX_RAW_FRAME_BYTES + 1)]:
+        with pytest.raises((ValueError, zlib.error)):
+            R._frame_bytes(invalid)
+    history = R.RecentTrackingHistory()
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("decompression on the event loop")
+    monkeypatch.setattr(R.zlib, "decompressobj", forbidden)
+    assert history.append(packed)
+    assert history.append(replace(packed, time=102))
+    assert not history.append(replace(packed, time=104, frame_encoding="unknown"))
+    assert not history.append(replace(packed, time=104, frame_size=R.MAX_RAW_FRAME_BYTES + 1))
+    assert len(history.snapshot(102).frames) == 2
 
 
 def test_clock_rollback_and_future_stale_snapshot_guards():

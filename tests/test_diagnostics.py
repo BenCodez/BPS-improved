@@ -83,6 +83,53 @@ def test_automatic_history_retains_stale_member_clocks_and_context_changes(hass,
     asyncio.run(scenario())
 
 
+def test_automatic_history_retains_detailed_many_receiver_batches(hass, monkeypatch):
+    async def scenario():
+        configure(hass, monkeypatch)
+        hass.states.async_all = lambda _domain: []
+        clock = [140.0]
+        monkeypatch.setattr(bps.time, "time", lambda: clock[0])
+        receiver_rows = [{"receiver": f"synthetic_station_{i}", "observed": 138.125,
+            "used": True, "excluded": False, "measured_distance_m": 25.25 + i,
+            "corrected_distance_m": 25.25 + i, "reliability_weight": .75,
+            "range_interval": {"lower_m": 12.125, "center_m": 25.25, "upper_m": 50.5,
+                "quality_samples": 32, "noise_db": 3.125, "source_observed": 138.125,
+                "solver_eligible": True, "model_version": "synthetic-model"},
+            "classification": "building", "environmental_weight": .75,
+            "intersections": [{"type": "building", "material": "wood", "weight": .75,
+                "wall_crossings": [{"walls": [1], "point": [10.125, 20.25]}],
+                "path_length_m": 8.125, "boundary_crossings": 1}]}
+            for i in range(24)]
+        positions = [{"ent": key, "updated": 139, "cords": [25, 30],
+            "outdoor": {"observed": 138.125, "receiver_diagnostics": copy.deepcopy(receiver_rows)}}
+            for key in ["tag", "tag2", *[f"synthetic_tag_{i}" for i in range(6)]]]
+        positions.append({"ent": "bps_group_dog", "group": True, "updated": 139,
+            "cords": [25, 30], "anchor_beacon": "tag", "beacon_positions": [
+                {"ent": "tag", "used": True, "selection_reason": "anchor", "observed": 138.125},
+                {"ent": "tag2", "used": True, "selection_reason": "agrees_with_anchor", "observed": 138.125}]})
+        hass.data["bps"]["apitricords"] = positions
+        original = copy.deepcopy(positions)
+        await bps._capture_recent_tracking(hass)
+        clock[0] += 2
+        await bps._capture_recent_tracking(hass)
+        history = hass.data["bps"]["_recent_tracking"]
+        stored = history.snapshot(clock[0])
+        assert len(stored.frames) == 2
+        assert stored.frames[0].frame_size > recent.MAX_FRAME_BYTES
+        assert dict(stored.metadata)["oversize_samples"] == 0
+        report = diag.format_report(bps._diagnostic_report_snapshot(hass, clock[0]))
+        result = json.loads(report[report.index("{"):])["recent_tracking"]
+        assert result["metadata"]["sample_count"] == 2
+        assert result["metadata"]["compressed_samples"] == 2
+        fixes = {p["ent"]: p for p in result["frames"][0]["positions"]}
+        assert len(fixes) == len(positions)
+        assert fixes["tag"]["outdoor"]["receiver_diagnostics"] == receiver_rows
+        assert fixes["tag"]["outdoor"]["observed"] == 138.125
+        assert fixes["bps_group_dog"]["beacon_positions"] == positions[-1]["beacon_positions"]
+        assert positions == original and not hass._store_saves
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("change", ["unload", "layout"])
 def test_automatic_history_discards_executor_result_after_context_change(hass, monkeypatch, change):
     async def scenario():
