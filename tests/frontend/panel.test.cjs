@@ -56,6 +56,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
             requests.push({url, options});
             if (url === '/api/bps/cords' && network.failCords) throw new Error('connection lost');
             if (url === '/api/bps/tracking_settings' && network.trackingSettingsRequest) return await network.trackingSettingsRequest(options);
+            if (url === '/api/bps/save_text' && network.saveTextRequest) return await network.saveTextRequest(options);
             if (url === '/api/bps/scanner_linking' && network.matchingRequest) return await network.matchingRequest();
             if (url === '/api/bps/scanner_linking' && network.matching) return {ok: true, status: 200,
                 json: async () => ({placed: [], unplaced: [], beacons: [], matching: network.matching})};
@@ -612,6 +613,48 @@ test('a pending toolbar mode save blocks concurrent saves and enables Start only
     await pending;
     assert.equal(toggle.disabled, false); assert.equal(p.el('starttrack').disabled, undefined);
     assert.equal(toggle.checked, true);
+});
+
+test('toolbar mode saves preserve unapplied new and existing group fields', async () => {
+    for (const existing of [false, true]) {
+        const source = layout(); source.outdoor_tracking = {enabled: true};
+        if (existing) source.tracker_groups = [{id: 'rover', name: 'Saved name', enabled: true, beacons: ['beacon_a']}];
+        const p = await panel(source);
+        p.el('groupSelector').value = existing ? 'rover' : ''; await p.el('groupSelector').fire('change');
+        p.el('groupName').value = 'Unapplied name';
+        p.el('groupId').value = existing ? 'rover' : 'new_dog';
+        p.el('groupEnabled').checked = false;
+        p.el('groupBeacons').options.forEach(option => {option.selected = option.value === 'beacon_b';});
+        for (const checked of [true, false]) {
+            const toggle = p.el('outdoorLongRangeIntervals'); toggle.checked = checked; await toggle.fire('change');
+            assert.equal(p.el('groupSelector').value, existing ? 'rover' : '');
+            assert.equal(p.el('groupName').value, 'Unapplied name');
+            assert.equal(p.el('groupId').value, existing ? 'rover' : 'new_dog');
+            assert.equal(p.el('groupId').disabled, existing);
+            assert.equal(p.el('groupEnabled').checked, false);
+            assert.deepEqual(p.el('groupBeacons').selectedOptions.map(option => option.value), ['beacon_b']);
+            assert.deepEqual(plain(p.hooks.layout()).tracker_groups, source.tracker_groups);
+        }
+    }
+});
+
+test('full floor saves disable the toolbar mode and restore it on every completion path', async () => {
+    for (const ok of [true, false]) {
+        const p = await panel(layout()); p.hooks.select('Property');
+        let finish;
+        p.network.saveTextRequest = () => new Promise(resolve => {finish = resolve;});
+        const toggle = p.el('outdoorLongRangeIntervals');
+        const pending = p.hooks.savedata(true); await Promise.resolve();
+        assert.equal(toggle.disabled, true);
+        toggle.checked = true; await toggle.fire('change');
+        assert.equal(toggle.checked, false);
+        assert.equal(p.requests.some(r => r.url === '/api/bps/tracking_settings'), false);
+        finish({ok, status: ok ? 200 : 500}); await pending;
+        assert.equal(toggle.disabled, false);
+        toggle.checked = true; await toggle.fire('change');
+        assert.equal(p.hooks.layout().outdoor_tracking.long_range_intervals, true);
+        assert.equal(toggle.disabled, false);
+    }
 });
 
 test('failed or malformed toolbar saves preserve the draft and require reload before further writes', async () => {

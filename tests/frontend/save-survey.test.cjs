@@ -13,7 +13,7 @@ function productionSave({warning = null, status = 200} = {}) {
     const requests = [], messages = [];
     const state = vm.createContext({layoutSavePending: false, trackingModeUnverified: false, layoutRevision: 'a'.repeat(64), gpsUI: {isVerifying: () => false},
         myScaleVal: 20, removefile: false, new_floor: false, finalcords: {floor: []},
-        removeListeners() {}, FormData: class {constructor() {this.values = new Map();} append(k, v) {this.values.set(k, v);}}, saveButton: {remove() {}},
+        removeListeners() {}, syncTrackingModeControl() {}, FormData: class {constructor() {this.values = new Map();} append(k, v) {this.values.set(k, v);}}, saveButton: {remove() {}},
         bpsToast: value => messages.push(value), console: {error() {}},
         bpsFetch: async (url, options) => {requests.push(options.body); await pending; if (fail) throw new Error('synthetic failure'); return {ok: status === 200, status, headers: {get: name => name === 'X-BPS-Layout-Revision' ? 'b'.repeat(64) : warning}};},
         savebuttondiv: {contains: () => false}, mapReady: () => true, anyLayoutToolActive: () => false});

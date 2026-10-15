@@ -6528,6 +6528,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             return false;
         }
         layoutSavePending = true;
+        syncTrackingModeControl();
         try {
         if(!skipScaleCheck && myScaleVal == null){
             bpsToast("You have not added a scale, it won't work without it!");
@@ -6594,19 +6595,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.error('Error saving data:', error);
             bpsToast('Error saving data!');
         }
-        } finally {layoutSavePending = false;}
+        } finally {
+            layoutSavePending = false;
+            syncTrackingModeControl();
+        }
     }
 
     // =================================================================
     // Optional outdoor configuration uses the existing authenticated layout save.
     // No defaults are written until the user changes a setting.
+    function syncTrackingModeControl() {
+        const control = document.getElementById('outdoorLongRangeIntervals');
+        control.checked = outdoor.settings(finalcords).long_range_intervals;
+        control.disabled = layoutSavePending || trackingModeUnverified || !layoutRevision;
+    }
     function syncOutdoorSettings() {
         const settings = outdoor.settings(finalcords);
         document.getElementById('outdoorEnabled').checked = settings.enabled;
         document.getElementById('outdoorControls').hidden = !settings.enabled;
         document.getElementById('outdoorUncertainty').checked = settings.show_uncertainty;
-        document.getElementById('outdoorLongRangeIntervals').checked = settings.long_range_intervals;
-        document.getElementById('outdoorLongRangeIntervals').disabled = layoutSavePending || trackingModeUnverified || !layoutRevision;
+        syncTrackingModeControl();
         document.getElementById('outdoorThreshold').value = settings.hide_uncertainty_below_m;
         const strengthSelect = document.getElementById('outdoorObstructionStrength');
         for (const option of Array.from(strengthSelect.options)) {
@@ -6649,7 +6657,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             finalcords.outdoor_tracking = {...(finalcords.outdoor_tracking || {}), long_range_intervals: requested,
                 ...(requested ? {enabled: true} : {})};
             bpsToast(`Long-range mode ${requested ? 'on' : 'off'} — saved.`);
-            refreshGroupEditor();
+            refreshGroupEditor({preserveDraft: true});
         } catch (error) {
             trackingModeUnverified = true;
             bpsToast('Tracking mode could not be verified. Reload BPS before changing settings; preserve any unsaved map edits first.');
