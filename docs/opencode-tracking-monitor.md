@@ -60,6 +60,9 @@ diagnostics, tokens or identifiers to GitHub or external services.
     and corrected range errors in measured-distance bands, separated by receiver
     and beacon hardware, antenna metadata, model, map and environment. Account
     for exclusions, sample limits, repeated packets and missing older radio data.
+    Inspect each pair's exploratory distance_model_trend to distinguish a
+    constant RSSI residual from one that changes with log distance; require
+    near/far coverage and held-out validation before recommending model changes.
     Recent packet history is unlabelled context, never extra truth observations.
     Report how often actual distance falls outside signal-variation intervals;
     these intervals do not bound systematic bias. Compare repeated locations

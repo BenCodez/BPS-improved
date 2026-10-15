@@ -139,6 +139,46 @@ def test_same_packet_nearby_labels_count_once_but_conflicting_labels_exclude_all
                for s in conflicting["samples"])
 
 
+def test_tracker_aliases_cannot_duplicate_or_conflict_one_canonical_packet():
+    first, alias = row(stamp=100), row(stamp=100)
+    alias["tracker"] = "issued_api_key"
+    nearby = radio_survey.export([record(0, readings=[first]), record(1, x=.1, readings=[alias])])
+    assert nearby["counts"]["unique_packets"] == 1
+    assert "duplicate_packet" in nearby["samples"][1]["exclusions"]
+    conflicting = radio_survey.export([record(0, readings=[first]), record(1, x=10, readings=[alias])])
+    assert conflicting["counts"]["unique_packets"] == 0
+    assert all("conflicting_packet_location" in s["exclusions"] for s in conflicting["samples"])
+    fresh = copy.deepcopy(alias)
+    fresh["radio"]["packet"].update(stamp=101, observed=100)
+    independent = radio_survey.export([record(0, readings=[first]), record(1, x=10, readings=[fresh])])
+    assert len(independent["pairs"]) == 1
+    assert independent["pairs"][0]["tracker_labels"] == ["beacon", "issued_api_key"]
+
+
+def test_distance_model_trend_distinguishes_attenuation_slope_from_constant_offset():
+    records = []
+    for i, distance in enumerate((2, 5, 10, 30)):
+        rssi = -60 - 20 * math.log10(distance)
+        item = row(stamp=100 + i, distance=distance, raw_rssi_dbm=rssi,
+                   attenuation=3, reference_power_dbm=-60, raw_distance_m=distance ** (2 / 3))
+        item["radio"]["comparison"]["rssi_residual_db"] = 10 * math.log10(distance)
+        records.append(record(i, x=distance, readings=[item]))
+    trend = radio_survey.export(records)["pairs"][0]["distance_model_trend"]
+    assert trend["status"] == "exploratory"
+    assert trend["residual_slope_db_per_decade"] == pytest.approx(10)
+    assert trend["residual_intercept_db_at_1m"] == pytest.approx(0, abs=1e-12)
+    assert trend["implied_attenuation"] == pytest.approx(2)
+    assert trend["validation"] == "held_out_locations_required"
+    for record_ in records:
+        record_["comparison"]["markers"][0]["ranked_readings"][0]["radio"]["comparison"]["rssi_residual_db"] = -6
+    offset = radio_survey.export(records)["pairs"][0]["distance_model_trend"]
+    assert offset["residual_slope_db_per_decade"] == pytest.approx(0)
+    assert offset["residual_intercept_db_at_1m"] == pytest.approx(-6)
+    assert offset["implied_attenuation"] == pytest.approx(3)
+    insufficient = radio_survey.export(records[:2])["pairs"][0]["distance_model_trend"]
+    assert insufficient["status"] == "insufficient_data"
+
+
 def test_same_packet_on_other_floor_or_layout_conflicts():
     for second in (record(1, floor="Upper", readings=[row(stamp=100)]),
                    record(1, context="c" * 64, readings=[row(stamp=100)])):

@@ -98,17 +98,20 @@ def _median(values):
         values[middle - 1] / 2 + values[middle] / 2
 
 
-def _distinct_locations(group):
+def _location_groups(group):
     """Nearby labels inside stated tolerances describe one measured location."""
     places = []
     for sample in group:
         location = sample["location"]
-        if not any(location["floor"] == other["floor"] and
-                   math.hypot(location["x_m"] - other["x_m"],
-                              location["y_m"] - other["y_m"]) <=
-                   location["accuracy_m"] + other["accuracy_m"] for other in places):
-            places.append(location)
-    return len(places)
+        matching = next((rows for rows in places if location["floor"] == rows[0]["location"]["floor"] and
+                   math.hypot(location["x_m"] - rows[0]["location"]["x_m"],
+                              location["y_m"] - rows[0]["location"]["y_m"]) <=
+                   location["accuracy_m"] + rows[0]["location"]["accuracy_m"]), None)
+        if matching is None:
+            places.append([sample])
+        else:
+            matching.append(sample)
+    return places
 
 
 def _marker(value):
@@ -248,7 +251,7 @@ def _packet_key(sample):
             not ident["device_id"] or not ident["scanner_mac"] or \
             packet["stamp"] is None or not packet["observed_clock"]:
         return None
-    return (sample["reading"]["tracker"], ident["entry_id"], ident["device_id"],
+    return (ident["entry_id"], ident["device_id"],
             ident["scanner_mac"], packet["observed_clock"], packet["stamp"])
 
 
@@ -264,8 +267,7 @@ def _incompatible(a, b):
 
 def _pair_key(sample):
     r = sample["radio"]
-    return json.dumps((sample["reading"]["tracker"],
-                       r["identity"], r["path"], sample["environment"]["classification"],
+    return json.dumps((r["identity"], r["path"], sample["environment"]["classification"],
                        r["model_version"], r["reference_power_dbm"], r["rssi_offset_db"],
                        r["attenuation"], r["context_sha256"], r["receiver_hardware"],
                        r["beacon_hardware"]), sort_keys=True, separators=(",", ":"))
@@ -300,6 +302,40 @@ def _distance_bands(group):
     return bands
 
 
+def _distance_model_trend(group):
+    """Equal-location exploratory trend; never turn a few packets into calibration."""
+    places = _location_groups(group)
+    points = [(_median([math.log10(s["reading"]["expected_distance_m"]) for s in place]),
+               _median([s["radio"]["comparison"]["rssi_residual_db"] for s in place
+                        if s["radio"]["comparison"]["rssi_residual_db"] is not None]))
+              for place in places if any(s["radio"]["comparison"]["rssi_residual_db"] is not None for s in place)]
+    span = max((p[0] for p in points), default=0) - min((p[0] for p in points), default=0)
+    result = {"status": "insufficient_data", "locations": len(points), "unique_packets": len(group),
+              "log10_range_span": span,
+              "near_locations": sum(x < 1 for x, _ in points),
+              "far_locations": sum(x >= 1 for x, _ in points),
+              "long_distance_coverage": "near_and_far" if any(x < 1 for x, _ in points) and any(x >= 1 for x, _ in points) else "needs_near_and_far_marks",
+              "guide": "RSSI residual versus log10 measured slant range, using one median per marked location. Positive slope means the captured model increasingly underestimates distance. An offset changes the intercept; attenuation changes the slope. This is an exploratory in-sample trend, not a verified correction or tracking improvement. Body/antenna orientation, walls, map scale and heights can mimic a model error; validate at held-out locations."}
+    if len(points) < 3 or span < math.log10(2):
+        result["reason"] = "Need at least three measured locations spanning a factor of two in range"
+        return result
+    xbar, ybar = sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points)
+    denominator = sum((x - xbar) ** 2 for x, _ in points)
+    slope = sum((x - xbar) * (y - ybar) for x, y in points) / denominator
+    intercept = ybar - slope * xbar
+    attenuation = group[0]["radio"]["attenuation"] - slope / 10
+    rmse = math.hypot(*(y - intercept - slope * x for x, y in points)) / math.sqrt(len(points))
+    if not all(_number(value) for value in (slope, intercept, attenuation, rmse)):
+        result["reason"] = "Non-finite trend"
+        return result
+    result.update(status="exploratory", residual_slope_db_per_decade=slope,
+                  residual_intercept_db_at_1m=intercept,
+                  implied_attenuation=attenuation if attenuation > 0 else None,
+                  trend_rmse_db=rmse,
+                  validation="held_out_locations_required")
+    return result
+
+
 def _summaries(samples):
     groups = {}
     for sample in samples:
@@ -309,7 +345,7 @@ def _summaries(samples):
     for group in groups.values():
         first, radio = group[0], group[0]["radio"]
         ranges = [s["reading"]["expected_distance_m"] for s in group]
-        locations = _distinct_locations(group)
+        locations = len(_location_groups(group))
         medians = {}
         for key in ("raw_error_m", "filtered_error_m", "corrected_error_m", "rssi_residual_db"):
             values = [s["radio"]["comparison"][key] for s in group
@@ -327,6 +363,7 @@ def _summaries(samples):
                           _known_hardware(radio["beacon_hardware"]))
         summaries.append({
             "tracker": first["reading"]["tracker"],
+            "tracker_labels": sorted({s["reading"]["tracker"] for s in group})[:8],
             "receiver": first["reading"]["receiver"],
             "receiver_labels": sorted({s["reading"]["receiver"] for s in group
                                        if s["reading"]["receiver"] is not None})[:8],
@@ -344,6 +381,7 @@ def _summaries(samples):
                 "raw_error_m", "filtered_error_m", "corrected_error_m")},
             "median_rssi_residual_db": medians["rssi_residual_db"],
             "distance_bands": _distance_bands(group),
+            "distance_model_trend": _distance_model_trend(group),
             "hardware_metadata": "known" if known_hardware else "unknown_or_partial",
             "readiness": {"comparison": "ready", "exploratory_fitting": "candidate" if not reasons
                           else "insufficient_diversity", "reasons": reasons,

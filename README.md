@@ -887,6 +887,12 @@ range**. It propagates ±2 observed RSSI standard deviations (with a stated 0.5 
 quantization floor) through the effective model. This is not a confidence interval
 and does not bound bias from walls, antenna direction or a wrong model. The survey
 reports whether measured truth fell within those bands, separately by distance.
+With at least three marked locations spanning a factor of two in range, each
+pair also reports an exploratory RSSI-error trend against log distance. A
+constant error suggests an offset; a changing slope can suggest attenuation
+or path-model trouble. Locations have equal weight, so repeated presses at one
+spot cannot dominate the trend. This is not verified calibration: label/map/
+height error and antenna/body orientation can produce similar patterns.
 **Show distances** displays available distant bands as a light shaded ring for
 an isolated tracker/group, with range labels; unavailable or stale bands disappear.
 
