@@ -1031,18 +1031,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     var makeDeviceActive = null;
     var refreshTrackLegend = null;
 
-    // Icon world size. Fixed to the canvas normally; while tracking it is zoom-
-    // compensated so icons don't balloon when you zoom in — but only 2/3 as
-    // strongly as the pills (the pills fully cancel zoom by dividing by z, so
-    // dividing by z^(2/3) shrinks icons 2/3 as fast, keeping them a bit larger).
+    // Cancel zoom, then gently shrink tracking/history markers on screen so
+    // they leave room around the position without becoming hard to identify.
     function mapIconSize() {
         const base = canvas.width * 0.04;
-        return pollTrackActive ? base / Math.pow(view.zoom || 1, 2 / 3) : base;
+        return base / Math.pow(Math.max(1, view.zoom || 1), 1.15);
     }
 
     function receiverIconSize() {
         // Shrink receivers on screen as zoom increases, so nearby stations
-        // remain distinguishable. Tracker markers retain their existing sizing.
+        // remain distinguishable, a little smaller than tracker markers.
         return canvas.width * .04 / Math.pow(Math.max(1, view.zoom || 1), 1.25);
     }
 
@@ -2580,26 +2578,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             ctx.restore();
             ctx.beginPath();
             ctx.arc(here.x, here.y, half * 1.05, 0, Math.PI * 2);
-            ctx.lineWidth = Math.max(2, size * 0.05);
+            ctx.lineWidth = Math.max(2 / (view.zoom || 1), size * 0.05);
             ctx.strokeStyle = `hsla(${baseHue}, 95%, 62%, ${off ? 0.4 : 0.95})`;
             ctx.stroke();
         } else {
             // Sized off the canvas (the world is a fixed 2000 px wide, so a
             // fixed radius would vanish on a large floor plan).
-            const r = Math.max(7, canvas.width * 0.008);
+            const r = mapIconSize() * 0.2;
             ctx.beginPath();
             ctx.arc(here.x, here.y, r * 1.6, 0, Math.PI * 2);
             ctx.fillStyle = `hsla(${baseHue}, 95%, 60%, ${off ? 0.1 : 0.25})`;
             ctx.fill();
             ctx.beginPath();
             ctx.arc(here.x, here.y, r, 0, Math.PI * 2);
-            ctx.lineWidth = 3;
+            ctx.lineWidth = 3 / (view.zoom || 1);
             ctx.strokeStyle = "rgba(15, 15, 20, 0.75)";
             ctx.stroke();
             ctx.fillStyle = off ? "transparent" : `hsl(${baseHue}, 95%, 60%)`;
             ctx.fill();
             ctx.strokeStyle = `hsl(${baseHue}, 95%, 70%)`;
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1.5 / (view.zoom || 1);
             ctx.stroke();
         }
         ctx.restore();
@@ -4801,7 +4799,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // clears the isolation rather than selecting a hidden marker.
     function hitDeviceAt(pos) {
         if (!pollTrackActive || lastTracks.size === 0) return null;
-        const hitRadius = canvas.width * 0.02 + 10; // icon half-size plus slack
+        const hitRadius = mapIconSize() / 2 + 10 / Math.max(1, view.zoom || 1);
         let best = null, bestDist = Infinity;
         lastTracks.forEach((t, entKey) => {
             if (focusedDevice && entKey !== focusedDevice) return;

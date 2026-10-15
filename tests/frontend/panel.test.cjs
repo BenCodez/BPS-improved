@@ -326,6 +326,40 @@ test('receiver icons cancel zoom-in and sidebar hover recolors only the matching
     assert.ok(p.canvasCalls.some(call=>call[0]==='image'&&call[1]==='beacon.svg'&&call[2]===left&&call[3]===left));
 });
 
+for (const ent of ['beacon_a', 'bps_group_rover']) test(`${ent} shrinks on screen with zoom and has a matching selectable area`, async () => {
+    const source = layout(); source.outdoor_tracking = {enabled: true};
+    source.tracker_groups = [{id: 'rover', name: 'Rover', beacons: ['beacon_a', 'beacon_b']}];
+    source.tracker_icons = {[ent]: '/bps/person.svg'};
+    const p = await panel(source, undefined, true); p.hooks.select('Property');
+    p.el('entSelector').value = ent; await p.el('entSelector').fire('change');
+    await p.el('starttrack').fire('click'); p.setClock(100000);
+    const row = {ent, floor: 'Property', cords: [600, 400], updated: 100,
+        group: ent.startsWith('bps_group_'), beacon_positions: [
+            {ent: 'beacon_a', floor: 'Property', cords: [580, 400], observed: 100},
+            {ent: 'beacon_b', floor: 'Property', cords: [620, 400], observed: 100}]};
+    p.network.cords = [row];
+    let priorSize = Infinity;
+    for (const zoom of [1, 2, 4, 8]) {
+        p.hooks.zoom(zoom); p.canvasCalls.length = 0;
+        await p.intervals.findLast(i => i.ms === 500).cb();
+        const icon = p.canvasCalls.find(c => c[0] === 'image' && c[1] === '/bps/person.svg');
+        assert.ok(icon, 'tracking draws the saved glyph');
+        const worldSize = icon[4], screenSize = worldSize * zoom;
+        if (zoom === 1) assert.equal(screenSize, 80, 'normal view keeps its original size');
+        assert.ok(screenSize < priorSize && screenSize > 40, 'zoom gently shrinks a readable marker');
+        priorSize = screenSize;
+        assert.equal(p.hooks.hitDeviceAt({x: 600 + worldSize / 2 + 8 / zoom, y: 400}), ent);
+        assert.equal(p.hooks.hitDeviceAt({x: 600 + worldSize / 2 + 11 / zoom, y: 400}), null,
+            'empty space beyond the small marker is not an oversized invisible target');
+        if (row.group) {
+            const mini = p.canvasCalls.find(c => c[0] === 'arc' && c[1] === 580 && c[2] === 400);
+            assert.ok(mini && mini[3] * 2 * zoom <= 24 && mini[3] * 2 * zoom > 12,
+                'member dots stay small and readable');
+        }
+        assert.deepEqual(row.cords, [600, 400], 'zoom does not change the source position');
+    }
+});
+
 test('Debugging refresh updates detected model and inherited antenna without rewriting placement metadata', async () => {
     const source=layout(); source.floor[0].receivers=[{entity_id:'proxy',cords:{x:100,y:100},correction:1.2}];
     const matching={revision:'old',options:[{entity_id:'proxy',hardware:{effective:{model:'Old board',external_antenna:true}}}]};
