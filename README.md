@@ -1577,10 +1577,11 @@ resumes. One notification lists all affected receivers; duplicate placements or
 old/current aliases of the same scanner count once. Tracking does not need to
 be started, and the dogs do not need to be nearby.
 
-The silence timer prefers Home Assistant's Bluetooth scanner reception clock,
+The silence timer prefers Home Assistant's Bluetooth received-packet timestamps,
 falling back to Bermuda's scanner timing on older installations. Reception from
 other devices counts; hearing a receiver's transmitted beacon at a different
-station does not reset its HA scanner clock. A live network connection alone
+station does not reset its HA reception time. Scanner startup and watchdog clocks
+also cannot clear an existing alert. A live network connection alone
 does not reset the timer. Monitoring
 requires a known scanner or previously established timing; unmatched or ambiguous
 receivers and installations exposing only per-tracker distances cannot establish

@@ -4,6 +4,7 @@ import copy
 import logging
 import math
 import time
+from collections.abc import Mapping
 
 from homeassistant.helpers.storage import Store
 
@@ -28,7 +29,7 @@ def _number(value):
 def scanner_activity(hass, sources, identity, dump):
     """Return (reception age, scanner known) independently of map validity.
 
-    Prefer HA's scanner clock: Bermuda's device last_seen can also advance
+    Prefer HA's received packet stamps: Bermuda's device last_seen can also advance
     when another scanner hears the receiver's own beacon transmission.
     """
     addresses = {address for address, keys in sources.by_ble_address.items() if identity in keys}
@@ -47,9 +48,20 @@ def scanner_activity(hass, sources, identity, dump):
             for address in addresses:
                 scanner = async_scanner_by_source(hass, address.upper())
                 if scanner is not None and scanner.source.lower() == address.lower():
-                    known = True
-                    if (age := _number(scanner.time_since_last_detection())) is not None:
-                        ages.append(age)
+                    stamps = getattr(scanner, "discovered_device_timestamps", None)
+                    if not isinstance(stamps, Mapping):
+                        # Public since HA 2025.4; older remote scanners expose
+                        # the same packet stamps under this compatibility name.
+                        stamps = getattr(scanner, "_discovered_device_timestamps", None)
+                    if isinstance(stamps, Mapping):
+                        known = True
+                        clock = time.monotonic()
+                        latest = max((stamp for raw in stamps.values()
+                                      if (stamp := _number(raw)) is not None and 0 < stamp <= clock + 2), default=None)
+                        if latest is not None:
+                            ages.append(max(0.0, clock - latest))
+                    # time_since_last_detection is seeded by scanner startup
+                    # and watchdog restarts, even without receiving a packet.
         except Exception:
             # A missing manager or indeterminate source cannot prove activity.
             return None, False
