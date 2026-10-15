@@ -5,6 +5,7 @@ import hashlib
 from types import SimpleNamespace as NS
 
 import bps
+from bps.bermuda_direct import BermudaDirect
 from bps.receiver_sources import ReceiverSources
 from test_bermuda_direct import MAC, prepared, snapshot
 
@@ -122,3 +123,28 @@ def test_fallback_rejects_cross_owner_and_forged_measurement(hass, monkeypatch):
     add(f"sensor.{key}_distance_to_current_station", "2", uid=f"other-device_{MAC}_range")
     assert ReceiverSources(hass).direct_trackers() == set()
     assert sources.source(key, rec)[1] is None
+
+
+def test_fallback_caches_detached_identity_resolution_but_rechecks_registry_changes(hass, monkeypatch):
+    data, entries, states, add, payloads, rec, key = api_only(hass, monkeypatch)
+    existing = snapshot(did="existing-device")["devices"]["existing-device"]
+    payloads["entry"]["devices"]["existing-device"] = existing
+    for index in range(100):
+        add(f"sensor.existing_distance_to_station_{index}", "2", uid=f"existing-device_{MAC}_range")
+    calls = []
+    original = BermudaDirect.device
+
+    def resolve(direct, owner, identity):
+        calls.append((owner, identity))
+        return original(direct, owner, identity)
+
+    monkeypatch.setattr(BermudaDirect, "device", resolve)
+    sources = ReceiverSources(hass)
+    before = len(calls)
+    for _ in range(100):
+        assert sources.source(key, rec, now=1000.)[1].state == 6.
+    assert len(calls) == before
+    # A newly introduced representation still invalidates the captured fallback.
+    add("sensor.new_name_distance_to_current_station", "2", uid=f"new-device_{MAC}_range")
+    assert sources.source(key, rec, now=1000.)[1] is None
+    assert key not in sources.direct_trackers()

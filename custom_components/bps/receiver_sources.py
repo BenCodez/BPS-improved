@@ -19,6 +19,10 @@ class ReceiverSources:
         lookup = getattr(er, "async_get", None)
         self.registry = lookup(hass) if lookup else None
         self.direct = direct if direct is not None else BermudaDirect(hass)
+        # The direct API is detached once for this batch. Resolve each owned
+        # device ID once, while registry collisions are still checked against
+        # current entries after a solver suspension.
+        self._device_cache = {}
         # Minimal callers without HA registry retain exact lookup; they cannot
         # expand aliases. Real HA always supplies the entity registry.
         self.matching = inventory(hass, self.direct) if self.registry is not None else {"options": []}
@@ -80,8 +84,8 @@ class ReceiverSources:
                 continue
             for did, device in snapshot["devices"].items():
                 if (not isinstance(did, str) or not did or device.get("tracked") is not True
-                        or device.get("device_id") != did or self.direct.device(owner, did) != did
-                        or device.get("unique_id") and self.direct.device(owner, device["unique_id"]) != did
+                        or device.get("device_id") != did or self._device(owner, did) != did
+                        or device.get("unique_id") and self._device(owner, device["unique_id"]) != did
                         or any(ad.get("device_id") != did for ad in device["scanners"].values())
                         or (owner, did) in represented):
                     continue
@@ -91,6 +95,15 @@ class ReceiverSources:
                 self.fallback_trackers[key] = (owner, did)
                 name = device.get("name")
                 self.fallback_labels[key] = name.strip() if isinstance(name, str) and name.strip() else did
+
+    def _device(self, owner, identity):
+        """Memoize only identities from this immutable direct snapshot."""
+        if not isinstance(identity, str):
+            return None
+        key = (owner, identity)
+        if key not in self._device_cache:
+            self._device_cache[key] = self.direct.device(owner, identity)
+        return self._device_cache[key]
 
     def _registry_device_proofs(self):
         """Read current keys and owned device proofs, including disabled ranges."""
@@ -106,7 +119,7 @@ class ReceiverSources:
             match = _RANGE_MAC.search(uid)
             owner = getattr(ent, "config_entry_id", None)
             if match and owner in self.direct.snapshots:
-                did = self.direct.device(owner, uid[:match.start()])
+                did = self._device(owner, uid[:match.start()])
                 if did:
                     represented.add((owner, did))
         return keys, represented
@@ -129,7 +142,7 @@ class ReceiverSources:
             identities = {identity for _, _, identity in proofs}
             if len(identities) != 1:
                 continue
-            device = self.direct.device(owner, next(iter(identities)))
+            device = self._device(owner, next(iter(identities)))
             if device and self.direct.snapshots[owner]["devices"][device].get("tracked") is True:
                 result.add(tracker)
         return result
@@ -255,7 +268,7 @@ class ReceiverSources:
                     or fallback in represented or tracker in registry_keys):
                 return entity_id, None
             ad = self.direct.measurement(owner, did, key[1])
-            if (self.direct.device(owner, did) != did
+            if (self._device(owner, did) != did
                     or key not in self.direct.scanners and (owner, did, key[1]) not in self.direct.pairs
                     or ad is not None and ad.get("device_id") != did):
                 return entity_id, None
@@ -275,7 +288,7 @@ class ReceiverSources:
             if proofs and (not valid or exact is not None and not captured):
                 return entity_id, None
             identities = {identity for _, _, identity in selected_proofs}
-            device = self.direct.device(key[0], next(iter(identities))) if len(identities) == 1 else None
+            device = self._device(key[0], next(iter(identities))) if len(identities) == 1 else None
             if device and (key in self.direct.scanners or (key[0], device, key[1]) in self.direct.pairs):
                 return entity_id, self.direct.reading(key[0], device, key[1], entity_id, now=now)
         return self._legacy_source(tracker, receiver, binding, now=now)
