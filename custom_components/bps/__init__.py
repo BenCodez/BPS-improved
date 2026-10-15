@@ -10,6 +10,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import config_validation as cv
 from homeassistant.const import UnitOfLength
 from homeassistant.util.unit_conversion import DistanceConverter
 from homeassistant.util import slugify
@@ -82,6 +83,7 @@ from . import receiver_alerts
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "bps"
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 OPTION_SHOW_SIDEBAR_PANEL = "show_sidebar_panel"
 FRONTEND_PATH = Path(__file__).parent / "frontend"
 LEGACY_BPS_ENTITY_PATTERN = re.compile(r"^sensor\.(.+)_\1_bps_(zone|floor)$")

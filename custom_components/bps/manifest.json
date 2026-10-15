@@ -1,6 +1,7 @@
 {
     "domain": "bps",
     "name": "BLE Positioning System",
+    "after_dependencies": ["bluetooth"],
     "codeowners": ["@BenCodez", "@maxi1134"],
     "config_flow": true,
     "dependencies": ["http", "panel_custom", "persistent_notification"],

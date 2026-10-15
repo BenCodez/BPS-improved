@@ -106,6 +106,8 @@ test('receiver silence warning lists affected hardware and clears on recovery', 
     assert.equal(banner.hidden, false);
     assert.match(banner.textContent, /No BLE data for 3\+ hours: <synthetic station>/);
     assert.equal(banner.innerHTML, '', 'receiver names are text, never HTML');
+    p.network.receiverStatus.receiver_alerts.error = 'History could not be saved.';
+    await poll(); assert.match(banner.textContent, /<synthetic station>.*History could not be saved/);
     p.network.receiverStatus.receiver_alerts = {active: [], error: 'Receiver activity history could not be loaded; retrying.'};
     await poll(); assert.match(banner.textContent, /could not be loaded/); assert.equal(banner.hidden, false);
     p.network.receiverStatus.receiver_alerts = {active: []};

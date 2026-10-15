@@ -231,8 +231,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             const alert = document.getElementById('receiverSilenceAlerts');
             const silent = Array.isArray(data.receiver_alerts?.active) ? data.receiver_alerts.active : [];
             const alertError = typeof data.receiver_alerts?.error === 'string' ? data.receiver_alerts.error : '';
-            alert.textContent = silent.length ? `No BLE data for 3+ hours: ${silent.map(row => row.name).join(', ')}. Check Home Assistant notifications.` : alertError;
-            alert.hidden = silent.length === 0 && !alertError;
+            const message = silent.length ? `No BLE data for 3+ hours: ${silent.map(row => row.name).join(', ')}. Check Home Assistant notifications.` : '';
+            const alertText = [message, alertError].filter(Boolean).join(' ');
+            if (alert.textContent !== alertText) alert.textContent = alertText;
+            alert.hidden = !alertText;
             const next = Array.isArray(data.offline) ? data.offline : [];
             const nextUnknown = Array.isArray(data.unknown) ? data.unknown : [];
             const changed = next.length !== offlineReceivers.length
