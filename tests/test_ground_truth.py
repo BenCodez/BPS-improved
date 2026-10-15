@@ -179,6 +179,42 @@ def record_at(key, captured_at):
     return gt.prepare(captured, mark_body()["marker"], key)
 
 
+def test_a_day_of_surveys_exceeding_the_old_size_limit_survives_append_and_restart(hass):
+    async def scenario():
+        records = [record_at(f"survey-location-{i:016d}", 100 + i) for i in range(30)]
+        for record in records:
+            record["report"]["synthetic_raw_evidence"] = "x" * 600_000
+        stored = {"records": records, "evicted": 4}
+        assert len(gt.encode(stored)) > 16 * 1024 * 1024
+        hass._store_backing[gt.STORAGE_KEY] = stored
+        api = gt.BPSGroundTruthAPI(lambda *_: snapshot())
+        overview = json.loads((await api.get(request(hass))).body)
+        assert len(overview["marks"]) == 30 and overview["evicted"] == 4
+        appended = await api.post(request(hass, mark_body("later-desktop-download")))
+        assert appended.status == 200 and len(appended.json_body["marks"]) == 31
+        assert appended.json_body["evicted"] == 4
+        hass.data["bps"].pop("_ground_truth")
+        restarted = json.loads((await api.get(request(hass))).body)
+        assert len(restarted["marks"]) == 31 and restarted["evicted"] == 4
+        assert gt.get_history(hass).records[0]["report"]["synthetic_raw_evidence"] == "x" * 600_000
+
+    asyncio.run(scenario())
+
+
+def test_existing_marks_older_than_a_week_remain_available_for_desktop_download(hass, monkeypatch):
+    async def scenario():
+        record = record_at("older-survey-point", 100)
+        hass._store_backing[gt.STORAGE_KEY] = {"records": [record], "evicted": 0}
+        monkeypatch.setattr(gt.time, "time", lambda: 100 + 10 * 86400)
+        api = gt.BPSGroundTruthAPI(lambda *_: snapshot())
+        result = json.loads((await api.get(request(hass, query={"download": "1"}))).body)
+        assert result["records"] == [record] and result["evicted"] == 0
+        assert result["limits"] == {"max_marks": 500, "max_bytes": 128 * 1024 * 1024,
+                                    "max_age_s": 30 * 86400}
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("download", [False, True])
 def test_history_access_persists_expiration_and_preserves_boundary_and_future_marks(
     hass, monkeypatch, download

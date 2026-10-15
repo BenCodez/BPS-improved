@@ -25,7 +25,7 @@ MAX_FRAMES = MAX_DURATION_S // INTERVAL_S + 1
 FORMAT = "bps-diagnostics-v1"
 MAX_REPORT_BYTES = 4 * 1024 * 1024
 MAX_HISTORY_REPORT_BYTES = 1024 * 1024
-MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+MAX_BUNDLE_BYTES = 192 * 1024 * 1024
 MAX_RECENT_BUNDLE_BYTES = 16 * 1024 * 1024
 BUNDLE_MANIFEST_RESERVE_BYTES = 32 * 1024
 GUIDE = (
@@ -166,6 +166,17 @@ def format_known_position_report(snapshot, markers):
 def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
                  phone_omission=None, recording_omission=None):
     """Create one bounded, self-describing support archive off the HA loop."""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED,
+                         compresslevel=6) as archive:
+        _write_bundle(archive, snapshot, actual, recording, panel_context,
+                      phone_survey, phone_omission, recording_omission)
+    return output.getvalue()
+
+
+def _write_bundle(archive, snapshot, actual, recording, panel_context, phone_survey,
+                  phone_omission, recording_omission):
+    """Compress each entry immediately instead of retaining all expanded JSON."""
     recent = snapshot.get("_recent_tracking_snapshot")
     live = {key: value for key, value in snapshot.items() if not key.startswith("_")}
     import homeassistant.const as ha_const
@@ -182,8 +193,12 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
                            "full_report_bytes": MAX_REPORT_BYTES,
                            "recent_tracking_bytes": MAX_RECENT_BUNDLE_BYTES},
                 "files": {}, "omissions": {}}
-    payloads = {}
     total = 0
+
+    def entry_for(name):
+        entry = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+        entry.compress_type = zipfile.ZIP_DEFLATED
+        return entry
 
     def add(name, value, required=False, reserve_bytes=BUNDLE_MANIFEST_RESERVE_BYTES):
         nonlocal total
@@ -193,21 +208,37 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
             if required:
                 raise ValueError("Live diagnostic snapshot exceeds the bundle size limit")
             return
-        payloads[name] = data
+        archive.writestr(entry_for(name), data, compresslevel=6)
         manifest["files"][name] = {"bytes": len(data)}
         total += len(data)
 
     add("live_snapshot.json", live, required=True)
-    direct = snapshot.get("_bermuda_full_snapshot")
-    if direct is not None:
-        add("bermuda_measurements.json", direct)
     if actual["status"] in ("available", "empty"):
         from .ground_truth import GUIDE as HISTORY_GUIDE
         from .radio_survey import export as export_radio_survey
-        add("actual_location_history.json", {
-            "format": "bps-ground-truth-v1", "guide": HISTORY_GUIDE,
-            "records": actual["records"], "count": len(actual["records"]),
-            "evicted": actual["evicted"]})
+        # A full history can be much larger than a live report. Write one
+        # immutable saved record at a time, without assembling a giant JSON
+        # string or silently omitting the user's survey evidence.
+        name = "actual_location_history.json"
+        size = 0
+        with archive.open(entry_for(name), "w") as stream:
+            def write(data):
+                nonlocal size
+                if total + size + len(data) + BUNDLE_MANIFEST_RESERVE_BYTES > MAX_BUNDLE_BYTES:
+                    raise ValueError("Saved actual-location history exceeds the bundle size limit")
+                stream.write(data)
+                size += len(data)
+
+            write(encode({"format": "bps-ground-truth-v1", "guide": HISTORY_GUIDE})[:-1]
+                  + b',"records":[')
+            for index, record in enumerate(actual["records"]):
+                if index:
+                    write(b",")
+                write(encode(record))
+            write(b"]," + encode({"count": len(actual["records"]), "evicted": actual["evicted"],
+                                  "limits": actual.get("limits")})[1:])
+        manifest["files"][name] = {"bytes": size}
+        total += size
         try:
             add("radio_survey.json", export_radio_survey(actual["records"]))
         except (ValueError, TypeError) as err:
@@ -215,6 +246,9 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
     else:
         manifest["omissions"]["actual_location_history.json"] = actual["reason"]
         manifest["omissions"]["radio_survey.json"] = actual["reason"]
+    direct = snapshot.get("_bermuda_full_snapshot")
+    if direct is not None:
+        add("bermuda_measurements.json", direct)
     if recording is not None:
         add("diagnostic_recording.json", recording)
     else:
@@ -247,18 +281,10 @@ def build_bundle(snapshot, actual, recording, panel_context, phone_survey=None,
     manifest["counts"] = {"actual_location_marks": len(actual.get("records", ())),
                           "actual_location_evicted": actual.get("evicted"),
                           "actual_location_status": actual["status"],
-                          "data_files": len(payloads),
+                          "data_files": len(manifest["files"]),
                           "data_bytes_excluding_manifest": total}
     # Earlier entries already reserved this headroom for the final manifest.
     add("manifest.json", manifest, required=True, reserve_bytes=0)
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED,
-                         compresslevel=6) as archive:
-        for name, data in payloads.items():
-            entry = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
-            entry.compress_type = zipfile.ZIP_DEFLATED
-            archive.writestr(entry, data, compresslevel=6)
-    return output.getvalue()
 
 
 class Recording:

@@ -425,3 +425,44 @@ def test_bundle_limit_is_explicit_and_never_emits_partial_zip(monkeypatch):
     monkeypatch.setattr(diag, "MAX_BUNDLE_BYTES", 100)
     with pytest.raises(ValueError, match="Live diagnostic snapshot exceeds"):
         diag.build_bundle(snapshot(), {"status": "available", "records": (), "evicted": 0}, None, None)
+
+
+def test_desktop_bundle_exports_all_surveys_beyond_the_old_budget_in_bounded_chunks(monkeypatch):
+    records = []
+    for index in range(35):
+        record = saved()
+        record["id"] = f"desktop-survey-{index:016d}"
+        record["report"]["synthetic_raw_evidence"] = "x" * (2 * 1024 * 1024)
+        records.append(record)
+    original_encode = diag.encode
+
+    def bounded_encode(value):
+        data = original_encode(value)
+        assert len(data) < 4 * 1024 * 1024, "export must not assemble all expanded history at once"
+        return data
+
+    monkeypatch.setattr(diag, "encode", bounded_encode)
+    actual = {"status": "available", "records": records, "evicted": 2,
+              "limits": gt.retention_limits()}
+    payload = diag.build_bundle(snapshot(), actual, None, {"selected_tracker": "bps_group_pet"})
+    with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+        raw = bundle.read("actual_location_history.json")
+        assert len(raw) > 64 * 1024 * 1024
+        history = json.loads(raw)
+        assert history["count"] == 35 and history["evicted"] == 2
+        assert history["limits"] == gt.retention_limits()
+        assert [r["id"] for r in history["records"]] == [r["id"] for r in records]
+        assert history["records"][0]["report"]["synthetic_raw_evidence"] == "x" * (2 * 1024 * 1024)
+        manifest = json.loads(bundle.read("manifest.json"))
+        assert "actual_location_history.json" not in manifest["omissions"]
+        assert manifest["files"]["actual_location_history.json"]["bytes"] == len(raw)
+        assert manifest["counts"]["actual_location_marks"] == 35
+        assert sum(info.file_size for info in bundle.infolist()) <= diag.MAX_BUNDLE_BYTES
+
+
+def test_saved_surveys_are_never_silently_omitted_when_the_archive_budget_is_exceeded(monkeypatch):
+    record = saved()
+    record["report"]["synthetic_raw_evidence"] = "x" * 100_000
+    monkeypatch.setattr(diag, "MAX_BUNDLE_BYTES", 75_000)
+    with pytest.raises(ValueError, match="Saved actual-location history exceeds"):
+        diag.build_bundle(snapshot(), {"status": "available", "records": [record], "evicted": 0}, None, None)

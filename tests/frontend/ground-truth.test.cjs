@@ -11,7 +11,7 @@ function setup(initialError = null) {
         replaceChildren() {this.children = [];}, appendChild(item) {this.children.push(item);},
         focus() {this.focused = true;}, select() {this.selected = true;}};}
     for (const name of ['Panel', 'Mark', 'Copy', 'Clear', 'History', 'Status', 'Accuracy', 'Label', 'Report',
-        'Target', 'Focus', 'Shortcut', 'SurveyPick', 'SurveyStart', 'SurveyStop', 'SurveyPanel', 'Progress', 'SurveyStatus', 'Download']) nodes.set('liveTruth' + name, node());
+        'Target', 'Focus', 'Shortcut', 'SurveyPick', 'SurveyStart', 'SurveyStop', 'SurveyPanel', 'Progress', 'SurveyStatus', 'Download', 'Retention']) nodes.set('liveTruth' + name, node());
     const el = name => nodes.get('liveTruth' + name);
     const options = {open: false}; el('Report').closest = selector => selector === 'details' ? options : null;
     el('Accuracy').value = '1';
@@ -42,7 +42,8 @@ function setup(initialError = null) {
                 state.marks.push(saved);
             }
         }
-        return {ok: true, json: async () => ({marks: [...state.marks], saved, evicted: 0,
+        return {ok: true, json: async () => ({marks: [...state.marks], saved, evicted: state.evicted || 0,
+            limits: {max_marks: 500, max_bytes: 128 * 1048576, max_age_s: 30 * 86400},
             ...(url.includes('download') ? {records: [{report: {readings: ['original BLE data']}}]} : {})})};
     }, {getTarget: () => state.target, getTargets: () => state.targets, selectTarget: key => {state.target = key;},
         getContext: () => state.context, focusView: value => {state.focused = value;},
@@ -162,7 +163,7 @@ test('stationary survey waits, saves five spaced instantaneous labels and does n
     assert.equal(p.state.wakeRequests, 1);
     assert.equal(p.state.wakeReleases, 1);
     assert.equal(p.el('Download').disabled, false);
-    assert.match(p.el('Status').textContent, /5 snapshots saved.*Download/);
+    assert.match(p.el('Status').textContent, /5 snapshots saved.*desktop later/);
     assert.ok(p.requests.every(r => r.url.startsWith('/api/bps/ground_truth')));
 });
 
@@ -256,4 +257,13 @@ test('an armed map pick has a visible touch cancel and a cancelled point cannot 
     assert.equal(p.el('SurveyStart').disabled, true);
     assert.equal(posts(p).length, 0);
     assert.equal(p.el('SurveyPick').textContent, 'Choose survey spot');
+});
+
+test('history shows the server retention policy and supports a later desktop download', async () => {
+    const p = setup(); await settle();
+    assert.match(p.el('Retention').textContent, /0 snapshots.*30 days, 500 snapshots or 128 MiB.*desktop later/);
+    p.state.evicted = 13;
+    p.el('Mark').fire(); await p.state.pick({floor: 'Yard', x_m: 3, y_m: 4});
+    assert.match(p.el('Retention').textContent, /1 snapshots.*13 older snapshots/);
+    assert.equal(p.el('Download').disabled, false);
 });
