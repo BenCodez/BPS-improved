@@ -70,7 +70,7 @@ from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, sh
 from .ground_truth import BPSGroundTruthAPI
 from .phone_survey import BPSPhoneSurveyAPI
 from .receiver_matching import inventory as receiver_inventory
-from .receiver_sources import ReceiverSources
+from .receiver_sources import ReceiverSources, synchronous_reader
 from .gps_locations import BPSGPSLocationsAPI, gps_locations as _gps_locations, gps_sources as _gps_sources, validate_georeference
 from .height_sources import BPSHeightSourcesAPI, validate_height_surveys
 from . import bermuda_diagnostics
@@ -1015,6 +1015,7 @@ def _scanner_linking(hass, coordinates_json):
 
     sources = ReceiverSources(hass)
     matching = sources.matching
+    read_source = synchronous_reader(sources)
     options = {row["entity_id"]: row for row in matching["options"]}
     owned_by_identity = {}
     if sources.registry is not None:
@@ -1034,7 +1035,7 @@ def _scanner_linking(hass, coordinates_json):
                 # exact legacy fallbacks remain local to this placement.
                 owned = set(owned_by_identity.get(key, ())) if isinstance(key, (str, tuple)) else set()
                 for tracker in {sensor["device"] for sensor in sensors}:
-                    source, state = sources.source(tracker, rec, binding)
+                    source, state = read_source(tracker, rec, binding)
                     if state is not None:
                         owned.add(source)
                 sensors = [sensor for sensor in sensors if sensor["entity_id"] in owned]
@@ -1054,7 +1055,7 @@ def _scanner_linking(hass, coordinates_json):
                 status = "unknown" if matched else "unmatched"
             selected = {}
             for tracker in {sensor["device"] for sensor in sensors}:
-                source, state = sources.source(tracker, rec, binding)
+                source, state = read_source(tracker, rec, binding)
                 if state is not None:
                     selected[tracker] = source
             rows.append({"entity_id": slug, "floor": floor.get("name"), "placement_index": index,
@@ -1087,6 +1088,7 @@ def _beacon_links(hass):
     """
     beacons = {}  # device -> [{scanner, distance, unit}]
     sources, seen = ReceiverSources(hass), set()
+    read_source = synchronous_reader(sources)
     allowed = set(_bermuda_distance_sensor_ids(hass))
     candidates = [(st.entity_id, st) for st in hass.states.async_all("sensor") if st.entity_id in allowed]
     included = {eid for eid, _state in candidates}
@@ -1107,7 +1109,7 @@ def _beacon_links(hass):
         device = device_part[len("sensor."):] if device_part.startswith("sensor.") else device_part
         beacons.setdefault(device, [])
         binding = sources.binding({"entity_id": slug})
-        selected, chosen = sources.source(device, {"entity_id": slug}, binding)
+        selected, chosen = read_source(device, {"entity_id": slug}, binding)
         provenance = getattr(chosen, "attributes", {}).get("bps_source", {}) if chosen is not None else {}
         is_direct = provenance.get("path") == "direct"
         identity = (device, binding["identity"] or slug, provenance.get("device_id") if is_direct else sources.tracker_ids.get(eid))
@@ -1435,6 +1437,7 @@ async def update_receiver_radii(hass, eids, receiver_sources=None):
     if outdoor:
         max_age = finite_number(max_age, READING_MAX_AGE_SECS, minimum=0.0, maximum=1e6)
     sources = receiver_sources if receiver_sources is not None else ReceiverSources(hass)
+    read_source = synchronous_reader(sources)
     for floor in (f for f in eids["data"]["floor"] if f["scale"] is not None):
         for receiver, binding in zip(floor["receivers"], sources.floor_bindings(floor)):
             receiver.pop("distance", None)
@@ -1444,7 +1447,7 @@ async def update_receiver_radii(hass, eids, receiver_sources=None):
                 # A saved or previous-cycle radius is never a current reading.
                 receiver.pop("distance", None)
                 receiver.pop("_outdoor_reading", None)
-            entity_id, rec_value = sources.source(eids["entity"], receiver, binding)
+            entity_id, rec_value = read_source(eids["entity"], receiver, binding)
             if rec_value is not None:
                 # Drop a STUCK reading: when a scanner stops hearing the
                 # tracker its distance sensor keeps the last value instead of
@@ -3265,6 +3268,7 @@ def _diagnostic_snapshot(hass, targets, now):
     cal = hass.data.get(DOMAIN, {}).get("calibration", {})
     context["calibration"] = {key: copy.deepcopy(cal.get(key)) for key in (
         "mode", "floor", "results", "applied", "last_solved_at")}
+    read_source = synchronous_reader(sources)
     readings = []
     max_age = _reading_max_age(data)
     for beacon in beacons:
@@ -3272,7 +3276,7 @@ def _diagnostic_snapshot(hass, targets, now):
         for floor in floors:
             for receiver, binding in zip(floor.get("receivers", []), sources.floor_bindings(floor)):
                 slug = receiver.get("entity_id", "")
-                source, state = sources.source(beacon, receiver, binding, now=now)
+                source, state = read_source(beacon, receiver, binding, now=now)
                 row = {"tracker": beacon, "receiver": slug, "floor": floor.get("name"),
                        "entity_id": source, "status": binding["status"] if sources.blocked(binding) else "missing",
                        "scanner_aliases": binding["aliases"], "tracker_height_m": tracker_height,

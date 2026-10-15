@@ -3,12 +3,24 @@ import copy
 import hashlib
 import math
 import time
+from functools import partial
 
 from homeassistant.helpers import entity_registry as er
 
 from .bermuda_diagnostics import MAC
 from .bermuda_direct import BermudaDirect
 from .receiver_matching import _RANGE_MAC, inventory
+
+
+def synchronous_reader(sources):
+    """Freeze registry collisions for one read pass without any await.
+
+    Call again after yielding to HA; registry changes then take effect before
+    the next pass. Standalone source() calls always revalidate immediately.
+    """
+    if not isinstance(sources, ReceiverSources) or not sources.fallback_trackers:
+        return sources.source
+    return partial(sources.source, _registry_proofs=sources._registry_device_proofs())
 
 
 class ReceiverSources:
@@ -253,7 +265,7 @@ class ReceiverSources:
     def blocked(binding):
         return binding["status"] not in ("matched", "unmatched")
 
-    def source(self, tracker, receiver, binding=None, *, now=None):
+    def source(self, tracker, receiver, binding=None, *, now=None, _registry_proofs=None):
         """Prefer public direct measurements only with owner/device/scanner proof."""
         binding = binding or self.binding(receiver)
         entity_id = f'sensor.{tracker}_distance_to_{receiver.get("entity_id", "")}'
@@ -263,7 +275,8 @@ class ReceiverSources:
             owner, did = fallback
             # A captured fallback cannot borrow an entity or a different
             # receiver owner introduced during the same tracking batch.
-            registry_keys, represented = self._registry_device_proofs()
+            registry_keys, represented = (_registry_proofs if _registry_proofs is not None
+                                          else self._registry_device_proofs())
             if (self.blocked(binding) or key is None or key[0] != owner
                     or fallback in represented or tracker in registry_keys):
                 return entity_id, None

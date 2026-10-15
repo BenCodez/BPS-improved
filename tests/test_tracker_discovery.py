@@ -6,7 +6,7 @@ from types import SimpleNamespace as NS
 
 import bps
 from bps.bermuda_direct import BermudaDirect
-from bps.receiver_sources import ReceiverSources
+from bps.receiver_sources import ReceiverSources, synchronous_reader
 from test_bermuda_direct import MAC, prepared, snapshot
 
 
@@ -148,3 +148,52 @@ def test_fallback_caches_detached_identity_resolution_but_rechecks_registry_chan
     add("sensor.new_name_distance_to_current_station", "2", uid=f"new-device_{MAC}_range")
     assert sources.source(key, rec, now=1000.)[1] is None
     assert key not in sources.direct_trackers()
+
+
+def test_synchronous_read_pass_scans_registry_once_and_refreshes_after_yield(hass, monkeypatch):
+    data, entries, states, add, payloads, rec, key = api_only(hass, monkeypatch)
+    sources = ReceiverSources(hass)
+    scans = []
+    original = sources._registry_device_proofs
+
+    def scan():
+        scans.append(True)
+        return original()
+
+    monkeypatch.setattr(sources, "_registry_device_proofs", scan)
+    read = synchronous_reader(sources)
+    for _ in range(100):
+        assert read(key, rec, now=1000.)[1].state == 6.
+    assert len(scans) == 1
+
+    async def next_pass():
+        await asyncio.sleep(0)
+        add("sensor.new_name_distance_to_current_station", "2", uid=f"new-device_{MAC}_range")
+        # A caller must capture a new reader after yielding to HA.
+        return synchronous_reader(sources)(key, rec, now=1000.)[1]
+
+    assert asyncio.run(next_pass()) is None
+    assert len(scans) == 2
+
+
+def test_tracking_and_diagnostic_sweeps_do_not_scan_registry_per_reading(hass, monkeypatch):
+    data, entries, states, add, payloads, rec, key = api_only(hass, monkeypatch)
+    data["floor"][0]["receivers"] = [copy.deepcopy(rec) for _ in range(32)]
+    hass.data["bps"]["layout"] = data
+    scans = []
+    original = ReceiverSources._registry_device_proofs
+
+    def scan(sources):
+        scans.append(True)
+        return original(sources)
+
+    monkeypatch.setattr(ReceiverSources, "_registry_device_proofs", scan)
+    sources = ReceiverSources(hass)
+    before = len(scans)
+    asyncio.run(bps.update_receiver_radii(hass, {"entity": key, "data": data}, sources))
+    assert len(scans) - before == 1
+    before = len(scans)
+    report = bps._diagnostic_snapshot(hass, None, 1000.)
+    assert len(report["readings"]) == 32
+    # Initial discovery, inventory validation and one synchronous reading pass.
+    assert len(scans) - before <= 3
