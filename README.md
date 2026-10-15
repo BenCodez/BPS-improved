@@ -1570,6 +1570,24 @@ inventory is unavailable, automatic status remains Unknown until it can be check
 If a receiver shows red while the
 device is online, map it explicitly in `receiver_status`.
 
+BPS automatically alerts when a **placed, matched receiver has sent no BLE data
+for three hours**. A warning appears under Zones & Receivers in the BPS web page
+and in Home Assistant's persistent notifications. It clears when reception
+resumes. One notification lists all affected receivers; duplicate placements or
+old/current aliases of the same scanner count once. Tracking does not need to
+be started, and the dogs do not need to be nearby.
+
+The silence timer uses Bermuda's scanner-wide activity, including advertisements
+from other devices. A live network connection alone does not reset it. Monitoring
+starts once scanner-wide activity timing is available; unmatched or ambiguous
+receivers and installations exposing only per-tracker distances cannot establish
+scanner silence. Match those receivers first or check Bermuda's scanner data.
+Existing timers can continue through a Bermuda API outage. Activity times are
+stored locally every five minutes, at alert/recovery transitions and on graceful
+shutdown. An abrupt stop can lose up to five minutes of recent activity until
+fresh source timestamps reconcile it. Full diagnostics include the alert state;
+storage failures also appear in the BPS warning.
+
 The full card guide (all options, per-floor behavior, labels/icons/zones,
 troubleshooting) is in the [upstream wiki](https://github.com/Hogster/BPS/wiki/Lovelace-map-card).
 

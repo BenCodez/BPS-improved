@@ -3,7 +3,7 @@
     "name": "BLE Positioning System",
     "codeowners": ["@BenCodez", "@maxi1134"],
     "config_flow": true,
-    "dependencies": ["http", "panel_custom"],
+    "dependencies": ["http", "panel_custom", "persistent_notification"],
     "documentation": "https://github.com/BenCodez/BPS-improved",
     "integration_type": "device",
     "iot_class": "calculated",

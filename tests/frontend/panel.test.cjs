@@ -64,6 +64,7 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
                 : url === '/api/bps/tracking_settings' ? {layout_revision: 'b'.repeat(64), outdoor_tracking: {enabled: true, long_range_intervals: JSON.parse(options.body).long_range_intervals}}
                 : url === '/api/bps/trackers' ? {trackers: network.trackers || entities.map(key => ({key, name: key})), ready: network.trackersReady !== false}
                 : url === '/api/bps/cords' ? network.cords
+                : url === '/api/bps/receiver_status' ? (network.receiverStatus || {offline: [], unknown: []})
                 : url === '/api/bps/scanner_linking' ? {placed: [], unplaced: [], beacons: []} : url === '/api/bps/calibration' ? network.calibration
                 : url.startsWith('/api/bps/diagnostics?report=1') ? {text: 'BPS full diagnostics\n{"context":{"layout":{"floor":[]}}}'} : [];
             const status = url === '/api/bps/cords' ? network.cordsStatus : 200;
@@ -94,6 +95,22 @@ async function panel(layout, entities = ['beacon_a', 'beacon_b'], iconsLoaded = 
 }
 const layout = () => ({floor: [{name: 'Property', scale: 20, zones: [], receivers: []}]});
 const points = [{x: 100, y: 100}, {x: 200, y: 100}, {x: 200, y: 200}, {x: 100, y: 200}];
+
+test('receiver silence warning lists affected hardware and clears on recovery', async () => {
+    const p = await panel(layout());
+    const poll = p.intervals.find(item => item.cb.name === 'fetchReceiverStatus').cb;
+    const banner = p.el('receiverSilenceAlerts');
+    await poll(); assert.equal(banner.hidden, true);
+    p.network.receiverStatus = {offline: ['station'], unknown: [], receiver_alerts: {active: [{name: '<synthetic station>'}]}};
+    await poll();
+    assert.equal(banner.hidden, false);
+    assert.match(banner.textContent, /No BLE data for 3\+ hours: <synthetic station>/);
+    assert.equal(banner.innerHTML, '', 'receiver names are text, never HTML');
+    p.network.receiverStatus.receiver_alerts = {active: [], error: 'Receiver activity history could not be loaded; retrying.'};
+    await poll(); assert.match(banner.textContent, /could not be loaded/); assert.equal(banner.hidden, false);
+    p.network.receiverStatus.receiver_alerts = {active: []};
+    await poll(); assert.equal(banner.hidden, true); assert.equal(banner.textContent, '');
+});
 
 function receiverProperties(p, id = 'proxy') {
     const button = {getAttribute: () => id};
