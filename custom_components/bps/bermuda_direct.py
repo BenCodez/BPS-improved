@@ -6,7 +6,6 @@ fallback. Names never prove device identity. All exported values are bounded and
 private BLE keys use Bermuda's public SHA-256 identity spelling.
 """
 import hashlib
-import importlib
 import inspect
 import json
 import logging
@@ -18,6 +17,8 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from itertools import islice
 from types import SimpleNamespace
+
+from homeassistant.helpers.importlib import async_import_module
 
 MAX_ENTRIES = 32
 MAX_DEVICES = 256
@@ -85,6 +86,21 @@ def scanner_mac(row):
     return declared.lower() if isinstance(declared, str) and MAC.fullmatch(declared) else None
 
 
+async def async_prepare_api(hass):
+    """Load the optional API through HA's import executor before sensor setup."""
+    if "custom_components.bermuda.api" in sys.modules:
+        return
+    manager = getattr(hass, "config_entries", None)
+    if manager is None or not manager.async_entries("bermuda"):
+        return
+    try:
+        await async_import_module(hass, "custom_components.bermuda.api")
+    except Exception as err:
+        # Stock Bermuda need not supply this optional module. Constructors and
+        # tracking cycles must never retry filesystem imports on the event loop.
+        _LOGGER.debug("Optional Bermuda API import unavailable (%s); using legacy sources", type(err).__name__)
+
+
 class BermudaDirect:
     """Discover a local API and detach each loaded entry separately."""
 
@@ -97,12 +113,6 @@ class BermudaDirect:
         self.entries = entries[:MAX_ENTRIES]
         self.entries_truncated = len(entries) > MAX_ENTRIES
         api = sys.modules.get("custom_components.bermuda.api")
-        if api is None and entries:
-            try:
-                api = importlib.import_module("custom_components.bermuda.api")
-            except Exception:
-                # Stock Bermuda need not provide this optional module.
-                api = None
         getter = getattr(api, "async_get_advert_snapshot", None)
         for entry in entries[:MAX_ENTRIES]:
             owner = getattr(entry, "entry_id", None)

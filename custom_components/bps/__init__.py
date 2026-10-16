@@ -74,6 +74,7 @@ from .phone_survey import BPSPhoneSurveyAPI
 from .tracking_settings import BPSTrackingSettingsAPI
 from .receiver_matching import inventory as receiver_inventory
 from .receiver_sources import ReceiverSources, synchronous_reader
+from .bermuda_direct import async_prepare_api
 from .gps_locations import BPSGPSLocationsAPI, gps_locations as _gps_locations, gps_sources as _gps_sources, validate_georeference
 from .height_sources import BPSHeightSourcesAPI, validate_height_surveys
 from . import bermuda_diagnostics
@@ -2941,6 +2942,7 @@ async def async_setup_entry(hass, entry):
     """Set the integration from a configuration entry"""
     _LOGGER.info("async_setup_entry called")
     cleanup_legacy_bps_registry_and_states(hass)
+    await async_prepare_api(hass)
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 

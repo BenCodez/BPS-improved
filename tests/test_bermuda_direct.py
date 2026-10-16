@@ -1,6 +1,7 @@
 """Synthetic v1 contract exercised through actual tracking/calibration/report consumers."""
 import asyncio
 import copy
+import importlib
 import json
 import math
 import sys
@@ -457,13 +458,64 @@ def test_unknown_device_identity_keeps_exact_legacy_source_without_using_api_nam
 
 def test_optional_api_module_missing_keeps_legacy_path_and_no_install_requirement(hass, monkeypatch):
     data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
-    from bps import bermuda_direct as module
     monkeypatch.delitem(sys.modules, "custom_components.bermuda.api")
-    def absent(_name): raise ImportError("Optional module not installed")
-    monkeypatch.setattr(module.importlib, "import_module", absent)
+    attempts = []
+    def forbidden(name):
+        attempts.append(name)
+        raise AssertionError("Synchronous consumers must not import the API")
+    monkeypatch.setattr(importlib, "import_module", forbidden)
     sources = ReceiverSources(hass)
     assert sources.source("tag", data["floor"][0]["receivers"][0]) == (new, states[new])
     assert sources.direct.statuses[0]["reason"] == "api_unavailable"
+    assert attempts == []
+
+
+@pytest.mark.parametrize("import_error", [None, ModuleNotFoundError("Stock Bermuda"), RuntimeError("Optional API failed")])
+def test_entry_setup_prepares_optional_api_before_forwarding_sensors(hass, monkeypatch, import_error):
+    from bps import bermuda_direct as module
+    data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+    api = sys.modules["custom_components.bermuda.api"]
+    monkeypatch.delitem(sys.modules, "custom_components.bermuda.api")
+    events = []
+
+    async def import_api(_hass, name):
+        assert name == "custom_components.bermuda.api"
+        events.append("import")
+        if import_error is not None:
+            raise import_error
+        monkeypatch.setitem(sys.modules, name, api)
+        return api
+
+    async def sensors(_entry, platforms):
+        assert platforms == ["sensor"]
+        events.append("sensors")
+        sources = ReceiverSources(hass)
+        assert sources.direct.statuses[0]["path"] == ("direct" if import_error is None else "legacy")
+        assert sources.source("tag", data["floor"][0]["receivers"][0]) is not None
+
+    async def setup(_hass, _entry):
+        events.append("setup")
+        return True
+
+    monkeypatch.setattr(module, "async_import_module", import_api)
+    monkeypatch.setattr(bps, "cleanup_legacy_bps_registry_and_states", lambda _hass: None)
+    monkeypatch.setattr(bps, "async_setup", setup)
+    hass.config_entries.async_forward_entry_setups = sensors
+    entry = NS(async_on_unload=lambda _unsub: None, add_update_listener=lambda _listener: None)
+    assert asyncio.run(bps.async_setup_entry(hass, entry))
+    assert events == ["import", "sensors", "setup"]
+
+
+def test_api_preparation_skips_loaded_module_and_absent_bermuda(hass, monkeypatch):
+    from bps import bermuda_direct as module
+    prepared(hass, monkeypatch)
+    async def forbidden(*_args):
+        raise AssertionError("No import should be scheduled")
+    monkeypatch.setattr(module, "async_import_module", forbidden)
+    asyncio.run(module.async_prepare_api(hass))
+    monkeypatch.delitem(sys.modules, "custom_components.bermuda.api")
+    hass.config_entries.async_entries = lambda _domain: []
+    asyncio.run(module.async_prepare_api(hass))
 
 
 def test_direct_duplicate_receiver_placement_still_feeds_one_solver_input(hass, monkeypatch):
