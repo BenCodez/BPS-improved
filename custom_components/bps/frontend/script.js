@@ -67,7 +67,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     setTimeout(_settleToken, 5000);
 
-    async function bpsFetch(url, opts = {}) {
+    async function bpsFetch(url, {bpsBackoffOnForbidden = true, ...opts} = {}) {
         if (bpsAuthToken === null) await _tokenReady;
         // Dead token: after 5 failures on this exact token, send nothing more
         // with it until a different one is couriered in. The 503 is treated by
@@ -82,7 +82,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const headers = Object.assign({}, opts.headers || {});
         if (bpsAuthToken) headers["Authorization"] = "Bearer " + bpsAuthToken;
         const res = await fetch(url, Object.assign({}, opts, { headers }));
-        if (res.status === 401 || res.status === 403) {
+        if (res.status === 401 || (res.status === 403 && bpsBackoffOnForbidden)) {
             _authFails += 1;
             _authDeadToken = bpsAuthToken;
             _authBackoff = _authBackoff ? Math.min(_authBackoff * 2, 300000) : 5000;
@@ -93,7 +93,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 window.parent.postMessage("bps-ready", window.location.origin);
             }
         } else {
-            // Any non-401/403 response (incl. cords' normal 404) proves the
+            // Non-auth failures (including an endpoint's expected permission
+            // denial) do not put unrelated tracking requests into backoff.
+            // Any accepted response (incl. cords' normal 404) proves the
             // Bearer was accepted: clear all auth-failure state.
             _authFails = 0;
             _authBackoff = 0;
@@ -7611,6 +7613,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     if (globalThis.BPSGroundTruth) truthUI = globalThis.BPSGroundTruth.init(bpsFetch, {
+        getGPSMap: () => ({...currentFloor(), layout_revision: layoutRevision}),
         getTarget: () => pollTrackActive ? activeDevice : null,
         getTargets: () => trackedDevices.map(key => ({key, name: outdoor.groups(finalcords)
             .find(group => `bps_group_${group.id}` === key)?.name || availableBeaconLabels.get(key) || key})),

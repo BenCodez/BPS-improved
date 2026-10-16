@@ -951,6 +951,30 @@ and far samples with the same settings. Existing saved marks are kept when
 upgrading; previously expired or evicted snapshots cannot be recovered by this
 change.
 
+For a moving reference, open **GPS walk / ride survey** in the same phone view.
+Select the dog/group, choose walking or a slow ride, set the maximum distance
+between the dog and your phone, then press **Start GPS survey**. This uses the
+phone browser's live GPS and your saved map alignment. It saves a full GPS/BLE
+snapshot at most every 15 seconds, with separate original timestamps and a
+conservative allowance for GPS error, map alignment, dog separation and motion
+during GPS age. It skips stale/poor GPS, stops when hidden or the map/tracker
+changes, and limits each session to 30 minutes or 120 captures. Stop if the dog
+moves beyond your allowance. Moving references help diagnose large errors and
+lag; they are excluded from stationary radio-model summaries and do not change
+calibration. See [GPS survey details](docs/gps-map-setup.md#gps-walk--ride-references).
+
+Every confirmed point is saved immediately in Home Assistant. You can collect
+several stationary or moving surveys and download their combined ZIP later on a
+desktop; downloading after each survey is unnecessary. The displayed retention
+limits still apply.
+
+Android users can enable **Request HA high accuracy during survey**, load phones
+and explicitly select their Companion App notification service. BPS requests ON
+while collecting and OFF afterward, with server cleanup after a 90-second
+disconnect or restart. This requires an administrator and Android location
+permissions. Requests do not prove delivery or a particular GPS accuracy. See
+the [phone command details](docs/gps-map-setup.md#android-companion-app-high-accuracy).
+
 Authenticated APIs: `GET /api/bps/ground_truth` lists marks;
 `GET /api/bps/ground_truth?download=1` exports their captured data. A local monitor
 can use these point labels to distinguish position error from range disagreement.

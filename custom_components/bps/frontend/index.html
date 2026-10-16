@@ -330,8 +330,31 @@
                             <p id="liveTruthSurveyStatus" class="bps-hint" aria-live="off"></p>
                         </div>
                         <p id="liveTruthStatus" class="bps-hint" role="status">Select a dog, then mark where it actually is. Each mark saves an instant with BLE diagnostics.</p>
-                        <button id="liveTruthDownload" type="button" class="bps-btn bps-btn-primary">Download diagnostic ZIP</button>
-                        <p id="liveTruthRetention" class="bps-hint">Snapshots stay in Home Assistant. Open BPS on your desktop later to download the ZIP with raw Bermuda data, location marks and settings.</p>
+                        <details>
+                            <summary>GPS walk / ride survey</summary>
+                            <p class="bps-hint">With saved GPS map anchors, your phone can label BLE snapshots every 15 seconds. Keep the selected dog within the allowance below. Keep this page visible; GPS error and map alignment are included. Moving samples do not calibrate tracking.</p>
+                            <label for="liveGPSMode">Travel mode</label>
+                            <select id="liveGPSMode" class="bps-input"><option value="walk">Walking (up to 3 m/s)</option><option value="ride">Slow ride (up to 10 m/s)</option></select>
+                            <label for="liveGPSDistance">Maximum dog-to-phone distance (m)</label>
+                            <input id="liveGPSDistance" class="bps-input" type="number" inputmode="decimal" min="0" max="30" step="any" value="5">
+                            <p class="bps-hint">This allowance is your estimate. Stop collection if the dog runs farther away. Phone GPS does not measure the dog's location.</p>
+                            <label class="bps-switch"><input id="liveGPSHAEnable" type="checkbox"><span class="bps-slider" aria-hidden="true"></span><span>Request HA high accuracy during survey (Android)</span></label>
+                            <div id="liveGPSHAControls" hidden>
+                                <label for="liveGPSHAPhone">Your Android Companion App phone</label>
+                                <select id="liveGPSHAPhone" class="bps-input"><option value="">Load phones, then select yours</option></select>
+                                <button id="liveGPSHALoad" type="button" class="bps-btn bps-btn-outline">Load phones</button>
+                                <p class="bps-hint">Requires an administrator and Android location permissions. Requests ON during the survey and OFF afterward, including after a 90-second disconnect. Requests do not confirm the phone's actual state.</p>
+                            </div>
+                            <button id="liveGPSHAOff" type="button" class="bps-btn bps-btn-outline">Turn off HA high accuracy</button>
+                            <p id="liveGPSHAStatus" class="bps-hint" role="status">Optional Companion App commands. Browser GPS is already requested in high-accuracy mode.</p>
+                            <div class="bps-truth-actions">
+                                <button id="liveGPSStart" type="button" class="bps-btn bps-btn-primary">Start GPS survey</button>
+                                <button id="liveGPSStop" type="button" class="bps-btn bps-btn-outline" disabled>Stop GPS survey</button>
+                            </div>
+                            <p id="liveGPSStatus" class="bps-hint" role="status">Uses this phone's browser GPS with your permission. Sessions stop after 30 minutes or 120 snapshots.</p>
+                        </details>
+                        <button id="liveTruthDownload" type="button" class="bps-btn bps-btn-primary">Download saved surveys (ZIP)</button>
+                        <p id="liveTruthRetention" class="bps-hint">Each point saves in Home Assistant. Collect multiple surveys and download the combined ZIP from a desktop when convenient, within the retention limits.</p>
                         <details><summary>Recent marks &amp; options</summary>
                             <div id="liveTruthHistory" class="bps-hint"></div>
                             <label for="liveTruthAccuracy">Location tolerance (m)</label><input id="liveTruthAccuracy" class="bps-input" type="number" inputmode="decimal" min="0" max="100" step="any" value="1">
@@ -635,6 +658,8 @@
     <script src="outdoor.js"></script>
     <script src="diagnostics.js"></script>
     <script src="ground-truth.js"></script>
+    <script src="gps-walk.js"></script>
+    <script src="phone-accuracy.js"></script>
     <script src="calibration.js"></script>
     <script src="gps.js"></script>
     <script src="height.js"></script>

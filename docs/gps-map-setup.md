@@ -129,3 +129,84 @@ alignment after clicking. Enter each point's latitude and longitude separately, 
 accuracy can be 0 for surveyed coordinates or an estimate such as 2 metres.
 Validation identifies the invalid field rather than reporting an accuracy error
 for invalid latitude/longitude.
+
+## GPS walk / ride references
+
+After saving the map anchors and selecting your dog/group in live tracking,
+open **Phone survey** → **GPS walk / ride survey**. Choose walking (up to
+3 m/s) or a slow ride (up to 10 m/s), enter the maximum dog-to-phone distance,
+and press **Start GPS survey** on the phone you are carrying. For example,
+use 5 m only if the dogs stay within 5 m; stop if they run farther away.
+This distance is an estimate you supply, not a Bermuda proximity measurement.
+
+Allow precise browser location access. Use HTTPS; keep the page visible and
+the screen on. BPS requests a screen wake lock where supported. No continuous
+background Companion App location or notification permission is needed unless
+you opt into the Android command described below.
+GPS callbacks provide instantaneous fixes; the survey does not average a
+moving route into one point or assume the dog stays at an earlier position.
+Walks are generally better for examining range bias; rides also expose lag.
+
+BPS saves one full diagnostic mark at most every 15 seconds. A fix must be
+less than three seconds old and report accuracy of 20 m or better; GPS jumps
+or reported speeds above the mode's limit pause capture. These limits are
+quality gates, not guarantees of true GPS accuracy. The server rechecks the
+fix and projects it against the alignment frozen with the BLE snapshot.
+The location allowance includes reported GPS accuracy, anchor error/fit and
+extrapolation uncertainty, your dog-to-phone allowance, and possible movement
+during GPS age. Map and GPS timestamps, raw GPS coordinates, speed/heading
+when supplied, session identity and the full settings/Bermuda evidence remain
+in the private captured report. BLE packets and solved positions retain
+their own timestamps; filtering may represent earlier positions.
+
+Sessions stop after 30 minutes or 120 confirmed snapshots, on Stop, when the
+page is hidden, live tracking ends, a save fails or the map/target changes.
+Collection resumes only when you start another session. Closing the screen
+therefore does not silently create points later. Save failures are explicit;
+no offline queue or interpolation invents missing observations. A request
+already saving when stopped may finish. Retained points are included in the
+usual actual-location history and full ZIP download, subject to its storage
+limits, so they can be downloaded from another device.
+There is no need to download after each survey. Every confirmed capture saves
+immediately in Home Assistant, and the combined download includes the retained
+captures from several surveys. Capacity or age limits can remove older points;
+the page reports retained and evicted counts.
+
+Moving GPS labels are approximate phone-reference areas. They do not alter
+calibration, receiver positions, heights or map alignment, and do not enter
+stationary radio-model trend summaries. They are useful for identifying large
+errors, group recovery and lag; use stationary known-location captures to
+validate precise RSSI/attenuation corrections. Three or more independently
+checked anchors give a better alignment check than two points that fit exactly.
+
+### Android Companion App high accuracy
+
+In the walk survey, enable **Request HA high accuracy during survey (Android)**,
+press **Load phones**, and select your own `notify.mobile_app_…` service. An
+administrator is required for these phone commands. Starting the walk requests
+`command_high_accuracy_mode` / `turn_on`; stopping requests `turn_off`. The Android
+Companion App must already have precise/background location permissions and
+background location enabled. BPS cannot grant phone permissions. These requests
+can increase Companion App location reporting to HA; the walk's reference labels
+continue to use original browser GPS fixes and their independent quality checks.
+
+The command is an explicit ON/OFF action. BPS cannot read or restore the app's
+previous high-accuracy preferences, so leave it unchecked if you want existing
+phone settings left alone. It does not change the phone's configured update
+interval. A notification-service acknowledgment confirms a request, not delivery
+or actual phone state, and neither high-accuracy mode nor averaging guarantees
+one-metre accuracy. Unsupported or failed commands do not prevent browser GPS
+collection.
+
+The server keeps an expiring request, refreshed only while the visible survey
+runs, and requests OFF after 90 seconds without renewal or 30 minutes total.
+Closing/refreshing the page therefore does not rely on its last network request
+for cleanup. OFF intents persist before ON is sent; failed cleanup is retried,
+including after HA restarts. BPS also requests OFF during integration unload
+and HA shutdown. Network/phone availability can still prevent delivery: use
+**Turn off HA high accuracy** to retry cleanup for your BPS requests, or disable
+high accuracy directly in the Companion App. No saved BLE survey data is removed.
+
+The Android command implementation is documented in the Companion App source:
+[notification commands](https://github.com/home-assistant/android/blob/main/app/src/main/kotlin/io/homeassistant/companion/android/notifications/MessagingManager.kt)
+and [location mode handling](https://github.com/home-assistant/android/blob/main/app/src/full/kotlin/io/homeassistant/companion/android/sensors/LocationSensorManager.kt).

@@ -22,7 +22,9 @@ GUIDE = (
     "RSSI residuals are diagnostic evidence, not calibrated offsets or fit results. "
     "Distance bands use measured slant range, never the radio estimate. Compare "
     "near and far bands before extrapolating an indoor model outdoors; 10 m is "
-    "a comparison boundary, not a radio limit. Unknown hardware limits generalization across devices."
+    "a comparison boundary, not a radio limit. Unknown hardware limits generalization across devices. "
+    "Moving phone GPS references remain available in samples and full captured reports, "
+    "but are excluded from stationary radio-model summaries."
 )
 
 
@@ -144,6 +146,9 @@ def _sample(record, marker, source, radio):
     }
     reasons = [reason for reason in source_exclusions if isinstance(reason, str)
                and reason in allowed_exclusions]
+    moving = isinstance(record.get("gps_reference"), dict)
+    if moving:
+        reasons.append("moving_gps_reference_not_stationary")
     if any(reason not in allowed_exclusions for reason in source_exclusions
            if isinstance(reason, str)) or any(not isinstance(reason, str)
                                               for reason in source_exclusions):
@@ -160,6 +165,7 @@ def _sample(record, marker, source, radio):
                     if isinstance(capture.get("versions"), dict) else {},
                     "settings_sha256": _sha(capture.get("settings_sha256"))},
         "location": _marker(record.get("marker")),
+        "reference_kind": "moving_phone_gps" if moving else "manual_point",
         "reading": {"tracker": _text(source.get("tracker")),
                     "receiver": _text(source.get("receiver")),
                     "expected_distance_m": _num(source.get("expected_distance_m"), minimum=0),
@@ -251,7 +257,9 @@ def _packet_key(sample):
             not ident["device_id"] or not ident["scanner_mac"] or \
             packet["stamp"] is None or not packet["observed_clock"]:
         return None
-    return (ident["entry_id"], ident["device_id"],
+    # Moving references must never invalidate stationary labels of the same
+    # source packet. Deduplicate/conflict-check within each reference cohort.
+    return (sample["reference_kind"], ident["entry_id"], ident["device_id"],
             ident["scanner_mac"], packet["observed_clock"], packet["stamp"])
 
 
