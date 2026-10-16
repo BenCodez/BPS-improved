@@ -71,6 +71,7 @@ from .outdoor_config import validate_outdoor_layout
 from .diagnostics import BPSDiagnosticsAPI, activate as activate_diagnostics, shutdown as shutdown_diagnostics
 from .ground_truth import BPSGroundTruthAPI
 from .phone_survey import BPSPhoneSurveyAPI
+from .phone_accuracy import BPSPhoneAccuracyAPI, activate as activate_phone_accuracy
 from .tracking_settings import BPSTrackingSettingsAPI
 from .receiver_matching import inventory as receiver_inventory
 from .receiver_sources import ReceiverSources, synchronous_reader
@@ -2716,7 +2717,13 @@ async def async_setup(hass, config):
             hass.http.register_view(BPSDiagnosticsAPI(_diagnostic_snapshot, _diagnostic_inventory, _diagnostic_report_snapshot))
             hass.http.register_view(BPSGroundTruthAPI(_diagnostic_report_snapshot))
             hass.http.register_view(BPSPhoneSurveyAPI(_diagnostic_snapshot, _diagnostic_inventory))
+            hass.http.register_view(BPSPhoneAccuracyAPI())
             hass.data["bps_views_registered"] = True
+
+        try:
+            await activate_phone_accuracy(hass)
+        except Exception:
+            _LOGGER.warning("Optional phone accuracy command recovery is unavailable; survey data was preserved")
 
         config_path = hass.config.path()
         target_dir = os.path.join(config_path, "www", "bps_maps")
@@ -2866,6 +2873,11 @@ async def async_unload_entry(hass: HomeAssistant, entry):
         return False
 
     await shutdown_diagnostics(hass)
+    if (accuracy := bucket.get("_phone_accuracy")) is not None:
+        try:
+            await accuracy.close()
+        except Exception:
+            _LOGGER.warning("Phone accuracy cleanup could not be confirmed; pending commands were preserved")
 
     # Get whatever the tracking loop buffered since the last 60 s flush onto
     # disk before the task goes away. The in-memory ring survives an unload
@@ -3561,6 +3573,8 @@ def _diagnostic_report_snapshot(hass, now):
         "tracking_task_running": updater is not None and not updater.done(),
         "recording": copy.deepcopy(recording.status()) if recording else {"active": False, "available": False}}
     snapshot["runtime"]["effective_history_settings"] = history_mod.history_config(layout)
+    if (accuracy := dom.get("_phone_accuracy")) is not None:
+        snapshot["runtime"]["phone_accuracy"] = accuracy.snapshot()
     task = cal.get("task")
     snapshot["runtime"].update(calibration_task_running=task is not None and not task.done(),
         tracking_update_interval_s=secToUpdate, max_concurrent_trackers=MAX_CONCURRENT_TRACKERS,

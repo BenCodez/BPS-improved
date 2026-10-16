@@ -52,7 +52,7 @@
                 const valid = ['max_marks', 'max_bytes', 'max_age_s'].every(key => Number.isFinite(limits?.[key]) && limits[key] > 0);
                 el('Retention').textContent = `${overview.marks.length} snapshots retained in Home Assistant. `
                     + (valid ? `Kept for up to ${Math.round(limits.max_age_s / 86400)} days, ${limits.max_marks} snapshots or ${Math.round(limits.max_bytes / 1048576)} MiB, whichever limit is reached first. ` : '')
-                    + 'Download the ZIP from BPS on your desktop later.'
+                    + 'Collect multiple surveys; download their combined ZIP from BPS on your desktop when convenient.'
                     + (overview.evicted ? ` ${overview.evicted} older snapshots have already expired or been removed.` : '');
             }
             const gpsActive = gpsUI?.isActive() || false;
@@ -265,6 +265,7 @@
             finally {busy = false; render(); gpsUI?.sync();}
         });
         if (root.BPSGPSWalk) gpsUI = root.BPSGPSWalk.init({
+            fetch,
             target: hooks.getTarget, context, validate: () => validate(hooks.getTarget(), context()),
             map: hooks.getGPSMap, label: () => el('Label').value, busy: () => busy,
             beforeStart: () => {cancelPick(); stopSurvey();}, changed: render, save: savePoint,

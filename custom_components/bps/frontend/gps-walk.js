@@ -10,16 +10,19 @@
         const clock = env.monotonic || (() => root.performance.now());
         const later = env.setTimeout || root.setTimeout.bind(root), clear = env.clearTimeout || root.clearTimeout.bind(root);
         let active = null, watch = null, timer = null, wake = null;
+        let accuracy = null;
         const status = text => {el('Status').textContent = text;};
         const id = () => root.crypto?.randomUUID?.().replaceAll('-', '')
             || 'gps_' + now().toString(36) + '_' + Math.random().toString(36).slice(2);
         function render() {
-            for (const key of ['Start', 'Mode', 'Distance']) el(key).disabled = !!active || hooks.busy();
+            for (const key of ['Start', 'Mode', 'Distance']) el(key).disabled = !!active || hooks.busy() || !!accuracy?.busy();
             el('Stop').disabled = !active;
+            accuracy?.sync(!!active);
             hooks.changed();
         }
         function stop(text) {
             active = null;
+            accuracy?.stop();
             if (watch !== null) geo.clearWatch(watch);
             watch = null;
             if (timer !== null) clear(timer);
@@ -82,6 +85,7 @@
             if (active !== run) return;
             try {
                 valid(run);
+                accuracy?.heartbeat();
                 if (!run.saving && (run.lastFix === null || clock() - run.lastFix > 5000))
                     status(`${run.count} snapshots saved. Waiting for fresh, accurate GPS; no points are being reused.`);
                 timer = later(() => heartbeat(run), 1000);
@@ -91,6 +95,7 @@
             if (active || hooks.busy()) return;
             try {
                 hooks.validate();
+                accuracy?.validate();
                 if (!geo) throw new Error('Phone browser GPS is unavailable. Open BPS over HTTPS and allow location access.');
                 const map = hooks.map(), mode = el('Mode').value, distance = Number(el('Distance').value);
                 if (!map || !LIMITS[mode] || !el('Distance').value.trim() || !Number.isFinite(distance) || distance < 0 || distance > 30)
@@ -107,6 +112,7 @@
                     count: 0, lastStamp: 0, lastFix: null, previous: null, saving: false};
                 status('Waiting for phone GPS permission and a fresh fix. Keep the dog nearby and this screen open.');
                 render();
+                void accuracy?.start();
                 watch = geo.watchPosition(p => void receive(run, p), error => {
                     if (active !== run) return;
                     if (error.code === 1) stop('GPS permission denied. Allow precise location for this phone/browser, then start again.');
@@ -121,6 +127,8 @@
         el('Stop').addEventListener('click', () => stop('GPS survey stopped. A snapshot already saving may finish; retained points stay available for a desktop download.'));
         doc.addEventListener('visibilitychange', () => {if (doc.hidden && active) stop('GPS survey stopped because the page was hidden. Start again when ready.');});
         (env.window || root.window)?.addEventListener('pagehide', () => stop());
+        if (root.BPSPhoneAccuracy) accuracy = root.BPSPhoneAccuracy.init({fetch: hooks.fetch,
+            active: () => !!active, changed: render, stopSurvey: () => stop('GPS survey stopped. Saved points remain in Home Assistant.')}, env);
         render();
         return {isActive: () => !!active, stop, sync() {
             if (active) {try {valid(active);} catch (error) {stop(error.message);}}

@@ -302,7 +302,7 @@ test('an armed map pick has a visible touch cancel and a cancelled point cannot 
 
 test('history shows the server retention policy and supports a later desktop download', async () => {
     const p = setup(); await settle();
-    assert.match(p.el('Retention').textContent, /0 snapshots.*30 days, 500 snapshots or 128 MiB.*desktop later/);
+    assert.match(p.el('Retention').textContent, /0 snapshots.*30 days, 500 snapshots or 128 MiB.*multiple surveys.*desktop when convenient/);
     p.state.evicted = 13;
     p.el('Mark').fire(); await p.state.pick({floor: 'Yard', x_m: 3, y_m: 4});
     assert.match(p.el('Retention').textContent, /1 snapshots.*13 older snapshots/);
