@@ -2875,7 +2875,7 @@ async def async_unload_entry(hass: HomeAssistant, entry):
     await shutdown_diagnostics(hass)
     if (accuracy := bucket.get("_phone_accuracy")) is not None:
         try:
-            await accuracy.close()
+            await accuracy.close(retry_pending=True)
         except Exception:
             _LOGGER.warning("Phone accuracy cleanup could not be confirmed; pending commands were preserved")
 

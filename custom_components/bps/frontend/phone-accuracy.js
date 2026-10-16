@@ -14,8 +14,10 @@
             const timeout = controller ? root.setTimeout(() => controller.abort(), 15000) : null;
             try {
                 const response = await hooks.fetch('/api/bps/phone_accuracy', body ? {method: 'POST',
+                    bpsBackoffOnForbidden: false,
                     headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body), keepalive,
-                    ...(controller ? {signal: controller.signal} : {})} : controller ? {signal: controller.signal} : undefined);
+                    ...(controller ? {signal: controller.signal} : {})} : {bpsBackoffOnForbidden: false,
+                        ...(controller ? {signal: controller.signal} : {})});
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || 'Phone accuracy request failed.');
                 return data;

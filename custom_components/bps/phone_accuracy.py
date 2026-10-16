@@ -39,6 +39,10 @@ class PhoneAccuracy:
                               "cleanup_pending": now >= min(row["expires"], row["deadline"])}
                              for key, row in self.records.items()]}
 
+    def active(self):
+        return (bool(self.hass.data.get("bps_initialized"))
+                and self.hass.data.get("bps", {}).get("_tracking_active") is not False)
+
     async def persist(self, records):
         await save_verified_store(self.hass, self.store, {"records": records}, key=KEY)
         self.records = records
@@ -95,7 +99,7 @@ class PhoneAccuracy:
             await asyncio.sleep(15)
             await self.sweep()
 
-    async def close(self):
+    async def close(self, *, retry_pending=False):
         if self.worker and not self.worker.done():
             self.worker.cancel()
             await asyncio.gather(self.worker, return_exceptions=True)
@@ -107,12 +111,17 @@ class PhoneAccuracy:
                     await self.disable(service)
                 except Exception:
                     pass  # Durable intent survives shutdown for a retry after startup.
+            if retry_pending and self.records:
+                self.ensure_worker()
 
     async def action(self, owner, body):
         async with self.lock:
             await self.load()
             action, now = body.get("action"), self.clock()
+            if action in ("start", "heartbeat") and not self.active():
+                raise ValueError("BPS is not tracking; start another survey after it loads")
             if action == "start":
+                lifecycle = self.hass.data.get("bps", {}).get("_tracking_lifecycle")
                 service = body.get("service")
                 if not isinstance(service, str) or service not in {row["key"] for row in self.services()}:
                     raise ValueError("Select your Android Companion App phone")
@@ -125,6 +134,9 @@ class PhoneAccuracy:
                 # Persist before ON so interruption/restart cannot lose the OFF intent.
                 await self.persist({**self.records, service: row})
                 self.ensure_worker()
+                if not self.active() or self.hass.data.get("bps", {}).get("_tracking_lifecycle") is not lifecycle:
+                    self.records[service]["expires"] = 0
+                    raise ValueError("BPS stopped before the phone command; cleanup is scheduled")
                 try:
                     await self.command(service, "turn_on")
                 except Exception as exc:
