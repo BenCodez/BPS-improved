@@ -985,6 +985,9 @@ The optional API is prepared through Home Assistant's import executor before
 BPS sensor setup. Tracking and diagnostics only read an already loaded API;
 an unavailable module keeps the legacy paths available without repeated
 filesystem imports on Home Assistant's event loop.
+Bermuda added after BPS starts also triggers one asynchronous preparation per
+entry roster; concurrent reads share that request and missing APIs keep their
+legacy fallback without a per-cycle retry.
 
 Full diagnostics also include the direct source choice/fallback reason,
 scanner bindings, raw/filtered RSSI and ranges, source and accepted-data ages,

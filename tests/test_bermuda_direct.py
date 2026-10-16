@@ -518,6 +518,51 @@ def test_api_preparation_skips_loaded_module_and_absent_bermuda(hass, monkeypatc
     asyncio.run(module.async_prepare_api(hass))
 
 
+@pytest.mark.parametrize("available", [True, False])
+def test_bermuda_added_after_bps_setup_gets_one_nonblocking_preparation(hass, monkeypatch, available):
+    from bps import bermuda_direct as module
+    async def scenario():
+        data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch)
+        api = sys.modules["custom_components.bermuda.api"]
+        monkeypatch.delitem(sys.modules, "custom_components.bermuda.api")
+        entry = hass.config_entries.async_entries("bermuda")[0]
+        roster = []
+        hass.config_entries.async_entries = lambda _domain: roster
+        hass.async_create_task = asyncio.create_task
+        imports = []
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def import_api(_hass, name):
+            imports.append(name)
+            entered.set()
+            await release.wait()
+            if not available:
+                raise ModuleNotFoundError("Optional API absent")
+            monkeypatch.setitem(sys.modules, name, api)
+            return api
+        monkeypatch.setattr(module, "async_import_module", import_api)
+        await module.async_prepare_api(hass)  # Initial BPS setup without Bermuda.
+        assert imports == []
+        roster.append(entry)
+        for _ in range(5):
+            assert BermudaDirect(hass).needs_legacy
+        assert imports == []  # The constructor did not execute the import.
+        await asyncio.wait_for(entered.wait(), 1)
+        pending = hass.data["bps"]["_bermuda_api_prepare"]
+        for _ in range(5):
+            BermudaDirect(hass)
+            assert hass.data["bps"]["_bermuda_api_prepare"] is pending
+        release.set()
+        await asyncio.wait_for(pending, 1)
+        for _ in range(5):
+            sources = ReceiverSources(hass)
+            assert sources.direct.statuses[0]["path"] == ("direct" if available else "legacy")
+            if available:
+                assert sources.source("tag", data["floor"][0]["receivers"][0])[1].state == 6.0
+        await asyncio.sleep(0)
+        assert imports == ["custom_components.bermuda.api"]
+    asyncio.run(scenario())
+
+
 def test_direct_duplicate_receiver_placement_still_feeds_one_solver_input(hass, monkeypatch):
     data, entries, states, add, old, new, payloads, calls = prepared(hass, monkeypatch, outdoor=True)
     clone = copy.deepcopy(data["floor"][0]["receivers"][0])
