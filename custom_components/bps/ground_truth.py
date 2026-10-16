@@ -15,9 +15,9 @@ from .diagnostics import encode, format_known_position_report
 from .storage import finish_persistence, save_verified_store
 
 STORAGE_KEY = "bps_ground_truth"
-MAX_MARKS = 100
-MAX_BYTES = 16 * 1024 * 1024
-MAX_AGE_S = 7 * 86400
+MAX_MARKS = 500
+MAX_BYTES = 128 * 1024 * 1024
+MAX_AGE_S = 30 * 86400
 REQUEST_ID = re.compile(r"[a-zA-Z0-9_-]{16,80}\Z", re.ASCII)
 GUIDE = (
     "Each actual-location mark applies only at its captured snapshot instant. "
@@ -26,6 +26,10 @@ GUIDE = (
     "position solves retain separate clocks. GPS coordinates, map geometry and identifiers "
     "are private; this history stays in Home Assistant storage. No tracking or calibration is changed."
 )
+
+
+def retention_limits():
+    return {"max_marks": MAX_MARKS, "max_bytes": MAX_BYTES, "max_age_s": MAX_AGE_S}
 
 
 def prepare(snapshot, marker, request_id):
@@ -213,11 +217,7 @@ class GroundTruthHistory:
             "guide": GUIDE,
             "marks": [self._summary_cache.get(r["id"]) or summary(r) for r in records],
             "evicted": self.evicted,
-            "limits": {
-                "max_marks": MAX_MARKS,
-                "max_bytes": MAX_BYTES,
-                "max_age_s": MAX_AGE_S,
-            },
+            "limits": retention_limits(),
         }
 
     async def report_snapshot(self, now=None):
@@ -231,7 +231,7 @@ class GroundTruthHistory:
             await self.expire(now)
             records = tuple(self.recent(now))
             return {"status": "available" if records else "empty", "records": records,
-                    "evicted": self.evicted}
+                    "evicted": self.evicted, "limits": retention_limits()}
 
     async def append(self, record):
         data = await self.hass.async_add_executor_job(

@@ -46,6 +46,14 @@
         function render() {
             const target = hooks.getTarget();
             el('Panel').hidden = !target;
+            if (el('Retention')) {
+                const limits = overview.limits;
+                const valid = ['max_marks', 'max_bytes', 'max_age_s'].every(key => Number.isFinite(limits?.[key]) && limits[key] > 0);
+                el('Retention').textContent = `${overview.marks.length} snapshots retained in Home Assistant. `
+                    + (valid ? `Kept for up to ${Math.round(limits.max_age_s / 86400)} days, ${limits.max_marks} snapshots or ${Math.round(limits.max_bytes / 1048576)} MiB, whichever limit is reached first. ` : '')
+                    + 'Download the ZIP from BPS on your desktop later.'
+                    + (overview.evicted ? ` ${overview.evicted} older snapshots have already expired or been removed.` : '');
+            }
             el('Mark').disabled = busy || !!run || !target;
             el('SurveyPick').disabled = busy || !!run || !target;
             el('SurveyStart').disabled = busy || !!run || !spot;
@@ -123,7 +131,7 @@
                 const error = overview.saved.position_errors?.find(p => p.target === target);
                 message(`Saved ${overview.marks.filter(m => m.target === target).length} marks for this tracker.`
                     + (Number.isFinite(error?.error_m) && error.scored ? ` Current position error: ${error.error_m.toFixed(1)} m.` : '')
-                    + (overview.evicted ? ` ${overview.evicted} older marks expired or were evicted. Download the ZIP after each spot.` : '')
+                    + (overview.evicted ? ` ${overview.evicted} older marks expired or were evicted; see the retention limits below.` : '')
                     + ' You can mark another location at any time.');
             } finally {busy = false; render();}
         }
@@ -166,7 +174,7 @@
                     active.count++;
                     if (active.count === 5) {
                         stopSurvey(); render();
-                        message('5 snapshots saved. Download the diagnostic ZIP before moving to the next spot.');
+                        message('5 snapshots saved in Home Assistant. You can move to the next spot and download the ZIP from your desktop later.');
                         return;
                     }
                     // Space requests from completion, never catch up missed timers.
@@ -194,7 +202,7 @@
             } catch (error) {stopSurvey(); render(); message(error.message);}
         });
         el('SurveyStop').addEventListener('click', () => {
-            cancelPick(); stopSurvey('Survey stopped. Any snapshot already being saved may finish. Download before moving.'); render();
+            cancelPick(); stopSurvey('Survey stopped. Any snapshot already being saved may finish. Saved snapshots stay in Home Assistant for a later download.'); render();
         });
         function toggleFocus() {
             if (!focused) {
@@ -221,7 +229,7 @@
             try {
                 const result = await hooks.download();
                 if (!result?.ok) throw new Error(result?.error || 'Diagnostic download is unavailable.');
-                message('Diagnostic ZIP download started. Keep this file for analysis before choosing the next spot.');
+                message('Diagnostic ZIP download started. Keep this file for analysis.');
             } catch (error) {message('Could not download diagnostics: ' + error.message);}
             finally {busy = false; render();}
         });

@@ -331,10 +331,11 @@
                         </div>
                         <p id="liveTruthStatus" class="bps-hint" role="status">Select a dog, then mark where it actually is. Each mark saves an instant with BLE diagnostics.</p>
                         <button id="liveTruthDownload" type="button" class="bps-btn bps-btn-primary">Download diagnostic ZIP</button>
-                        <p class="bps-hint">Download after each spot before older snapshots are evicted. The ZIP includes raw Bermuda data, location marks and settings.</p>
+                        <p id="liveTruthRetention" class="bps-hint">Snapshots stay in Home Assistant. Open BPS on your desktop later to download the ZIP with raw Bermuda data, location marks and settings.</p>
                         <details><summary>Recent marks &amp; options</summary>
                             <div id="liveTruthHistory" class="bps-hint"></div>
                             <label for="liveTruthAccuracy">Location tolerance (m)</label><input id="liveTruthAccuracy" class="bps-input" type="number" inputmode="decimal" min="0" max="100" step="any" value="1">
+                            <p class="bps-hint">Include map/phone uncertainty and the dog's movement around the spot in this tolerance.</p>
                             <label for="liveTruthLabel">Note (optional)</label><input id="liveTruthLabel" class="bps-input" maxlength="240" placeholder="20 m from station; clear path">
                             <div class="bps-truth-actions">
                                 <button id="liveTruthCopy" type="button" class="bps-btn bps-btn-outline">Copy marked history</button>

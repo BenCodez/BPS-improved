@@ -922,7 +922,7 @@ dog stationary between marks or change tracking/calibration.
 The latest five marks show their measured position errors. **Copy marked
 history** exports all retained snapshots for analysis, including both members of
 a group. Marks survive integration/HA restarts in private `.storage/bps_ground_truth`
-and retain up to 100 snapshots and 16 MiB. Marks older than seven days are removed
+and retain up to 500 snapshots and 128 MiB. Marks older than 30 days are removed
 when history is accessed; expired and evicted counts are reported.
 Use the map's **Live** mode when marking. Existing stationary recording labels
 remain available for calibration validation.
@@ -940,10 +940,16 @@ Press **Stop / cancel spot** before moving. Collection also stops when the page
 is hidden, the selected tracker or saved map changes, live tracking ends, or a
 capture fails. A snapshot already being saved can finish after Stop; no further
 snapshot is scheduled. **Exit survey view** restores the normal controls and
-stops collection. Use **Download diagnostic ZIP** beside the map after each
-location, before older marks are evicted. The download includes raw Bermuda
+stops collection. Snapshots remain in Home Assistant, so you can collect on
+your phone and open BPS on a desktop later to use **Download diagnostic ZIP**.
+The retained count and current age/count/size limits appear beside the map;
+whichever limit is reached first removes the oldest snapshots. The larger
+ZIP export includes every retained mark and compresses saved captures one at
+a time. The download includes raw Bermuda
 measurements, retained location marks, settings and map context. Collect near
-and far samples with the same settings, and save the ZIP from every location.
+and far samples with the same settings. Existing saved marks are kept when
+upgrading; previously expired or evicted snapshots cannot be recovered by this
+change.
 
 Authenticated APIs: `GET /api/bps/ground_truth` lists marks;
 `GET /api/bps/ground_truth?download=1` exports their captured data. A local monitor
