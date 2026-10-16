@@ -981,6 +981,14 @@ that is stale, rejected or missing does not fall back to a newer HA publication
 of its old range. Pet/stationary held ranges retain their last accepted packet
 age, even when a newer raw spike arrives.
 
+The optional API is prepared through Home Assistant's import executor before
+BPS sensor setup. Tracking and diagnostics only read an already loaded API;
+an unavailable module keeps the legacy paths available without repeated
+filesystem imports on Home Assistant's event loop.
+Bermuda added after BPS starts also triggers one asynchronous preparation per
+entry roster; concurrent reads share that request and missing APIs keep their
+legacy fallback without a per-cycle retry.
+
 Full diagnostics also include the direct source choice/fallback reason,
 scanner bindings, raw/filtered RSSI and ranges, source and accepted-data ages,
 quality/rejection details, effective per-pair model/version, and up to five

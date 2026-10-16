@@ -5,8 +5,8 @@ still authoritative for covered pairs; availability failures alone enable legacy
 fallback. Names never prove device identity. All exported values are bounded and
 private BLE keys use Bermuda's public SHA-256 identity spelling.
 """
+import asyncio
 import hashlib
-import importlib
 import inspect
 import json
 import logging
@@ -18,6 +18,8 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from itertools import islice
 from types import SimpleNamespace
+
+from homeassistant.helpers.importlib import async_import_module
 
 MAX_ENTRIES = 32
 MAX_DEVICES = 256
@@ -85,6 +87,48 @@ def scanner_mac(row):
     return declared.lower() if isinstance(declared, str) and MAC.fullmatch(declared) else None
 
 
+async def async_prepare_api(hass):
+    """Load the optional API through HA's import executor before sensor setup."""
+    if "custom_components.bermuda.api" in sys.modules:
+        return
+    manager = getattr(hass, "config_entries", None)
+    if manager is None or not manager.async_entries("bermuda"):
+        return
+    # HA already coalesces concurrent imports. Remember only the current
+    # bounded entry roster so a missing optional API is not retried per cycle.
+    entries = manager.async_entries("bermuda")[:MAX_ENTRIES]
+    roster = tuple(getattr(entry, "entry_id", None) for entry in entries)
+    hass.data.setdefault("bps", {})["_bermuda_api_attempted"] = roster
+    try:
+        await async_import_module(hass, "custom_components.bermuda.api")
+    except asyncio.CancelledError:
+        bucket = hass.data.setdefault("bps", {})
+        if bucket.get("_bermuda_api_attempted") == roster:
+            bucket.pop("_bermuda_api_attempted", None)
+        raise
+    except Exception as err:
+        # Stock Bermuda need not supply this optional module. Constructors and
+        # tracking cycles must never retry filesystem imports on the event loop.
+        _LOGGER.debug("Optional Bermuda API import unavailable (%s); using legacy sources", type(err).__name__)
+
+
+def _schedule_api_preparation(hass, entries):
+    """Notice Bermuda added after BPS setup without doing synchronous I/O."""
+    if not entries or not callable(getattr(hass, "async_create_task", None)):
+        return
+    # Constructors can also be used outside HA's running loop by offline tools.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    bucket = hass.data.setdefault("bps", {})
+    roster = tuple(getattr(entry, "entry_id", None) for entry in entries[:MAX_ENTRIES])
+    pending = bucket.get("_bermuda_api_prepare")
+    if (pending is not None and not pending.done()) or bucket.get("_bermuda_api_attempted") == roster:
+        return
+    bucket["_bermuda_api_prepare"] = hass.async_create_task(async_prepare_api(hass))
+
+
 class BermudaDirect:
     """Discover a local API and detach each loaded entry separately."""
 
@@ -97,12 +141,8 @@ class BermudaDirect:
         self.entries = entries[:MAX_ENTRIES]
         self.entries_truncated = len(entries) > MAX_ENTRIES
         api = sys.modules.get("custom_components.bermuda.api")
-        if api is None and entries:
-            try:
-                api = importlib.import_module("custom_components.bermuda.api")
-            except Exception:
-                # Stock Bermuda need not provide this optional module.
-                api = None
+        if api is None:
+            _schedule_api_preparation(hass, entries)
         getter = getattr(api, "async_get_advert_snapshot", None)
         for entry in entries[:MAX_ENTRIES]:
             owner = getattr(entry, "entry_id", None)

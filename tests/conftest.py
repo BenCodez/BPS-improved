@@ -152,6 +152,11 @@ def _install_homeassistant_stubs():
     helpers.storage = sys.modules["homeassistant.helpers.storage"]
     _module("homeassistant.helpers.config_validation", config_entry_only_config_schema=lambda domain: lambda config: config)
     _module("homeassistant.helpers.event", async_track_state_change_event=lambda *a, **k: None)
+    async def _async_import_module(hass, name):
+        import importlib
+        return await hass.async_add_executor_job(importlib.import_module, name)
+
+    _module("homeassistant.helpers.importlib", async_import_module=_async_import_module)
     _module("homeassistant.helpers.template", Template=object)
     _module("homeassistant.core", HomeAssistant=object, callback=lambda f: f)
     _module("homeassistant.helpers.entity_registry")
