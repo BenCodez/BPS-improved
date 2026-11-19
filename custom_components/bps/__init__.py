@@ -266,8 +266,12 @@ def _safe_maps_child(maps_path, raw_name, allowed_exts=None):
         return None
     if allowed_exts is not None and Path(name).suffix.lower() not in allowed_exts:
         return None
-    base = Path(maps_path).resolve()
-    target = (base / name).resolve()
+    try:
+        base = Path(maps_path).resolve()
+        target = (base / name).resolve()
+    except (OSError, RuntimeError, ValueError):
+        # Names the filesystem cannot resolve are not files this folder holds.
+        return None
     try:
         if not target.is_relative_to(base):
             return None
@@ -275,6 +279,30 @@ def _safe_maps_child(maps_path, raw_name, allowed_exts=None):
         if base != target and base not in target.parents:
             return None
     return target
+
+
+def _safe_frontend_child(raw_name):
+    """Return one public frontend asset, never a path supplied by a client."""
+    # Unlike map uploads, the public route has no reason to normalize a path
+    # into a basename: panel assets are always individual files in FRONTEND_PATH.
+    # Reject separators instead, then retain the shared filesystem containment
+    # check as defense in depth for unusual path representations.
+    if not isinstance(raw_name, str) or not raw_name or "\x00" in raw_name:
+        return None
+    if raw_name != Path(raw_name).name or "/" in raw_name or "\\" in raw_name:
+        return None
+    return _safe_maps_child(FRONTEND_PATH, raw_name)
+
+
+def _frontend_asset_path(raw_name):
+    """Resolve and stat a public frontend asset for executor callers."""
+    try:
+        path = _safe_frontend_child(raw_name)
+        if path is None:
+            return None
+        return path if path.is_file() else None
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 # --- Receiver mount heights (optional per-receiver "height", metres) ---------
 # Bermuda's distance estimates are line-of-sight SLANT ranges, but the map
@@ -2975,14 +3003,20 @@ class BPSFrontendView(HomeAssistantView):
 
     async def get(self, request, file_name):
         """Serve static files from the frontend folder."""
-        frontend_path = FRONTEND_PATH / file_name
+        # This view is public so the custom panel can load before a session
+        # exists. Keep every client-supplied name inside the frontend folder,
+        # including names that the HTTP router has decoded after matching.
+        # resolve() and is_file() can touch the filesystem. Keep those off the
+        # Home Assistant event loop even though this is a small static route.
+        frontend_path = await request.app["hass"].async_add_executor_job(
+            _frontend_asset_path, file_name
+        )
 
-        _LOGGER.info(f"Serving file: {frontend_path}")
-
-        if not frontend_path.is_file():
-            _LOGGER.error(f"Requested file not found: {frontend_path}")
+        if frontend_path is None:
+            _LOGGER.error("Requested frontend file not found: %s", file_name)
             return web.Response(status=404, text="File not found")
 
+        _LOGGER.debug("Serving frontend file: %s", frontend_path)
         response = web.FileResponse(path=str(frontend_path))
         # The panel's script.js/CSS change on every integration update. Without
         # an explicit directive, browsers cache these heuristically and keep

@@ -163,6 +163,76 @@ def test_all_api_views_require_auth_static_stays_public():
         assert getattr(v, "requires_auth", None) is False, f"{v.__name__} must stay public"
 
 
+def test_public_frontend_view_uses_the_path_guard(monkeypatch):
+    """The public static route must delegate every name to the containment guard."""
+    seen = []
+
+    class Hass:
+        def __init__(self):
+            self.jobs = []
+
+        async def async_add_executor_job(self, func, *args):
+            self.jobs.append((func, args))
+            return func(*args)
+
+    class Request:
+        def __init__(self, hass):
+            self.app = {"hass": hass}
+
+    def reject(frontend, name):
+        seen.append((frontend, name))
+        return None
+
+    monkeypatch.setattr(bps, "_safe_maps_child", reject)
+    hass = Hass()
+    response = run(bps.BPSFrontendView().get(Request(hass), "script.js"))
+    assert response.status == 404
+    assert seen == [(bps.FRONTEND_PATH, "script.js")]
+    assert hass.jobs == [(bps._frontend_asset_path, ("script.js",))]
+
+
+def test_public_frontend_asset_name_resolves_in_the_frontend_folder():
+    got = bps._safe_frontend_child("script.js")
+    assert got is not None and got.name == "script.js"
+    assert got.parent == bps.FRONTEND_PATH.resolve()
+
+
+def test_public_frontend_asset_path_treats_resolution_failure_as_missing(monkeypatch):
+    def broken(_name):
+        raise RuntimeError("filesystem loop")
+
+    class Hass:
+        async def async_add_executor_job(self, func, *args):
+            return func(*args)
+
+    class Request:
+        app = {"hass": Hass()}
+
+    monkeypatch.setattr(bps, "_safe_frontend_child", broken)
+    assert bps._frontend_asset_path("script.js") is None
+    assert run(bps.BPSFrontendView().get(Request(), "script.js")).status == 404
+
+
+def test_public_frontend_view_keeps_asset_cache_and_mime_headers(monkeypatch):
+    class FileResponse:
+        def __init__(self, path):
+            self.path = path
+            self.headers = {}
+
+    class Hass:
+        async def async_add_executor_job(self, func, *args):
+            return func(*args)
+
+    class Request:
+        app = {"hass": Hass()}
+
+    monkeypatch.setattr(bps.web, "FileResponse", FileResponse)
+    response = run(bps.BPSFrontendView().get(Request(), "script.js"))
+    assert bps.Path(response.path).name == "script.js"
+    assert response.headers["Cache-Control"] == "no-cache"
+    assert response.headers["Content-Type"] == "text/javascript"
+
+
 def test_delete_traversal_still_blocked(tmp_path):
     # Containment must still reject an attempt to escape the maps dir.
     hass = make_hass(tmp_path)
